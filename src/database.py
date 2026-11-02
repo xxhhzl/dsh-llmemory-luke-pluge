@@ -503,11 +503,18 @@ class Database:
         assert event is not None
         return event
 
-    def set_event_summary(self, event_id: int, summary: str) -> bool:
-        '''补充/覆盖事件摘要（doc：summary 可后续补充）；事件不存在返回 False。'''
+    def set_event_summary(self, event_id: int, summary: str | None) -> bool:
+        '''补充/覆盖事件摘要（doc：summary 可后续补充）；传 None 表示清空。'''
         with self._lock:
             cur = self._conn.execute(
                 "UPDATE event SET summary = ? WHERE id = ?", (summary, event_id))
+            return cur.rowcount == 1
+
+    def set_event_title(self, event_id: int, title: str) -> bool:
+        '''覆盖事件标题（摘要器产出新标题时用）。'''
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE event SET title = ? WHERE id = ?", (title, event_id))
             return cur.rowcount == 1
 
     def bump_event_cnt(self, event_id: int, by: int = 1) -> int | None:
@@ -684,6 +691,15 @@ class Database:
 
     def get_cognition(self, item_id: int) -> Cognition | None:
         return self._get_l3("cognition", Cognition, item_id)
+
+    def find_l3_id(self, table: str, event_id: int, content: str) -> int | None:
+        '''同一来源事件下是否已有相同内容的条目（幂等写入用）。'''
+        if table not in _L3_EXTRA:
+            raise ValueError(f"不支持的 l3 表: {table!r}")
+        row = self._conn.execute(
+            f"SELECT id FROM {table} WHERE source_event_id = ? AND content = ? "
+            f"ORDER BY id LIMIT 1", (event_id, content)).fetchone()
+        return int(row["id"]) if row else None
 
     def _list_l3(self, table: str, model, *, origin_project: str | None = None,
                  status: str = "active", kind: str | None = None,

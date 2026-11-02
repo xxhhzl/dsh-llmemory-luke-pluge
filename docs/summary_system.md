@@ -2,7 +2,7 @@
 
 > 状态：**草案**。摘要形态（单段 / 结构化）仍待定，用 `{SUMMARY_FORMAT}` 占位；
 > 经验与认知的字段已定稿（见 §5）。
-> **实现进度**：调用 A（摘要 + 新条目抽取）已落地于 `src/summary.py`；调用 B（批量裁决）待做。
+> **实现进度**：调用 A（摘要 + 新条目抽取）已落地于 `src/summary.py`；落库链路在 `src/ingest.py`；调用 B（批量裁决）待做。
 >
 > 调用方：外壳代理（`llm.request` / `llm.result`，帧定义见 [Transmission.md §3.13](Transmission.md#313-llmrequest--llmresult下--上请求应答配对)），内核不持有端点与凭据。
 > 生成时机：事件闭合后，**每个事件一次调用**，同时产出摘要、经验与认知条目。

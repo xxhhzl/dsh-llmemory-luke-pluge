@@ -188,6 +188,24 @@ CREATE VIRTUAL TABLE memory_fts USING fts5(
 - 写入与原表**同一事务**：`DELETE ... WHERE ref_kind=? AND ref_id=?` 再 `INSERT`，天然幂等。
 - 不回填历史数据：事件摘要补充（`set_event_summary`）时重新索引一次即可。
 
+## 写入链路（ingest）
+
+`src/ingest.py` 把一次摘要结果写进库，顺序固定：
+
+```
+BEGIN
+  1. event：新建（或复用切分器建好的 id）并写入标题/摘要
+  2. experience / cognition：按 source_event_id + content 幂等插入
+  3. memory_fts：event（title+summary）、每条 l3（content）
+  4. digest：最近 N 个事件 + 重要度 top3 的经验/认知，重新拼装
+COMMIT
+```
+
+- **失败口径**：摘要 `ok=False` 时只写事件（`summary=NULL`、标题保留），**不写 l3**，避免出现没有摘要的孤儿条目。
+- **幂等**：同一 `source_event_id` 下内容相同的条目直接复用旧 id，调用 B 重跑或事件重放不会产生重复行。
+- **digest 来源**：`ref_event_ids` 按时间升序存，注入时按顺序拼接。
+- **检索范围**：FTS 只索引 `content`（正文），`cues` 是候选召回的线索，不进全文索引。
+
 ## 可见范围：不设在表里
 
 人类记忆没有「可见范围」，项目隔离是检索策略，不是记忆属性。因此 l3 两表**不设 `scope` / `project_id`**，只存来源 `origin_project`（不可变）；检索时按

@@ -385,6 +385,12 @@ class TestFts(DatabaseCase):
         self.assertEqual(self.db.search_fts("旧内容"), [])
         self.assertTrue(self.db.search_fts("新内容"))
 
+    def test_special_characters_do_not_break_match(self):
+        exp = self.db.insert_experience(self._exp(content="修复 sys.stdin.reconfig 拼写"))
+        self.db.index_fts("experience", exp, "", "修复 sys.stdin.reconfig 拼写")
+        hits = self.db.search_fts("sys.stdin.reconfig")
+        self.assertEqual(hits[0]["ref_id"], exp)
+
     def test_rejects_unknown_kind(self):
         with self.assertRaises(ValueError):
             self.db.index_fts("memory", 1, "", "x")

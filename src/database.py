@@ -872,20 +872,26 @@ class Database:
                 (ref_kind, int(ref_id), title or "", body or ""))
 
     def search_fts(self, query: str, limit: int = 20) -> list[dict]:
-        '''全文检索；trigram 需要 ≥3 字符，更短的查询退回 LIKE。'''
+        '''全文检索；trigram 需要 ≥3 字符，更短的查询或语法错误退回 LIKE。'''
         q = (query or "").strip()
         if not q:
             return []
+        rows = []
         if len(q) >= 3:
-            rows = self._conn.execute(
-                "SELECT ref_kind, ref_id, title, body, bm25(memory_fts) AS rank "
-                "FROM memory_fts WHERE memory_fts MATCH ? ORDER BY rank LIMIT ?",
-                (q, limit)).fetchall()
-        else:
+            # FTS5 MATCH 里 "."、"-" 等是语法字符，整体加双引号当短语处理
+            phrase = '"' + q.replace('"', '""') + '"'
+            try:
+                rows = self._conn.execute(
+                    "SELECT ref_kind, ref_id, title, body, bm25(memory_fts) AS rank "
+                    "FROM memory_fts WHERE memory_fts MATCH ? ORDER BY rank LIMIT ?",
+                    (phrase, limit)).fetchall()
+            except sqlite3.OperationalError:
+                rows = []
+        if not rows:
             rows = self._conn.execute(
                 "SELECT ref_kind, ref_id, title, body, 0.0 AS rank "
-                "FROM memory_fts WHERE body LIKE ? LIMIT ?",
-                (f"%{q}%", limit)).fetchall()
+                "FROM memory_fts WHERE body LIKE ? OR title LIKE ? LIMIT ?",
+                (f"%{q}%", f"%{q}%", limit)).fetchall()
         return [dict(row) for row in rows]
 
     # ---- 统计 ----

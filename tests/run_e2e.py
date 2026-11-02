@@ -52,11 +52,14 @@ def main() -> int:
     parser.add_argument("--workdir", default=None)
     parser.add_argument("--keep", action="store_true", help="保留工作目录")
     parser.add_argument("--timeout", type=int, default=900)
+    parser.add_argument("--contradiction", action="store_true",
+                        help="追加一条与既有认知冲突的消息，验证 supersede")
     args = parser.parse_args()
 
     session = pick_session(args.session)
     messages = load_messages(session)
-    messages = messages[: args.limit]
+    if args.limit:
+        messages = messages[: args.limit]
     if not messages:
         raise SystemExit("会话没有可解析消息")
     print(f"会话 {session.session_id}｜截取 {len(messages)} 条消息"
@@ -65,6 +68,28 @@ def main() -> int:
     workdir = Path(args.workdir) if args.workdir else (
         ROOT / ".tmp" / "e2e" / datetime.now().strftime("%Y%m%d-%H%M%S") )
     workdir.mkdir(parents=True, exist_ok=True)
+
+    if args.contradiction:
+        # 预置一条旧认知，稍后用「换库」消息验证 supersede
+        from database import Cognition, Database
+        seed_db = Database(workdir / ".dsh-longmemory" / "memory.db")
+        seed_db.insert_cognition(Cognition(
+            subject="dsh-longmemory-plugin", content="数据库用 SQLite，尚未迁移 Postgres",
+            kind="constraint", importance=5, confidence=0.9,
+            origin_session="seed", source_event_id=1, cues=("数据库", "postgres"),
+            created_at=datetime.now().astimezone().isoformat()))
+        seed_db.close()
+        last = messages[-1]
+        seq = int(last["seq"])
+        messages = messages + [
+            {"msg_id": f"m_{seq + 1}", "seq": seq + 1, "role": "user",
+             "content": "换个话题：项目数据库已经从 SQLite 换成 Postgres 了，以后都按 Postgres 来。",
+             "ts": last["ts"]},
+            {"msg_id": f"m_{seq + 2}", "seq": seq + 2, "role": "assistant",
+             "content": "收到，已记录：数据库改用 Postgres，后续按 Postgres 处理。",
+             "ts": last["ts"]},
+        ]
+
     shell = ShellSim(workdir, model=args.model, session_id=session.session_id)
     shell.start()
     print(f"工作目录：{workdir}")
@@ -130,6 +155,19 @@ def main() -> int:
                       f"{len(payload['messages'])} 条正文")
             else:
                 print("memory_get 失败或超时")
+
+        if args.contradiction:
+            c = sqlite3.connect(db_path)
+            c.row_factory = sqlite3.Row
+            rows = c.execute(
+                "SELECT id, content, status, superseded_id FROM cognition "
+                "WHERE content LIKE '%Postgres%' OR content LIKE '%SQLite%' "
+                "ORDER BY id").fetchall()
+            print("supersede 检查:")
+            for row in rows:
+                print(f"  #{row['id']} [{row['status']}] superseded_id={row['superseded_id']} | "
+                      f"{row['content'][:50]}")
+            c.close()
 
         print(f"模型调用 {shell.model_calls} 次；错误 {len(shell.model_errors)} 次")
         if shell.model_errors:

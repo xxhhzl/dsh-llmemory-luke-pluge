@@ -355,7 +355,8 @@
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `messages` | integer | 处理的消息总数 |
+| `messages` | integer | 实际入库的新消息数 |
+| `duplicates` | integer | 因 `msg_id` 重复而跳过的条数（缺省 0） |
 | `events_created` | integer | 新建事件数 |
 | `events_resumed` | integer | 恢复的历史事件数 |
 | `segments_closed` | integer | 关闭的分段数 |

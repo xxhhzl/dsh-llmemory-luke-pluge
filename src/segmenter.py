@@ -442,10 +442,9 @@ def validate(result: SegmentationResult, messages: list):
             raise AssertionError(f"事件 {event.order} 为空")
         if not event.closed:
             raise AssertionError(f"事件 {event.order} 未闭合")
-        if event.seqs != sorted(event.seqs):
-            raise AssertionError(f"事件 {event.order} 的 seq 非升序")
-        if event.seqs != list(range(event.seqs[0], event.seqs[0] + len(event.seqs))):
-            raise AssertionError(f"事件 {event.order} 的 seq 不连续")
+        if event.seqs != sorted(set(event.seqs)):
+            raise AssertionError(f"事件 {event.order} 的 seq 非严格升序")
+        # seq 允许跳号：宿主的 seq 是会话内原始序号，外壳可能过滤过消息
         covered.extend(event.message_ids)
 
     if covered != [m.get("msg_id") for m in messages]:

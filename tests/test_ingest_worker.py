@@ -98,6 +98,19 @@ class TestProcess(WorkerCase):
             self.assertEqual(len(db.list_experiences()), 1)
             self.assertEqual(len(db.list_cognitions()), 1)
 
+    def test_duplicate_msg_id_is_skipped(self):
+        worker = make_worker(self.q, self.db_path)
+        msgs = messages() + [dict(messages()[0])]
+        payload = worker.process({
+            "job_id": "job_dup", "session_id": S1, "agent_id": "a1",
+            "messages": msgs, "origin_project": None,
+            "envelope": {"type": "ingest.request", "session_id": S1,
+                         "agent_id": "a1", "job_id": "job_dup"},
+        })
+        self.assertEqual(payload["summary"]["messages"], 2)
+        self.assertEqual(payload["summary"]["duplicates"], 1)
+        self.assertIn("跳过重复 1 条", payload["display"])
+
     def test_second_run_resumes_existing_event(self):
         worker = make_worker(self.q, self.db_path)
         job = {"job_id": "job_1", "session_id": S1, "agent_id": "a1",

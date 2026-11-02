@@ -292,7 +292,7 @@ class IngestWorker:
     def process(self, job: dict) -> dict:
         db = self._db_factory()
         try:
-            stored = self._store_messages(db, job)
+            stored, duplicates = self._store_messages(db, job)
             result = self._segment(db, job)
             counts = self._summarize_events(db, job, result)
             digest = db.get_digest(job["session_id"])
@@ -300,12 +300,15 @@ class IngestWorker:
             payload = {
                 "summary": {
                     "messages": stored,
+                    "duplicates": duplicates,
                     "events_created": counts["created"],
                     "events_resumed": counts["resumed"],
                     "segments_closed": counts["closed"],
                     "summaries": counts["summaries"],
                 },
-                "display": (f"已处理 {stored} 条消息：新建 {counts['created']} 个事件、"
+                "display": (f"已处理 {stored} 条消息"
+                            + (f"（跳过重复 {duplicates} 条）" if duplicates else "")
+                            + f"：新建 {counts['created']} 个事件、"
                             f"恢复 {counts['resumed']} 个、生成 {counts['summaries']} 条摘要"),
                 "digest": content,
                 "digest_tokens": estimate_tokens(content),
@@ -316,8 +319,10 @@ class IngestWorker:
         finally:
             db.close()
 
-    def _store_messages(self, db, job) -> int:
-        inserted = 0
+    def _store_messages(self, db, job) -> tuple:
+        """返回 (实际入库条数, 重复跳过条数)；按 msg_id 去重，重复不报错。"""
+        inserted = duplicates = 0
+        seen = set()
         now = base.get_cur_time()
         for item in job.get("messages") or []:
             try:
@@ -328,6 +333,10 @@ class IngestWorker:
             msg_id = str(item.get("msg_id") or "")
             if not msg_id:
                 continue
+            if msg_id in seen:
+                duplicates += 1
+                continue
+            seen.add(msg_id)
             message = database.Message(
                 session_id=job["session_id"], message_id=msg_id,
                 owner=job.get("agent_id") or "", seq=seq,
@@ -336,11 +345,13 @@ class IngestWorker:
                 occur_at=occur, created_at=now)
             if db.insert_message(message):
                 inserted += 1
+            else:
+                duplicates += 1
             db.insert_memory(database.Memory(
                 session_id=job["session_id"], message_id=msg_id,
                 owner=job.get("agent_id") or "", seq=seq,
                 occur_at=occur, created_at=now))
-        return inserted
+        return inserted, duplicates
 
     def _segment(self, db, job):
         cfg = config.get_config().get("split", {})

@@ -659,6 +659,22 @@ class TestAssembly(unittest.TestCase):
             validate(bad, [msg("m1", 0, "user", "a"), msg("m2", 1, "user", "b"),
                            msg("m3", 2, "user", "c")])
 
+    def test_validate_allows_non_contiguous_seq(self):
+        ok = SegmentationResult(
+            events=[Event(order=1, message_ids=["m1"], seqs=[0], closed=True),
+                    Event(order=2, message_ids=["m3"], seqs=[5], closed=True)],
+            decisions=[],
+        )
+        validate(ok, [msg("m1", 0, "user", "a"), msg("m3", 5, "user", "c")])
+
+    def test_validate_rejects_unsorted_seq(self):
+        bad = SegmentationResult(
+            events=[Event(order=1, message_ids=["m1", "m2"], seqs=[2, 1], closed=True)],
+            decisions=[],
+        )
+        with self.assertRaises(AssertionError):
+            validate(bad, [msg("m1", 2, "user", "a"), msg("m2", 1, "user", "b")])
+
     def test_summary_placeholder(self):
         title, summary = summarize_event([msg("m1", 0, "user", "把边框调细"),
                                           msg("m2", 1, "assistant", "已改成 1px")])

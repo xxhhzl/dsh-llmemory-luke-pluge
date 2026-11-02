@@ -701,6 +701,34 @@ class Database:
             f"ORDER BY id LIMIT 1", (event_id, content)).fetchone()
         return int(row["id"]) if row else None
 
+    def find_l3_candidates(self, table: str, *, subject: str | None = None,
+                           query: str | None = None,
+                           origin_project: str | None = None,
+                           limit: int = 5) -> list:
+        '''召回合并候选（active、未过期）：主体精确或内容 LIKE。'''
+        if table not in _L3_EXTRA:
+            raise ValueError(f"不支持的 l3 表: {table!r}")
+        model = Experience if table == "experience" else Cognition
+        clauses = ["status = 'active'", "(valid_to IS NULL OR valid_to > ?)"]
+        params: list = [base.get_cur_time()]
+        if origin_project is not None:
+            clauses.append("(origin_project IS NULL OR origin_project = ?)")
+            params.append(origin_project)
+        if subject and query:
+            clauses.append("(subject = ? OR content LIKE ?)")
+            params.extend([subject, f"%{query}%"])
+        elif subject:
+            clauses.append("subject = ?")
+            params.append(subject)
+        elif query:
+            clauses.append("content LIKE ?")
+            params.append(f"%{query}%")
+        params.append(limit)
+        rows = self._conn.execute(
+            f"SELECT * FROM {table} WHERE {' AND '.join(clauses)} "
+            f"ORDER BY importance DESC, id DESC LIMIT ?", params).fetchall()
+        return [model.from_row(row) for row in rows]
+
     def _list_l3(self, table: str, model, *, origin_project: str | None = None,
                  status: str = "active", kind: str | None = None,
                  limit: int = 50, include_expired: bool = False) -> list:

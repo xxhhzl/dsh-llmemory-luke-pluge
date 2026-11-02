@@ -195,7 +195,8 @@ CREATE VIRTUAL TABLE memory_fts USING fts5(
 ```
 BEGIN
   1. event：新建（或复用切分器建好的 id）并写入标题/摘要
-  2. experience / cognition：按 source_event_id + content 幂等插入
+  2. experience / cognition：按 source_event_id + content 幂等插入；
+     若带调用 B 的裁决，则按 new / supersede / invalidate 执行（新行、或旧行置 superseded/invalid）
   3. memory_fts：event（title+summary）、每条 l3（content）
   4. digest：最近 N 个事件 + 重要度 top3 的经验/认知，重新拼装
 COMMIT

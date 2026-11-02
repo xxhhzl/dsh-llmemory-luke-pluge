@@ -133,16 +133,42 @@
 | `action=supersede` 但 `target_id` 无效 | 降级为 `new`，记 `needs_review` |
 | `action=invalidate` 缺 `reason` | 丢弃该条，摘要照常入库 |
 
-## 6. 待定项
+## 6. 调用 B：合并裁决（`src/consolidate.py`）
+
+调用 A 拿到的条目一律是候选（`action=new`），真正落库前由调用 B 决定它和旧记忆的关系。
+
+```
+gather_candidates  ── 认知按 subject + content 召回；经验按 cues/content 召回
+      │               （只取 active、未过期、同 origin 可见范围，top-5）
+      ▼
+build_messages     ── 一次请求装多条「新条目 + 各自候选」
+      ▼
+parse_decisions    ── action ∈ new / supersede / invalidate；target 必须在候选里
+      ▼
+ingest.apply_summary(decisions=...)  ── 新行 / 取代 / 失效 + FTS + digest
+```
+
+| 情况 | 处理 |
+|---|---|
+| 没有任何候选 | 不调用模型，直接按 new 落库（省一次调用） |
+| 模型调用失败 / JSON 解析失败 | 全部按 new 落库，标记 `needs_review`（宁可重复，不丢记忆） |
+| `target_id` 不在候选里 / 动作非法 | 该条降级为 new |
+| `invalidate` 缺 reason | 降级为 new |
+| 落库 | `supersede` = 新行 + 旧行 `status='superseded'`；`invalidate` = 旧行 `status='invalid'` |
+
+调用 B 的 prompt 约束：只有候选里明确重复或冲突才动旧条目，不确定一律 `new`；不得编造 `target_id`。
+
+## 7. 待定项
 
 | 项 | 说明 |
 |---|---|
 | `{SUMMARY_FORMAT}` | 摘要形态：单段 200 字 / 结构化字段（目标·进展·结论·未决）。**单独讨论** |
 | 示例（few-shot） | 是否在提示词里放 1 条完整示例；放了更稳，但每次调用多约 300 token |
 
-## 7. 变更记录
+## 8. 变更记录
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v0.3 | 2026-11-02 | 补调用 B（合并裁决）流程与失败策略；实现进度更新到 ingest |
 | v0.2 | 2026-11-02 | 输出契约补 `experiences` / `cognitions` 字段与 `action/target_id/reason`；经验/认知字段定稿 |
 | v0.1 | 2026-11-02 | 初稿：硬约束、系统提示词、输入模板、输出契约；形态与经验字段待定 |

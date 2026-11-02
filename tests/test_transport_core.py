@@ -50,11 +50,11 @@ def take_all(q):
 
 
 def frame_json(**overrides):
-    """拼一帧合法信封（默认 ingest.request），供端到端用例复用。"""
+    """拼一帧合法信封（默认 library.query：已知但未注册），供端到端用例复用。"""
     frame = {
         "protocol_version": config.PROTOCOL_VERSION,
         "plugin_version": config.PLUGIN_VERSION,
-        "type": "ingest.request",
+        "type": "library.query",
         "request_id": "c-1",
         "job_id": None,
         "session_id": "s-1",
@@ -316,7 +316,7 @@ class TestEnvelope(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(field, "")
         self.assertIsInstance(data, dict)
-        self.assertEqual(data["type"], "ingest.request")
+        self.assertEqual(data["type"], "library.query")
         self.assertEqual(data["protocol_version"], config.PROTOCOL_VERSION)
         self.assertIsNone(data["job_id"])
 
@@ -430,7 +430,7 @@ class TestMainProcess(MainProcessCase):
         self.assertIn('"code":-32601', out)
 
     def test_known_but_unregistered_type_returns_32601(self):
-        proc = self.run_main(frame_json(type="ingest.request", data={}) + "\n")
+        proc = self.run_main(frame_json(type="library.query", data={}) + "\n")
         out = proc.stdout.decode("utf-8")
         self.assertEqual(proc.returncode, 0,
                          proc.stderr.decode("utf-8", "replace"))

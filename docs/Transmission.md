@@ -231,6 +231,8 @@
 
 ### 3.5 `ingest.request`（上）
 
+> **实现**：内核收到后立即回 `ingest.receipt`，把任务交给后台 `IngestWorker`（切分 → 摘要 → 合并裁决 → 落库），完成后由常驻写线程发出 `ingest.completed`。主线程只读 stdin，模型调用（`llm.request`/`llm.result`）在 worker 线程等待。
+
 > **作用**：把会话增量消息交给内核，触发幂等入库与事件切分；游标决定从哪条消息开始处理，`full=true` 时重扫整个会话。
 
 ```json

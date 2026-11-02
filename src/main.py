@@ -3,6 +3,7 @@ import sys
 import config
 import base
 import commands
+import ingest
 import llm
 import routo
 import error
@@ -20,14 +21,16 @@ def routo_init(routo_table: routo.routo_register):
     routo_table.register("config.get", config.config_get)
     routo_table.register("health", base.health)
     routo_table.register("shutdown", base.shutdown)
+    # 写入链路：立即回执，后台 worker 切分/摘要/落库
+    routo_table.register("ingest.request", ingest.ingest_request)
     # 外壳代理的模型调用应答：按 request_id 唤醒等待中的 worker
     routo_table.register("llm.result", llm.on_result)
 
 
 def drain(q: base.message_queue):
     '''
-    输出泵：把队列里积压的帧逐条按行写到 stdout，队列空即返回。
-    帧本身都是单行 JSON，故用空串作为「队列已空」的信号。
+    同步输出泵（保留给测试与脚本）：把队列里积压的帧逐条按行写到 stdout。
+    主循环不再调用它——异步帧由 base.start_writer 的常驻写线程输出。
     '''
     while True:
         out = q.recv()
@@ -51,6 +54,11 @@ def main():
     # 模型调用一律走外壳代理：先绑定队列，后续业务模块用 llm.get_client()
     llm.bind(message_q)
 
+    # 常驻写线程 + 后台 ingest worker：主线程只负责读 stdin 与分发，
+    # 模型调用（llm.request/llm.result）和异步帧都不会阻塞它。
+    writer_thread = base.start_writer(message_q)
+    ingest.start_worker(message_q)
+
     ## 注册路由
     routo_init(routo_table)
 
@@ -72,7 +80,6 @@ def main():
                 error.send_error_message({}, message_q, -32601, "未知 type", payload)
             else:
                 error.send_error_message({}, message_q, -32700, "JSON 解析失败", payload)
-            drain(message_q)
             continue
 
         data = payload
@@ -86,7 +93,6 @@ def main():
             error.send_error_message(
                 data, message_q, -32600, "协议版本不兼容",
                 f"本插件 {config.PROTOCOL_VERSION}，收到 {data.get('protocol_version')}")
-            drain(message_q)
             continue
 
         # 分发：未注册的 type 回 -32601，处理器异常回 -32603
@@ -99,18 +105,22 @@ def main():
             error.send_error_message(data, message_q, -32601, "未知 type",
                                      f"未注册的 type: {data.get('type')}")
 
-        # 每帧处理结束后冲刷一次队列（同步 drain）。
-        # 注意：后续 ingest.completed 为异步帧，届时需改为常驻写线程。
-        drain(message_q)
-
-        # shutdown 已置位：队列已冲干净，收尾退出
+        # shutdown 已置位：等写线程排空队列、停掉它，再退出
         if base.shutdown_requested:
-            base.log.info("kernel.stopped", drain_ms=base.shutdown_drain_ms)
+            drained = base.wait_drained(message_q, base.shutdown_drain_ms / 1000)
+            base.stop_writer()
+            writer_thread.join(timeout=1.0)
+            base.log.info("kernel.stopped", drain_ms=base.shutdown_drain_ms,
+                          drained=drained)
             base.clear_log_context()
             return
+
+    # stdin 结束（外壳关闭）：同样先排空再退出，避免 daemon 写线程在解释器收尾时抢 stdout 锁
+    base.wait_drained(message_q, 3.0)
+    base.stop_writer()
+    writer_thread.join(timeout=1.0)
 
 
 
 if __name__ == "__main__":
     main()
-

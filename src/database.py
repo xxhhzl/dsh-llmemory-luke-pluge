@@ -601,6 +601,15 @@ class Database:
             "SELECT * FROM event WHERE id = ?", (event_id,)).fetchone()
         return Event.from_row(row) if row else None
 
+    def event_for_message(self, session_id: str, message_id: str) -> int | None:
+        '''消息已归属的事件 id；未归属返回 None（切分时用于判重）。'''
+        row = self._conn.execute(
+            "SELECT event_id FROM memory WHERE session_id = ? AND message_id = ?",
+            (session_id, message_id)).fetchone()
+        if row is None or row["event_id"] is None:
+            return None
+        return int(row["event_id"])
+
     def list_events(self, session_id: str, limit: int = 50,
                     descending: bool = True, order_by: str = "id") -> list[Event]:
         '''按会话取事件；order_by 支持 id（默认，时间序）与 cnt（使用次数，热度序）。'''

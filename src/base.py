@@ -6,6 +6,7 @@ import os
 import queue
 import sqlite3
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -73,6 +74,13 @@ class message_queue:
 
         return res
 
+    def recv_blocking(self, timeout: float | None = None) -> str:
+        '''等待取一条消息；超时返回 ""（供常驻写线程使用）。'''
+        try:
+            return self._q.get(timeout=timeout)
+        except queue.Empty:
+            return ""
+
     def task_done(self):
         '''
         必须在消费完成后调用此方法
@@ -89,6 +97,44 @@ class message_queue:
 # 由 shutdown 处理函数置位，主循环据此收尾退出
 shutdown_requested = False
 shutdown_drain_ms = 0
+
+# 常驻写线程：异步帧（ingest.completed 等）由它统一写 stdout，
+# 主线程只读 stdin，不被模型调用或输出阻塞。
+_writer_stop = threading.Event()
+
+
+def start_writer(q: message_queue, stream=None,
+                 interval: float = 0.1) -> threading.Thread:
+    '''启动 stdout 写线程；进程退出时随之结束（daemon）。'''
+    import sys
+
+    out = stream or sys.stdout
+    _writer_stop.clear()
+
+    def loop():
+        while not _writer_stop.is_set():
+            item = q.recv_blocking(interval)
+            if item:
+                out.write(item + "\n")
+                out.flush()
+
+    thread = threading.Thread(target=loop, name="stdout-writer", daemon=True)
+    thread.start()
+    return thread
+
+
+def stop_writer():
+    _writer_stop.set()
+
+
+def wait_drained(q: message_queue, timeout: float = 3.0) -> bool:
+    '''等待写线程把队列排空；超时返回 False。'''
+    deadline = time.monotonic() + max(0.0, timeout)
+    while q.depth() > 0:
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+    return True
 
 
 def _db_ok(cfg: dict) -> bool:

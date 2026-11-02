@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# pip 临时目录（TEMP 不可写时会落到项目根目录）
+pip-*/
+pip-*.log
+.tmp/
+
+# IDE
+.idea/
+
+# 密钥
+.env
+**/.env
+
+# 本地数据
+.dsh-longmemory/
+*.db
+*.db-wal
+*.db-shm

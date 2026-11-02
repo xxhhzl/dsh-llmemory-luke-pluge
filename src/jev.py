@@ -69,8 +69,12 @@ def gap_minutes(prev_ts: str, cur_ts: str) -> Optional[float]:
 
 
 def truncate(text: str, head: int = HEAD_CHARS, tail: int = TAIL_CHARS) -> str:
-    """头 N + …（省略 K 字）… + 尾 M。"""
+    """头 N + …（省略 K 字）… + 尾 M；tail<=0 表示只保留头部。"""
     text = str(text or "")
+    if tail <= 0:
+        if len(text) <= head:
+            return text
+        return f"{text[:head]}…（省略 {len(text) - head} 字）…"
     if len(text) <= head + tail:
         return text
     omitted = len(text) - head - tail
@@ -140,6 +144,11 @@ def _render_message(message: dict, mode: str) -> str:
     if role == "tool":
         return _render_tool(message, mode)
     return truncate(text, HEAD_CHARS, TAIL_CHARS)
+
+
+def render_message(message: dict, mode: str = "digest") -> str:
+    """把一条消息渲染成可读文本（摘要器与判定器共用）。"""
+    return _render_message(message, mode)
 
 
 def build_state(message: dict, prev_message: Optional[dict], *,

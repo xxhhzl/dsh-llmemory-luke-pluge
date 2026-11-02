@@ -207,6 +207,14 @@ class Event:
     related_events: tuple[int, ...] = field(default_factory=tuple)
     cnt: int = 0            # 被使用/召回次数，新建为 0，用于查询排序
 
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id, "session_id": self.session_id, "title": self.title,
+            "summary": self.summary, "created_at": self.created_at,
+            "prev_event_id": self.prev_event_id, "next_event_id": self.next_event_id,
+            "related_events": list(self.related_events), "cnt": self.cnt,
+        }
+
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Event":
         raw = row["related_events"]

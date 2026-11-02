@@ -16,6 +16,7 @@ def routo_init(routo_table: routo.routo_register):
     由 JS 外壳发同名请求帧索取，内核按同一 type 应答。
     '''
     routo_table.register("tools.schema", tools.get_tools_schema)
+    routo_table.register("tools.calls", tools.tools_call)
     routo_table.register("commands", commands.get_commands)
     routo_table.register("config.set", config.config_set)
     routo_table.register("config.get", config.config_get)

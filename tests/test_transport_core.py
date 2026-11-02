@@ -193,7 +193,7 @@ class TestToolsSchema(QueueCase):
         self.assertEqual(frame["plugin_version"], config.PLUGIN_VERSION)
         # 中文不得被 \uXXXX 转义
         self.assertNotIn("\\u", raw)
-        self.assertIn("查找记忆", raw)
+        self.assertIn("检索长期记忆", raw)
         self.assertNotIn("\n", raw)
 
     def test_tool_definition_shape(self):
@@ -204,7 +204,7 @@ class TestToolsSchema(QueueCase):
         self.assertEqual(params["type"], "object")
         self.assertEqual(params["required"], ["query"])
         self.assertIs(params["additionalProperties"], False)
-        self.assertEqual(set(params["properties"]), {"query", "limit"})
+        self.assertEqual(set(params["properties"]), {"query", "limit", "kind", "scope"})
         # pydantic 的 title 噪声应被去掉
         for spec in params["properties"].values():
             self.assertNotIn("title", spec)

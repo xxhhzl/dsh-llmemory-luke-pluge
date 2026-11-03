@@ -72,11 +72,12 @@ CREATE TABLE event (
   origin_project TEXT,
   summarized_at  TEXT,
   needs_review   INTEGER NOT NULL DEFAULT 0,
-  review_reason  TEXT
+  review_reason  TEXT,
+  last_used_at   TEXT
 );
 ```
 
-十三列。事件没有状态字段：一次 `/memory` 执行完毕即视为该批事件全部归档。
+十四列。事件没有状态字段：一次 `/memory` 执行完毕即视为该批事件全部归档。
 
 | 字段 | 来源 | 作用 |
 |---|---|---|
@@ -184,17 +185,24 @@ CREATE TABLE digest (
 
 ```sql
 CREATE VIRTUAL TABLE memory_fts USING fts5(
-  ref_kind UNINDEXED,   -- event / experience / cognition
-  ref_id   UNINDEXED,
+  ref_kind       UNINDEXED,   -- event / experience / cognition
+  ref_id         UNINDEXED,
   title,
   body,
+  origin_project UNINDEXED,   -- 范围列：召回前按项目过滤
+  session_id     UNINDEXED,   -- 事件按来源会话、l3 按 origin_session
   tokenize='trigram'
 );
 ```
 
 - `trigram` 支持中文子串（`数据库`、`SQLite` 都能命中）；查询短于 3 字符时退回 `LIKE` 扫描。
 - 写入与原表**同一事务**：`DELETE ... WHERE ref_kind=? AND ref_id=?` 再 `INSERT`，天然幂等。
-- 不回填历史数据：事件摘要补充（`set_event_summary`）时重新索引一次即可。
+- 老库没有范围列时一次性迁移：`DROP` + `CREATE` + 全量回灌放在**同一事务**里
+  （`_ensure_fts_scope_columns`），中途失败整体回滚，不会留下“列已补齐但内容为空”的索引。
+- 回灌只收 `status = 'active'` 的 l3：superseded / invalid 在失效时已经删过索引，
+  全量回灌会把它们重新塞回召回窗口。
+- 范围列写事件自身的归属（`event.origin_project`），不是本次 job 的项目——
+  全局事件被某个项目续写后仍应全局可见。
 
 ## 写入链路（ingest）
 
@@ -206,11 +214,15 @@ BEGIN
   2. experience / cognition：按 source_event_id + content 幂等插入；
      若带调用 B 的裁决，则按 new / supersede / invalidate 执行（新行、或旧行置 superseded/invalid）
   3. memory_fts：event（title+summary）、每条 l3（content）
-  4. digest：最近 N 个事件 + 重要度 top3 的经验/认知，重新拼装
 COMMIT
 ```
 
-- **失败口径**：摘要 `ok=False` 时只写事件（`summary=NULL`、标题保留），**不写 l3**，避免出现没有摘要的孤儿条目。
+digest 不在这个事务里：`refresh_digest` 在提交之后跑（批处理时一个 job 只刷一次），
+摘要失败回滚不会连带丢掉工作记忆的旧版本。
+
+- **失败口径**：摘要 `ok=False` 时，新建事件只写事件（`summary=NULL`、标题保留），**不写 l3**，
+  避免出现没有摘要的孤儿条目；已存在事件补摘要失败时**保留上一次的摘要与 `summarized_at`**，
+  只置 `needs_review=1`，等下一次补跑。
 - **幂等**：同一 `source_event_id` 下内容相同的条目直接复用旧 id，调用 B 重跑或事件重放不会产生重复行。
 - **digest 来源**：`ref_event_ids` 按时间升序存，注入时按顺序拼接。
 - **检索范围**：FTS 只索引 `content`（正文），`cues` 是候选召回的线索，不进全文索引。

@@ -409,6 +409,9 @@ class Database:
         self._conn.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
         self._conn.execute("PRAGMA journal_mode = WAL")
         self._conn.execute("PRAGMA synchronous = NORMAL")
+        # 临时表放内存：沙箱/受限环境里系统临时目录可能不可写，
+        # 而 FTS5 的 DROP/CREATE 会用到临时存储（表现为 unable to open database file）
+        self._conn.execute("PRAGMA temp_store = MEMORY")
         self.init_schema()
 
     # ---- 生命周期 ----
@@ -540,6 +543,8 @@ class Database:
         if "origin_project" in columns and "session_id" in columns:
             return
         base.log.warning("db.fts_scope_columns_missing", existing=columns)
+        # DROP / CREATE / 回灌必须在同一个事务里：拆开的话，回灌中途失败会留下
+        # “列已补齐但内容为空”的索引，下次启动因为列存在直接 return，永不自愈。
         with self.transaction() as conn:
             conn.execute("DROP TABLE IF EXISTS memory_fts")
             conn.execute(
@@ -547,32 +552,39 @@ class Database:
                 "ref_kind UNINDEXED, ref_id UNINDEXED, title, body, "
                 "origin_project UNINDEXED, session_id UNINDEXED, "
                 "tokenize='trigram')")
-        self.reindex_fts()
+            counts = self._reindex_fts_conn(conn)
+        base.log.info("db.fts_reindexed", **counts)
 
     def reindex_fts(self) -> dict:
         '''从源表重建全文索引，返回各类型重建条数。'''
-        counts = {"event": 0, "experience": 0, "cognition": 0}
         with self.transaction() as conn:
-            conn.execute("DELETE FROM memory_fts")
+            return self._reindex_fts_conn(conn)
+
+    def _reindex_fts_conn(self, conn) -> dict:
+        '''reindex 的实际动作；接收连接是为了能并入调用方的事务。'''
+        counts = {"event": 0, "experience": 0, "cognition": 0}
+        conn.execute("DELETE FROM memory_fts")
+        for row in conn.execute(
+                "SELECT id, title, summary, origin_project, session_id FROM event"
+        ).fetchall():
+            conn.execute(
+                "INSERT INTO memory_fts (ref_kind, ref_id, title, body, "
+                "origin_project, session_id) VALUES ('event', ?, ?, ?, ?, ?)",
+                (row["id"], row["title"], row["summary"] or "",
+                 row["origin_project"], row["session_id"]))
+            counts["event"] += 1
+        # 只回灌仍在生效的 l3：superseded / invalid 的索引在失效时就删过，
+        # 全量回灌会把它们重新塞回召回窗口，占掉 top-k 名额。
+        for table in ("experience", "cognition"):
             for row in conn.execute(
-                    "SELECT id, title, summary, origin_project, session_id FROM event"
-            ).fetchall():
+                    f"SELECT id, content, origin_project, origin_session "
+                    f"FROM {table} WHERE status = 'active'").fetchall():
                 conn.execute(
                     "INSERT INTO memory_fts (ref_kind, ref_id, title, body, "
-                    "origin_project, session_id) VALUES ('event', ?, ?, ?, ?, ?)",
-                    (row["id"], row["title"], row["summary"] or "",
-                     row["origin_project"], row["session_id"]))
-                counts["event"] += 1
-            for table in ("experience", "cognition"):
-                for row in conn.execute(
-                        f"SELECT id, content, origin_project, origin_session "
-                        f"FROM {table}").fetchall():
-                    conn.execute(
-                        "INSERT INTO memory_fts (ref_kind, ref_id, title, body, "
-                        "origin_project, session_id) VALUES (?, ?, '', ?, ?, ?)",
-                        (table, row["id"], row["content"],
-                         row["origin_project"], row["origin_session"]))
-                    counts[table] += 1
+                    "origin_project, session_id) VALUES (?, ?, '', ?, ?, ?)",
+                    (table, row["id"], row["content"],
+                     row["origin_project"], row["origin_session"]))
+                counts[table] += 1
         return counts
 
     def _rollback_to(self, name: str):
@@ -1274,6 +1286,18 @@ class Database:
         else:
             row = self._conn.execute(
                 "SELECT COUNT(*) AS n FROM message WHERE session_id = ?",
+                (session_id,)).fetchone()
+        return int(row["n"])
+
+    def count_l3(self, table: str, session_id: str | None = None) -> int:
+        '''统计经验/认知条数（含历史行，按来源会话可选过滤）。'''
+        if table not in _L3_EXTRA:
+            raise ValueError(f"不支持的 l3 表: {table!r}")
+        if session_id is None:
+            row = self._conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()
+        else:
+            row = self._conn.execute(
+                f"SELECT COUNT(*) AS n FROM {table} WHERE origin_session = ?",
                 (session_id,)).fetchone()
         return int(row["n"])
 

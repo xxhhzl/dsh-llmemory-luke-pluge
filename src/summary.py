@@ -20,7 +20,8 @@ from jev import render_message, truncate
 from llm import LlmError
 
 TITLE_MAX = 24
-SUMMARY_MAX = 200
+SUMMARY_MAX = 200          # l3 条目（经验/认知）的一句话上限
+EVENT_SUMMARY_MAX = 400    # 事件摘要：要给检索与界面读，需要一段而不是一句
 CONTEXT_MAX = 120
 SUBJECT_MAX = 40
 CUE_MAX = 10
@@ -298,7 +299,7 @@ def parse_result(raw: str, *, allow_actions: bool = False) -> SummaryResult:
         return SummaryResult(ok=False, error="json_parse", raw=raw, needs_review=True)
 
     title = _clip(data.get("title"), TITLE_MAX)
-    summary = _clip(data.get("summary"), SUMMARY_MAX)
+    summary = _clip(data.get("summary"), EVENT_SUMMARY_MAX)
     if not summary:
         return SummaryResult(ok=False, title=title, error="empty_summary",
                              raw=raw, needs_review=True)
@@ -339,7 +340,7 @@ def parse_result(raw: str, *, allow_actions: bool = False) -> SummaryResult:
         cognitions=tuple(cognitions),
         needs_review=review,
         raw=raw,
-        truncated=len(str(data.get("summary") or "")) > SUMMARY_MAX,
+        truncated=len(str(data.get("summary") or "")) > EVENT_SUMMARY_MAX,
     )
 
 

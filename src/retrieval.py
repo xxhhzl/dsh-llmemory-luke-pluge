@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""记忆检索：主流 IR（FTS + RRF + 精排）叠加人类记忆的激活模型。
+"""记忆检索：FTS 召回 + 名次折减 + 精排，叠加人类记忆的激活模型。
 
 三段流水线：
 1. 召回：FTS5（trigram）取 top-N；<3 字符查询退回 LIKE；可选联想扩展；
-2. 融合：单路时用名次折减，双路以上用 RRF(k=60)；
+2. 融合：单路按名次折减 rel = 1/(1+rank)（v2 加向量通道后再引入 RRF(k=60)）；
 3. 精排：final = α·rel + (1-α)·Strength，Strength 里含 ACT-R 激活、
    重要性、确信度、情境匹配与联想来源。
 
@@ -20,7 +20,6 @@ import base
 import config
 import database
 
-RRF_K = 60
 DEFAULT_ALPHA = 0.6
 DEFAULT_EXPLORE_RATIO = 0.1
 DEFAULT_MAX_PER_CLUSTER = 2
@@ -68,8 +67,17 @@ def activation(use_count: int, last_used_at: str | None, created_at: str | None,
 
 
 def _minmax(values: list) -> list:
+    '''
+    组内归一到 [0, 1]。
+
+    单个元素直接给 1.0：它既是最大值也是最小值，给 0.5 会让"只命中一条事件"
+    永远输给"命中两条经验"里的第一名（跨 kind 融合被系统性拉偏）。
+    多个元素但全等时没有相对信息，给 0.5 保持中性。
+    '''
     if not values:
         return []
+    if len(values) == 1:
+        return [1.0]
     low, high = min(values), max(values)
     if high - low < 1e-9:
         return [0.5 for _ in values]
@@ -162,7 +170,6 @@ def _weights() -> dict:
         "w_project": float(search.get("w_project", 0.10)),
         "explore_ratio": float(search.get("explore_ratio", DEFAULT_EXPLORE_RATIO)),
         "max_per_cluster": int(search.get("max_per_cluster", DEFAULT_MAX_PER_CLUSTER)),
-        "rrf_k": int(search.get("rrf_k", RRF_K)),
         "cross_project_penalty": float(search.get("cross_project_penalty", 0.0)),
     }
 
@@ -299,6 +306,18 @@ def _select(scored: list, limit: int, weights: dict) -> list:
             if _use_count(item[3], item[1]) != 0:
                 continue
             add(item)
+
+    # 回填：簇上限只用来“别让同源条目刷屏”，不该让结果欠填。
+    # 前面两轮被上限挡掉的候选，在还有空位时按分数补回来。
+    if len(selected) < min(limit, len(scored)):
+        for item in scored:
+            if len(selected) >= limit:
+                break
+            key = (item[1], item[2])
+            if key in keys:
+                continue
+            selected.append(item)
+            keys.add(key)
     return selected
 
 

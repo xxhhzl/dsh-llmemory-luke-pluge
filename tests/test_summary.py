@@ -103,7 +103,7 @@ class TestParse(unittest.TestCase):
         raw = json.dumps({"title": "标" * 50, "summary": "摘" * 500}, ensure_ascii=False)
         result = parse_result(raw)
         self.assertEqual(len(result.title), 24)
-        self.assertEqual(len(result.summary), 200)
+        self.assertEqual(len(result.summary), 400, "事件摘要上限 400 字（l3 条目仍是 200）")
         self.assertTrue(result.truncated)
 
     def test_invalid_items_dropped_and_flagged(self):

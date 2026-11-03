@@ -183,6 +183,34 @@ def memory_recent(from_at, to_at, session_id=None, limit=10,
     return {"items": [hit.to_dict() for hit in hits], "count": len(hits)}
 
 
+# ---------------- 运行状态 ----------------
+
+def stats(data, q: base.message_queue):
+    '''
+    stats：给外壳的设置页用——库路径、条数、当前会话最近事件。
+    只报告现状，不改内容、不计使用次数。
+    '''
+    db = _db()
+    session_id = data.get("session_id") or ""
+    latest = None
+    if session_id:
+        events = db.list_events(session_id, limit=1)
+        if events:
+            event = events[0]
+            latest = {"id": event.id, "title": event.title,
+                      "summary": event.summary, "created_at": event.created_at,
+                      "needs_review": bool(event.needs_review)}
+    frame.push(q, data, "stats", {
+        "db_path": str(db.path),
+        "messages": db.count_messages(),
+        "events": db.count_events(),
+        "experiences": db.count_l3("experience"),
+        "cognitions": db.count_l3("cognition"),
+        "session_id": session_id,
+        "latest_event": latest,
+    })
+
+
 # ---------------- 下发与执行 ----------------
 
 def get_tools_schema(data, q: base.message_queue):

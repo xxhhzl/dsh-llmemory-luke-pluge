@@ -2,6 +2,7 @@ from typing import Literal
 from pydantic import  BaseModel, Field, ValidationError
 
 import copy
+import os
 import time
 
 import base
@@ -25,7 +26,7 @@ FrameType = Literal[
     "ingest.request", "ingest.receipt", "ingest.completed",
     "library.query", "library.data", "notify",
     "llm.request", "llm.result",
-    "error", "config.set", "config.get", "health", "shutdown",
+    "error", "config.set", "config.get", "health", "shutdown", "stats", "admin",
 ]
 
 class Link_Json(BaseModel):
@@ -100,7 +101,6 @@ DEFAULT_CONFIG = {
     },
     "search": {
         "limit_max": 20,               # memory_search 的 limit 上限（运行时 clamp）
-        "rrf_k": 60,                   # RRF 融合常数
         "min_score": 0.0,              # 默认分数下限
         "default_scope": "all",        # project / all；外壳开始透传 origin_project 后可切 project
         "alpha": 0.6,                  # 精排：相关性占比（其余为记忆强度）
@@ -127,7 +127,6 @@ _LEAF_SPEC = {
     "split.max_event_tokens": {"type": int, "min": 500, "max": 200000},
     "split.max_messages": {"type": int, "min": 1, "max": 5000},
     "search.limit_max": {"type": int, "min": 1, "max": 100},
-    "search.rrf_k": {"type": int, "min": 1, "max": 1000},
     "search.min_score": {"type": float, "min": 0.0, "max": 1.0},
     "search.default_scope": {"type": str, "enum": {"project", "all"}},
     "search.alpha": {"type": float, "min": 0.0, "max": 1.0},
@@ -143,6 +142,10 @@ _LEAF_SPEC = {
     "store.queue_max": {"type": int, "min": 1, "max": 1000000},
     "log.level": {"type": str, "enum": {"debug", "info", "warn", "error"}},
 }
+
+# 外壳通过环境变量指定库路径：内核进程的 cwd 与日志目录都不再依赖相对路径
+if os.environ.get("DSH_LONGMEMORY_DB"):
+    DEFAULT_CONFIG["store"]["db_path"] = os.environ["DSH_LONGMEMORY_DB"]
 
 _config = copy.deepcopy(DEFAULT_CONFIG)
 _revision = 1

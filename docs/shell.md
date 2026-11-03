@@ -1,0 +1,125 @@
+# JS 外壳（src/js）与插件包（release/）
+
+> 内核协议见 [Transmission.md](Transmission.md)；工具契约见 [tools.md](tools.md)。
+> 安装说明与配置表见 [release/README.md](../release/README.md)。
+
+## 1. 职责边界
+
+| 层 | 位置 | 负责 | 不负责 |
+|---|---|---|---|
+| Python 内核 | `src/*.py` | 切分、摘要、裁决、存储、检索 | 网络、模型凭据、宿主事件 |
+| JS 外壳 | `src/js/` | 进程管理、帧转发、会话订阅、工具注册 | 记忆算法 |
+| 插件包 | `release/` | Harness 清单、补丁、展示资源、打包产物 | — |
+
+模型调用一律由外壳经 `ctx.llm` 完成：内核只发 `llm.request`（messages + purpose），
+外壳回 `llm.result`。这保证内核无凭据、可离线测试。
+
+## 2. 外壳结构
+
+```
+src/js/
+├── index.js        插件 entry（name / inject / Config / apply）+ createShell
+├── client.js       浏览器侧：设置 → 「长期记忆」页（settings.section）
+├── kernel.js       spawn Python、按行收发、request_id 配对、stderr 落盘
+├── frames.js       信封构造/解析（protocol_version 1.0）
+├── llm-bridge.js   llm.request → prepareCall + BlockAssembler → llm.result
+├── tools-bridge.js tools.schema → defineTool 注册；调用回灌 tools.calls
+├── ingest-bridge.js session/event → 按会话去抖 → ingest.request
+├── commands.js     斜杠命令 /memory（立即切分当前会话）
+└── stats-route.js  /longmemory/{stats,api,logs}（设置页数据 + 管理 API，仅回环）
+```
+
+### 用户可见入口
+
+| 入口 | 实现 | 说明 |
+|---|---|---|
+| `/memory` 斜杠命令 | `ctx.commands.register` | 立即 flush 去抖缓冲并切分；命令结果就地回显，不进入模型消息 |
+| 设置 → 长期记忆 | `settings.section` 槽位（`id: longmemory`） | 8 个标签：概况 + 事件/经验/认知/消息/引用/工作记忆（通用表格增删查改）+ 日志 |
+| `GET /longmemory/stats` | `webServer` 前缀路由 | 概况数据；内核不可用时回 503 |
+| `POST /longmemory/api` | 同上 | 管理 API：`tables / list / get / insert / update / delete` |
+| `GET /longmemory/logs` | 同上 | `shell.log` / `kernel.stderr.log` 尾部（≤1000 行） |
+
+### 管理界面（增删查改）
+
+- **边界**：模型工具仍然只追加（`memory_search/get/recent` 无写入口）；增删改只经
+  「设置 → 长期记忆」这个**人工入口**，且路由只接受**本机回环**请求（非回环回 403）。
+- **表驱动**：内核 `admin` 的 `tables` op 返回每张表的列与可写列，前端据此渲染表单；
+  新增表只改内核 `TABLES`，前端不用动。
+- **删除的连带处理**：删事件 → 解绑 `memory.event_id`、清 FTS、断开前后链；
+  删消息 → 连带删引用；删 l3 → 清 FTS。正文删除不可撤销。
+- **写入**：l3 的 `source_event_id` 是 NOT NULL，人工写入用 `0` 作哨兵；
+  `digest` 走 upsert（保留 revision 语义）。
+
+启动顺序（`createShell().start()`）：
+
+1. spawn 内核 → 轮询 `health` 直到就绪；
+2. `config.set` 注入 `store.db_path`（如果配置了 `dbPath`）；
+3. 拉 `tools.schema`，逐个 `ctx.tools.register(defineTool(...))`；
+4. `bridge.attach()` 订阅 `session/event`。
+
+## 3. 帧转换要点
+
+| 方向 | 帧 | 转换 |
+|---|---|---|
+| 宿主 → 内核 | `ingest.request` | `session/event` 的 `user/message` / `assistant/message` / `tool/result` → `{msg_id, seq, role, content, ts}`；`seq` 用事件序号，按会话增量（`cursor.last_seq`） |
+| 内核 → 宿主 | `llm.request` | system 文本拼成 `system`，user 文本转 `createUserMessage`；流式 chunk 用 `BlockAssembler` 收成文本 |
+| 内核 → 宿主 | `tools.schema` | JSON Schema → 工具 DSL：`anyOf[非 null]` 取首个分支、`enum` 透传、`required` 展开 |
+| 宿主 → 内核 | `tools.calls` | 工具 `execute` 发一次调用，`{ok:false}` 转成带 `code` 的异常 |
+
+## 4. 错误与生命周期
+
+- 内核错误帧（`type: "error"`）按 `request_id` 拒绝对应 Promise，`code` 保留在 Error 上；
+- 模型失败以 `llm.result.error` 回给内核，由内核的重试/降级策略处理（不抛到宿主）；
+- 宿主 `ctx.effect` 的 disposer 里：解绑会话事件 → 投递剩余缓冲 → 注销工具 → `shutdown` 内核；
+- 内核崩溃：拒绝所有在途请求并 `emit('exit')`，不在外壳内重启（避免重启风暴）。
+
+## 5. 打包
+
+`scripts/build_release.py` 把 `src/js/*.js` 复制到 `release/lib/`、`src/*.py` 复制到
+`release/kernel/`，`--check` 模式只比对不写。`release/index.js` 只是
+`export { ... } from './lib/index.js'`，所以源码与产物可以逐字节核对。
+
+## 6. 验证现状
+
+| 项 | 方式 | 结果 |
+|---|---|---|
+| 帧构造/解析、内容块提取、路由准入、投递回滚 | `node tests/js/unit.test.mjs` | ✅ 21 条 |
+| 生命周期（重启策略、dispose 顺序、订阅去重） | `node tests/js/shell.test.mjs` | ✅ 7 条（假内核，不需要 Python） |
+| 外壳↔内核进程契约（启动/工具/ingest/坏字节/坏信封） | `python -m unittest tests.test_shell_contract` | ✅ 11 条（复刻外壳动作；沙箱里 Node 不能管道抓子进程输出） |
+| 打包一致性与语法 | `build_release.py --check` + `node --check` | ✅ |
+| `ctx.llm` / `ctx.tools` 两条桥 | 需在 Harness 内安装后验收 | ⏳ 见 release/README.md「验收」 |
+
+## 7. 本机安装记录（2026-11-03）
+
+按 profile `desktop` 的既有约定安装（与 `@local/dsh-custom-mode` 的 `link:` 同型）：
+
+| 位置 | 改动 |
+|---|---|
+| `~/.dsh/profiles/desktop/package.json` | dependencies 增加 `"@local/dsh-longmemory": "file:C:/.../release"`；`dsh.profile.bundles` 末尾追加 `"@local/dsh-longmemory"` |
+| `~/.dsh/profiles/desktop/node_modules/@local/dsh-longmemory` | **实体目录**（复制 release/；先试过目录联接，宿主按 `routeLinked` 解析不到宿主包） |
+| `~/.dsh/profiles/desktop/cordis.patch.yml` | 追加 `id: dsh-longmemory` 覆盖行（pythonPath / dbPath / provider=workbuddy / model=deepseek-v4.1-flash） |
+| 备份 | 两个文件各有 `.bak-<时间戳>` |
+
+生效方式：**重启 Harness**（插件解析表在启动时构建；`ResolutionRouter` 对新增包也要求重启）。
+
+回滚：
+
+```powershell
+$prof = "$env:USERPROFILE\.dsh\profiles\desktop"
+Remove-Item "$prof\node_modules\@local\dsh-longmemory" -Recurse -Force
+# 从两个 .bak-<时间戳> 恢复 package.json / cordis.patch.yml
+```
+
+已知注意点：
+
+- 当前产物 51 个文件（`lib/` 12 个 JS、`kernel/` 22 个 py、根 6 个 + locale/icon）；同步方式：
+  `python scripts/build_release.py && Copy-Item release/* <profile>/node_modules/@local/dsh-longmemory -Recurse -Force`；
+- 沙箱里 **Python 子进程不能写 profile 目录**（PowerShell 可以），所以安装走 PowerShell；
+- Node 在 Harness 外解析不到 `@deepseek-ai/dsh-tools|dsh-llm` 属正常：这两个是宿主提供的包，
+  由 Harness 的解析表按 installation scope 解析（`@nanmicoder/dsh-agent-teams` 同理）。
+- **清单必须声明 `peerDependencies`**：宿主对链接包按 `readPeerNames` 决定是否把宿主包
+  拦截到安装侧（`dsh-app-boot` 的 `routeLinked`）；缺了这一段，入口 `import` 直接失败，
+  插件行不会报「内核没起来」，而是完全不执行。已工作插件 `@nanmicoder/dsh-agent-teams`
+  的 `peerDependencies` 同样列出这些宿主包。
+- 入口模块层写一行启动痕迹到 `~/.dsh/dsh-longmemory/shell.log`：有 `module loaded`
+  说明模块解析通过，后续失败才可能是运行期问题。

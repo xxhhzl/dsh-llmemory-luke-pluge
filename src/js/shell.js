@@ -1,0 +1,222 @@
+/**
+ * 外壳装配：起内核、接三条桥、挂命令与本地路由。
+ *
+ * 从 index.js 拆出来是为了能在离线测试里直接 import（index.js 依赖
+ * @deepseek-ai/schemastery 这个宿主包，测试环境没有）。
+ */
+import { fileURLToPath } from 'node:url'
+import path from 'node:path'
+import { mkdirSync } from 'node:fs'
+
+import { Kernel } from './kernel.js'
+import { IngestBridge } from './ingest-bridge.js'
+import { registerMemoryCommand } from './commands.js'
+import { registerLongmemoryRoutes } from './stats-route.js'
+import { trace as defaultTrace } from './trace.js'
+import { DEFAULT_RESTART_DELAYS, createRestartPolicy } from './lifecycle.js'
+
+/**
+ * 两条宿主桥要 import 宿主包（@deepseek-ai/dsh-llm、dsh-tools），
+ * 离线测试里没有这些包，所以按需动态加载；测试通过 hostHandlers 注入替身。
+ */
+let hostModule = null
+
+async function loadHostHandlers() {
+  if (!hostModule) {
+    const [llm, tools] = await Promise.all([
+      import('./llm-bridge.js'),
+      import('./tools-bridge.js'),
+    ])
+    hostModule = {
+      handleLlmRequest: llm.handleLlmRequest,
+      registerKernelTools: tools.registerKernelTools,
+    }
+  }
+  return hostModule
+}
+
+/** 插件自带内核目录（release/kernel，与本文件同级的 ../kernel）。 */
+function bundledKernelDir() {
+  return fileURLToPath(new URL('../kernel', import.meta.url))
+}
+
+/** 等内核就绪：health 成功即认为可服务。 */
+async function waitHealthy(kernel, { attempts = 60, intervalMs = 250 } = {}) {
+  let lastError
+  for (let index = 0; index < attempts; index += 1) {
+    if (!kernel.process) throw new Error('内核进程未运行')
+    try {
+      await kernel.request('health', {}, { timeoutMs: 2000 })
+      return true
+    } catch (error) {
+      lastError = error
+      await new Promise(resolve => setTimeout(resolve, intervalMs))
+    }
+  }
+  throw new Error(`内核未就绪: ${lastError?.message ?? 'unknown'}`)
+}
+
+/**
+ * 装配外壳（供 apply 与测试复用）。
+ * @returns {{kernel: Kernel, bridge: IngestBridge, start: Function, dispose: Function}}
+ */
+export function createShell(ctx, config = {}, {
+  kernel: injected, restartDelays = DEFAULT_RESTART_DELAYS, trace = defaultTrace,
+  hostHandlers = null,
+} = {}) {
+  const kernelDir = config.kernelDir || bundledKernelDir()
+  const script = path.join(kernelDir, 'main.py')
+  // 库路径由外壳解析成绝对路径：内核不依赖 cwd，也不写相对目录
+  const packageDir = fileURLToPath(new URL('..', import.meta.url))
+  const dbFile = config.dbPath
+    ? path.resolve(config.dbPath)
+    : path.join(packageDir, '.data', 'memory.db')
+  const dataDir = path.dirname(dbFile)
+  try {
+    mkdirSync(dataDir, { recursive: true })
+  } catch (error) {
+    trace(`data dir unavailable: ${dataDir} (${error?.message ?? error})`)
+  }
+  trace(`config db=${dbFile} cwd=${dataDir} provider=${config.provider ?? ''} model=${config.model ?? ''}`)
+  const kernel = injected ?? new Kernel({
+    python: config.pythonPath || 'python',
+    script,
+    cwd: dataDir,
+    env: { DSH_LONGMEMORY_DB: dbFile },
+    logger: console,
+  })
+  const agentId = config.agentId || 'dsh-longmemory'
+  const bridge = new IngestBridge(ctx, kernel, {
+    agentId,
+    debounceMs: config.ingestDebounceMs ?? 2500,
+    timeoutMs: config.requestTimeoutMs ?? 30000,
+    logger: console,
+    trace,
+  })
+
+  const toolDisposers = []
+  const extraDisposers = []
+  let disposed = false
+  let stopped = false
+  let loadedHost = hostHandlers
+
+  const getHost = async () => {
+    if (!loadedHost) loadedHost = await loadHostHandlers()
+    return loadedHost
+  }
+
+  /** 内核 llm.request → 外壳模型调用 → llm.result。 */
+  const onLlmRequest = async frame => {
+    try {
+      const host = await getHost()
+      const data = await host.handleLlmRequest(ctx, frame, {
+        provider: config.provider,
+        model: config.model,
+        maxTokens: config.maxTokens,
+        requestTimeoutMs: config.llmTimeoutMs ?? 120000,
+      })
+      kernel.send('llm.result', data, {
+        request_id: frame.request_id,
+        session_id: frame.session_id,
+        agent_id: frame.agent_id,
+      })
+    } catch (error) {
+      kernel.send('llm.result', {
+        request_id: frame?.data?.request_id || frame?.request_id || '',
+        error: { code: 'llm_error', message: String(error?.message ?? error) },
+      }, { request_id: frame?.request_id })
+    }
+  }
+
+  /** 起进程 + 等就绪 + 下发库路径；首启与重启共用。 */
+  const connect = async () => {
+    kernel.start()
+    kernel.off?.('llm.request', onLlmRequest)   // 重启时避免重复订阅
+    kernel.on('llm.request', onLlmRequest)
+    await waitHealthy(kernel)
+    // 环境变量已给出库路径；再显式 set 一次，保证运行期配置一致
+    await kernel.request('config.set', { patch: { store: { db_path: dbFile } } })
+  }
+
+  /**
+   * 内核退出看护：按退避重启。工具/命令/路由都持有同一个 kernel 对象，
+   * 重启后不需要重新注册；用尽预算就停在“未运行”，日志里留痕。
+   */
+  const restarter = createRestartPolicy({
+    delays: Array.isArray(restartDelays) && restartDelays.length
+      ? restartDelays : DEFAULT_RESTART_DELAYS,
+    trace,
+    restart: connect,
+  })
+
+  const onKernelExit = info => {
+    if (disposed || stopped) return
+    restarter.schedule(info)
+  }
+
+  const start = async () => {
+    if (disposed) return { tools: 0 }     // 已被卸载：别再起进程
+    trace(`start (kernel=${script})`)
+    stopped = false
+    await connect()
+
+    if (disposed) return { tools: 0 }
+    const host = await getHost()
+    if (disposed) return { tools: 0 }
+    toolDisposers.push(...host.registerKernelTools(ctx, kernel, await kernel.request(
+      'tools.schema', {}), {
+      agentId,
+      timeoutMs: config.requestTimeoutMs ?? 30000,
+    }))
+    if (disposed) return { tools: toolDisposers.length }
+    bridge.attach()
+    // 附加能力（命令 / 统计路由）各自隔离：任一失败都不影响工具与会话投递
+    for (const [label, register] of [
+      ['command:/memory', () => registerMemoryCommand(ctx, {
+        bridge, timeoutMs: config.requestTimeoutMs ?? 30000, trace,
+      })],
+      ['routes:/longmemory/*', () => registerLongmemoryRoutes(ctx, {
+        kernel, agentId, timeoutMs: config.requestTimeoutMs ?? 15000, trace,
+      })],
+    ]) {
+      try {
+        const disposer = register()
+        if (disposer) extraDisposers.push(disposer)
+      } catch (error) {
+        trace(`${label} failed: ${error?.message ?? error}`)
+      }
+    }
+    if (!disposed) kernel.on('exit', onKernelExit)
+    trace(`started: tools=${toolDisposers.length} extras=${extraDisposers.length}`)
+    return { tools: toolDisposers.length }
+  }
+
+  const dispose = async () => {
+    if (disposed) return
+    disposed = true
+    stopped = true
+    restarter.close()
+    kernel.off?.('exit', onKernelExit)
+    // 先排空再摘模型回调：反过来的话，最后一批消息触发的摘要没人应答，
+    // flush 会白等到超时，那批记忆就丢了。
+    try {
+      await bridge.flushAll()
+    } catch {
+      /* 尽力而为：退出路径不抛 */
+    }
+    kernel.off?.('llm.request', onLlmRequest)
+    bridge.dispose?.()
+    for (const disposer of [...toolDisposers, ...extraDisposers]) {
+      try {
+        disposer?.()
+      } catch {
+        /* ignore */
+      }
+    }
+    toolDisposers.length = 0
+    extraDisposers.length = 0
+    kernel.stop()
+  }
+
+  return { kernel, bridge, start, dispose }
+}

@@ -110,20 +110,32 @@ class TestSearch(RetrievalCase):
         self.assertEqual({hit.id for hit in everything if hit.kind == "cognition"},
                          {a, b})
 
-    def test_cluster_cap(self):
+    def _same_cluster_experiences(self, count: int) -> int:
         event = self.add_event("drawio 边框", "边框 1px")
-        for index in range(4):
+        for index in range(count):
             self.add_experience(f"drawio 经验 {index}", cues=("drawio",))
-        # 把经验都挂到同一事件簇
         with self.db.transaction():
             for row in self.db.list_experiences():
                 self.db._conn.execute(
                     "UPDATE experience SET source_event_id = ? WHERE id = ?",
                     (event, row.id))
+        return event
+
+    def test_cluster_cap_keeps_diversity(self):
+        # 同一事件有 6 条经验，另有 6 条独立认知：limit=6 时不能全被这一簇占满
+        self._same_cluster_experiences(6)
+        for index in range(6):
+            self.add_cognition(f"drawio 认知 {index}", subject="用户")
+        hits = retrieval.search(self.db, "drawio", limit=6, touch=False)
+        self.assertLessEqual(len([h for h in hits if h.kind == "experience"]), 2,
+                             "簇上限保证多样性")
+        self.assertEqual(len(hits), 6, "但也不该欠填")
+
+    def test_cluster_cap_backfills_when_candidates_run_out(self):
+        # 全库只有这一簇：宁可放宽上限，也不要只回 2 条
+        self._same_cluster_experiences(4)
         hits = retrieval.search(self.db, "drawio", limit=10, touch=False)
-        same_cluster = [hit for hit in hits
-                        if hit.meta.get("importance") is not None or hit.kind == "event"]
-        self.assertLessEqual(len([h for h in hits if h.kind == "experience"]), 2)
+        self.assertEqual(len([h for h in hits if h.kind == "experience"]), 4)
 
     def test_touch_updates_usage(self):
         event = self.add_event("drawio 边框", "边框 1px")

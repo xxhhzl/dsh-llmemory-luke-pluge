@@ -72,6 +72,14 @@ class TestFtsScopePrefilter(Batch8Case):
         self.assertEqual({hit.id for hit in hits if hit.kind == "experience"}, {a, b})
 
 
+class TestSqlitePragmas(Batch8Case):
+    """受限环境下系统临时目录可能不可写：SQLite 临时表必须放内存。"""
+
+    def test_temp_store_is_memory(self):
+        value = self.db._conn.execute("PRAGMA temp_store").fetchone()[0]
+        self.assertEqual(value, 2, "temp_store 应为 MEMORY")
+
+
 class TestFtsMigration(Batch8Case):
     """老库的 memory_fts 没有范围列：打开时要重建并从源表回灌。"""
 

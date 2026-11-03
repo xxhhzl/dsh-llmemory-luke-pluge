@@ -144,9 +144,11 @@ def apply_summary(db: database.Database, *, session_id: str,
             if event is None:
                 raise KeyError(f"event {event_id} 不存在")
             db.set_event_title(event_id, title)
-            db.set_event_summary(event_id, summary_text,
-                                 summarized_at=(base.get_cur_time()
-                                                if summary_text else None))
+            # 只在摘要成功时覆盖：失败/空的补跑不能把上一次的好摘要抹成 NULL，
+            # 也不能把 summarized_at 往后挪（否则 24h 阈值会长期不补跑）。
+            if summary_text:
+                db.set_event_summary(event_id, summary_text,
+                                     summarized_at=base.get_cur_time())
 
         # 新事件：摘要成功时记录摘要时间（重跑阈值用）
         if event_id is None and summary_text:
@@ -183,8 +185,10 @@ def apply_summary(db: database.Database, *, session_id: str,
             if invalidated_id:
                 invalidated.append(invalidated_id)
 
+        # 事件行的范围列取事件自身的归属，不是本次 job 的项目：
+        # 全局事件（origin_project=NULL）被某个项目续写后，仍应全局可见。
         db.index_fts("event", event.id, title, summary_text or "",
-                     origin_project=origin_project, session_id=session_id)
+                     origin_project=event.origin_project, session_id=session_id)
         fts_rows = 1
         for kind, item_id, content in written:
             db.index_fts(kind, item_id, "", content,
@@ -428,8 +432,10 @@ class IngestWorker:
                     seq = int(item["seq"])
                 except (KeyError, TypeError, ValueError):
                     continue
-                # 归一成 UTC：跨时区（Z / +08:00）混存时字典序比较才不会错位
-                occur = base.to_utc_iso(str(item.get("ts") or ""), default=now)
+                # 归一成 UTC：跨时区（Z / +08:00）混存时字典序比较才不会错位。
+                # 兜底值也必须是 UTC，否则非法 ts 会以 +08:00 落库，混进 184 条 UTC 里。
+                occur = base.to_utc_iso(str(item.get("ts") or ""),
+                                        default=base.to_utc_iso(now))
                 msg_id = str(item.get("msg_id") or "")
                 if not msg_id:
                     continue
@@ -666,7 +672,7 @@ class IngestWorker:
                      message_ids=[m["msg_id"] for m in new_messages],
                      refresh=False)
         db.index_fts("event", event_id, summary.title, summary.summary or "",
-                     origin_project=job.get("origin_project"),
+                     origin_project=event.origin_project,
                      session_id=job["session_id"])
         base.log.info("ingest.resummarized", event_id=event_id,
                       new_messages=len(new_messages))

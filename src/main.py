@@ -1,13 +1,33 @@
+import json
 import sys
 
 import config
 import base
+import admin
 import commands
 import ingest
 import llm
 import routo
 import error
 import tools
+
+def _envelope_hint(line: str) -> dict:
+    '''
+    坏信封也要尽量把 request_id 带回去。
+
+    外壳按 request_id 配对等待：错误帧若用空信封，它会一直等到超时才失败，
+    日志里还看不出真正原因（例如 type 拼错）。
+    '''
+    try:
+        raw = json.loads(line)
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {key: raw[key] for key in
+            ("request_id", "job_id", "session_id", "agent_id")
+            if isinstance(raw.get(key), str) and raw.get(key)}
+
 
 def routo_init(routo_table: routo.routo_register):
     '''
@@ -21,6 +41,8 @@ def routo_init(routo_table: routo.routo_register):
     routo_table.register("config.set", config.config_set)
     routo_table.register("config.get", config.config_get)
     routo_table.register("health", base.health)
+    routo_table.register("stats", tools.stats)
+    routo_table.register("admin", admin.admin)
     routo_table.register("shutdown", base.shutdown)
     # 写入链路：立即回执，后台 worker 切分/摘要/落库
     routo_table.register("ingest.request", ingest.ingest_request)
@@ -42,7 +64,12 @@ def drain(q: base.message_queue):
 
 
 def main():
-    sys.stdin.reconfigure(encoding='utf-8')
+    # errors='replace'：外壳或第三方写进来的半个多字节字符不能让整个内核退出。
+    # 逐帧解析仍会拒绝坏 JSON，只是不再因为一个字节打死进程。
+    try:
+        sys.stdin.reconfigure(encoding='utf-8', errors='replace')
+    except (AttributeError, ValueError):
+        pass                                  # 测试替身（StringIO）没有 reconfigure
     sys.stdout.reconfigure(encoding="utf-8", newline="\n")
 
     # 日志：stderr + store.db_path 同目录的 longmemory.log；stdout 只走协议帧
@@ -77,11 +104,12 @@ def main():
         ok, payload, field = config.check_json_format(line)
         if not ok:
             base.clear_log_context()
+            envelope = _envelope_hint(line)
             if field == "type":
                 # type 不在枚举内，按协议属「未知 type」
-                error.send_error_message({}, message_q, -32601, "未知 type", payload)
+                error.send_error_message(envelope, message_q, -32601, "未知 type", payload)
             else:
-                error.send_error_message({}, message_q, -32700, "JSON 解析失败", payload)
+                error.send_error_message(envelope, message_q, -32700, "JSON 解析失败", payload)
             continue
 
         data = payload

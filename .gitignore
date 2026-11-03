@@ -21,3 +21,7 @@ pip-*.log
 *.db
 *.db-wal
 *.db-shm
+
+# 进程写出来的临时文件（Temp 目录不可写时会出现）
+/tmp*
+*.bak-*

@@ -562,7 +562,7 @@ JEV 与摘要的模型调用由外壳代理（`llm.request` / `llm.result`，帧
 | 外壳（**不**进本插件配置） | `provider` / `model` / `api_key` / `base_url` / `timeout` / `retry` | 由 DSH 的模型设置与 `ctx.llm` 适配器负责；内核只看到"请求已发出 / 超时 / 失败码" |
 | 内核（`config.set` 可改） | `jev.accept_confidence` / `jev.on_uncertain` | 外壳只回 `p(split)`；accept / uncertain / escalate 的判定在内核，故阈值必须可热更新 |
 | | `split.gap_minutes` / `split.max_event_tokens` / `split.max_messages` / `split.mark_end` | 调模型前后生效的切分参数：时间间隔（**软先验**，超限先问模型，判 CONTINUE 即不切）、事件正文 token 预算（主限制）、消息条数（仅紧急兜底）、任务终点 |
-| | `search.limit_max` / `search.rrf_k` / `search.min_score` / `search.default_scope` | 检索通道参数 |
+| | `search.limit_max` / `search.min_score` / `search.default_scope` | 检索通道参数 |
 | | `store.db_path` / `store.busy_timeout_ms` / `store.queue_max` | 存储与队列 |
 | | `log.level` | stderr 日志级别 |
 

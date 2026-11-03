@@ -112,12 +112,18 @@ def _load_json(raw: str) -> dict | None:
 
 
 def parse_decisions(raw: str, items: list, candidates: list) -> Decisions:
-    '''解析裁决；index 越界、target 不在候选里、动作非法都降级为 new。'''
+    '''
+    解析裁决；index 越界、target 不在候选里、动作非法都降级为 new。
+
+    同一批里多个条目指向同一个 target 时只保留**第一条**（按 index 升序），
+    其余降级为 new——旧条目至多一个后继，否则 supersede 链会分叉。
+    '''
     data = _load_json(raw)
     if data is None or not isinstance(data.get("decisions"), list):
         return Decisions(items={}, needs_review=True, error="json_parse")
 
     by_index = {}
+    used_targets = set()
     for entry in data["decisions"]:
         if not isinstance(entry, dict):
             continue
@@ -138,6 +144,10 @@ def parse_decisions(raw: str, items: list, candidates: list) -> Decisions:
                 action = "new"
             elif action == "invalidate" and not reason:
                 action = "new"
+            elif target in used_targets and action == "supersede":
+                action = "new"          # 同批重复指向：保留首条，其余新增
+        if action in ("supersede", "invalidate"):
+            used_targets.add(target)
         if action == "new":
             target, reason = None, ""
         by_index[index] = {"action": action, "target_id": target, "reason": reason}

@@ -91,20 +91,18 @@ def build_frame(type: str, data: dict | list,
 
 DEFAULT_CONFIG = {
     "jev": {
-        "accept_confidence": 0.8,      # 置信度门槛，低于它按 on_uncertain 处理
         "on_uncertain": "escalate",    # continue / split / escalate
     },
     "split": {
         "gap_minutes": 120,            # 软先验：间隔超过该值交模型判（不再直接切）
         "max_event_tokens": 128000,    # 主限制：单事件正文的 token 预算
         "max_messages": 1000,          # 紧急兜底：只在异常长事件时触发
-        "mark_end": False,             # 是否把最后一条 assistant 视为任务终点
     },
     "search": {
-        "limit_max": 20,               # memory_search 的 limit 上限
+        "limit_max": 20,               # memory_search 的 limit 上限（运行时 clamp）
         "rrf_k": 60,                   # RRF 融合常数
         "min_score": 0.0,              # 默认分数下限
-        "default_scope": "all",        # session / all
+        "default_scope": "all",        # project / all；外壳开始透传 origin_project 后可切 project
         "alpha": 0.6,                  # 精排：相关性占比（其余为记忆强度）
         "w_activation": 0.45,          # 记忆强度：ACT-R 激活
         "w_importance": 0.25,          # 记忆强度：重要性
@@ -112,6 +110,7 @@ DEFAULT_CONFIG = {
         "w_project": 0.10,             # 记忆强度：情境匹配
         "explore_ratio": 0.1,          # 探索位比例（冷条目曝光）
         "max_per_cluster": 2,          # 同一事件簇最多几条
+        "cross_project_penalty": 0.0,  # 跨项目召回的额外衰减 0–1（0=关闭，A/B 后再调）
     },
     "store": {
         "db_path": ".dsh-longmemory/memory.db",
@@ -123,16 +122,14 @@ DEFAULT_CONFIG = {
 
 # 叶子级校验规则；未列出的路径一律视为未知键（拒绝整个补丁）
 _LEAF_SPEC = {
-    "jev.accept_confidence": {"type": float, "min": 0.0, "max": 1.0},
     "jev.on_uncertain": {"type": str, "enum": {"continue", "split", "escalate"}},
     "split.gap_minutes": {"type": int, "min": 0, "max": 10080},
     "split.max_event_tokens": {"type": int, "min": 500, "max": 200000},
     "split.max_messages": {"type": int, "min": 1, "max": 5000},
-    "split.mark_end": {"type": bool},
     "search.limit_max": {"type": int, "min": 1, "max": 100},
     "search.rrf_k": {"type": int, "min": 1, "max": 1000},
     "search.min_score": {"type": float, "min": 0.0, "max": 1.0},
-    "search.default_scope": {"type": str, "enum": {"session", "all"}},
+    "search.default_scope": {"type": str, "enum": {"project", "all"}},
     "search.alpha": {"type": float, "min": 0.0, "max": 1.0},
     "search.w_activation": {"type": float, "min": 0.0, "max": 1.0},
     "search.w_importance": {"type": float, "min": 0.0, "max": 1.0},
@@ -140,6 +137,7 @@ _LEAF_SPEC = {
     "search.w_project": {"type": float, "min": 0.0, "max": 1.0},
     "search.explore_ratio": {"type": float, "min": 0.0, "max": 1.0},
     "search.max_per_cluster": {"type": int, "min": 1, "max": 20},
+    "search.cross_project_penalty": {"type": float, "min": 0.0, "max": 1.0},
     "store.db_path": {"type": str, "min_len": 1},
     "store.busy_timeout_ms": {"type": int, "min": 0, "max": 600000},
     "store.queue_max": {"type": int, "min": 1, "max": 1000000},

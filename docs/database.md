@@ -68,11 +68,15 @@ CREATE TABLE event (
   prev_event_id  INTEGER,
   next_event_id  INTEGER,
   related_events TEXT,
-  cnt            INTEGER NOT NULL DEFAULT 0
+  cnt            INTEGER NOT NULL DEFAULT 0,
+  origin_project TEXT,
+  summarized_at  TEXT,
+  needs_review   INTEGER NOT NULL DEFAULT 0,
+  review_reason  TEXT
 );
 ```
 
-九列。事件没有状态字段：一次 `/memory` 执行完毕即视为该批事件全部归档。
+十三列。事件没有状态字段：一次 `/memory` 执行完毕即视为该批事件全部归档。
 
 | 字段 | 来源 | 作用 |
 |---|---|---|
@@ -85,6 +89,10 @@ CREATE TABLE event (
 | next_event_id | 本地 | 同会话下一个事件，无条件指向，表示顺序 |
 | related_events | 模型 | JSON 数组，存语义相关的事件 id，如 `[12, 15]` |
 | cnt | 本地 | 使用计数：新建为 0，事件每被使用/召回一次 +1，供查询排序（热度） |
+| origin_project | 本地 | 归属项目；NULL = 全局可见。范围是**数据的固有属性**，不是检索参数 |
+| summarized_at | 本地 | 上次摘要时间；NULL = 尚未摘要。已闭合事件被续写时据此判断是否补跑调用 A |
+| needs_review / review_reason | 本地 | 复核状态：摘要失败记 `summary_failed`，条目降级记 `needs_review`；`list_events_needing_review` 可查。状态落库，重启后不丢 |
+| last_used_at | 本地 | 最近一次被召回/再认的时间；ACT-R 激活的新近项读它（老库 NULL 时退化到 created_at） |
 
 - `prev_event_id` / `next_event_id` 构成同会话的双向链：`e10 ⇄ e11 ⇄ e12`。
 - 插入新事件时，取同会话最大 id 作为 `prev`，并回填上一条的 `next`，三步放在同一事务内。
@@ -232,7 +240,8 @@ cognition.source_event_id   ──N:1──▶  event.id   （认知可追溯到
 experience.superseded_id    ──N:1──▶  experience.id（取代链，旧行保留）
 cognition.superseded_id     ──N:1──▶  cognition.id
 
-memory_fts(ref_kind, ref_id)  ──▶  event / experience / cognition（多态索引）
+memory_fts(ref_kind, ref_id, origin_project, session_id)
+                              ──▶  event / experience / cognition（多态索引 + 范围列）
 digest.ref_event_ids          ──▶  JSON 数组（缓存拼装来源）
 ```
 
@@ -240,3 +249,17 @@ digest.ref_event_ids          ──▶  JSON 数组（缓存拼装来源）
 - 删除事件时，需把相关记忆行的 `event_id` 置空，或连同消息一并删除，避免悬空。
 - 记忆表冗余 `occur_at`，是为了不 join 消息表也能按时间筛选。
 - l3 两表**不删除**：失效走 `status='invalid'`，被替代走 `status='superseded'` + `superseded_id`，正文永远保留。
+- **取代链不分叉**：`superseded_id` 上有部分唯一索引（`WHERE superseded_id IS NOT NULL`），
+  同一旧行至多一个后继。旧行已非 `active` 时 `supersede_*` 返回 `None`，调用方降级为新增
+  （模型给出过期 target 不得回滚整个事件）；老库有重复数据时索引降级为仅应用层守卫并告警。
+- **绑定不改写历史**：`bind_event(..., strict=True)` 只绑定 `event_id IS NULL` 的消息；
+  已归属其他事件的正文不再改绑，冲突记 `ingest.bind_conflict` 日志——事件闭合后正文不追加。
+- **FTS 范围列**：`memory_fts` 除 `ref_kind/ref_id/title/body` 外还存 `origin_project` /
+  `session_id`（UNINDEXED，只存不索引），检索层用它在**召回前**过滤；FTS5 不支持 ADD
+  COLUMN，老库打开时由 `_ensure_fts_scope_columns` 重建并从源表回灌（`reindex_fts`）。
+- **经验泛化晋升**：`ingest.promote_experiences(db, min_use=3)` 把反复使用的项目经验转成
+  通用条目——新行 `origin_project=NULL` + 取代旧行（旧行保留），正文不变；FTS 同步更新。
+  是否自动触发（例如每周巩固）尚未定，当前作为显式维护 API。
+- **消息写入同事务**：一条消息的 `message` 正文与 `memory` 引用在同一事务内写入；
+  `UNIQUE(session_id, seq)` 撞车（不同 `message_id` 抢同一 seq）计为 `seq_conflicts`
+  并告警，不再被 `INSERT OR IGNORE` 静默计成「重复」。

@@ -94,7 +94,9 @@ class TestSchema(DatabaseCase):
             "occur_at", "created_at"])
         self.assertEqual(columns("event"), [
             "id", "session_id", "title", "summary", "created_at",
-            "prev_event_id", "next_event_id", "related_events", "cnt"])
+            "prev_event_id", "next_event_id", "related_events", "cnt",
+            "origin_project", "summarized_at", "needs_review", "review_reason",
+            "last_used_at"])
 
     def test_wal_mode(self):
         row = self.db._conn.execute("PRAGMA journal_mode").fetchone()
@@ -128,8 +130,8 @@ class TestMessages(DatabaseCase):
     def test_batch_insert_counts_new_rows(self):
         batch = [make_message("m_1", 0, "2026-10-20T10:00:00+08:00"),
                  make_message("m_2", 1, "2026-10-20T10:01:00+08:00")]
-        self.assertEqual(self.db.insert_messages(batch), 2)
-        self.assertEqual(self.db.insert_messages(batch), 0)
+        self.assertEqual(self.db.insert_messages(batch), (2, []))
+        self.assertEqual(self.db.insert_messages(batch), (0, []))
 
     def test_tool_message_keeps_json_content(self):
         payload = '{"call": {"name": "memory_search"}, "result": {"items": []}}'

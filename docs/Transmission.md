@@ -620,7 +620,7 @@ JEV 与摘要的模型调用由外壳代理（`llm.request` / `llm.result`，帧
 请求 `data` 为 `{}`；应答：
 
 ```json
-{"data": {"ok": true, "revision": 12, "queue_depth": 0, "db_ok": true}}
+{"data": {"ok": true, "revision": 12, "queue_depth": 0, "queue_dropped": 0, "db_ok": true}}
 ```
 
 | 字段 | 类型 | 说明 |
@@ -628,6 +628,7 @@ JEV 与摘要的模型调用由外壳代理（`llm.request` / `llm.result`，帧
 | `data.ok` | boolean | 内核可服务为 `true`；`false` 时外壳应重启插件 |
 | `data.revision` | integer | 配置版本号，用于判断配置是否被外部改动 |
 | `data.queue_depth` | integer | 待发帧数量，持续增大说明输出泵或外壳消费卡住 |
+| `data.queue_dropped` | integer | 因队列满被丢弃的帧数（背压指标）；持续增长说明外壳没有及时读 stdout |
 | `data.db_ok` | boolean | 存储可读写为 `true` |
 
 #### `shutdown`（上）

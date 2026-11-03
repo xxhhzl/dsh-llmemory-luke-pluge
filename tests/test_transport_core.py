@@ -204,12 +204,13 @@ class TestToolsSchema(QueueCase):
         self.assertEqual(params["type"], "object")
         self.assertEqual(params["required"], ["query"])
         self.assertIs(params["additionalProperties"], False)
-        self.assertEqual(set(params["properties"]), {"query", "limit", "kind", "scope"})
+        self.assertEqual(set(params["properties"]),
+                         {"query", "limit", "kind", "scope", "min_score"})
         # pydantic 的 title 噪声应被去掉
         for spec in params["properties"].values():
             self.assertNotIn("title", spec)
         self.assertEqual(params["properties"]["limit"]["minimum"], 1)
-        self.assertEqual(params["properties"]["limit"]["maximum"], 20)
+        self.assertEqual(params["properties"]["limit"]["maximum"], 100)
         self.assertEqual(params["properties"]["limit"]["default"], 5)
 
     def test_schema_not_duplicated_when_queue_full(self):
@@ -558,7 +559,7 @@ class TestConfigRoutes(ConfigCase):
         self.assertEqual(reply["type"], "config.get")
         self.assertEqual(reply["data"]["revision"], config.get_revision())
         self.assertIn("jev", reply["data"]["config"])
-        self.assertIn("accept_confidence", reply["data"]["config"]["jev"])
+        self.assertIn("on_uncertain", reply["data"]["config"]["jev"])
 
     def test_split_defaults_use_token_budget(self):
         split = config.get_config()["split"]
@@ -568,14 +569,14 @@ class TestConfigRoutes(ConfigCase):
     def test_set_applies_patch_and_bumps_revision(self):
         before = config.get_revision()
         q = base.message_queue(5)
-        config.config_set({"data": {"patch": {"jev": {"accept_confidence": 0.5}}},
+        config.config_set({"data": {"patch": {"search": {"limit_max": 30}}},
                            **ENVELOPE}, q)
         reply = json.loads(take_all(q)[0])
         self.assertEqual(reply["type"], "config.set")
-        self.assertEqual(reply["data"]["applied"], ["jev.accept_confidence"])
+        self.assertEqual(reply["data"]["applied"], ["search.limit_max"])
         self.assertEqual(reply["data"]["revision"], before + 1)
         self.assertIsNone(reply["data"]["reload_ms"])
-        self.assertEqual(config.get_config()["jev"]["accept_confidence"], 0.5)
+        self.assertEqual(config.get_config()["search"]["limit_max"], 30)
 
     def test_unknown_key_is_rejected(self):
         before = config.get_revision()
@@ -588,7 +589,7 @@ class TestConfigRoutes(ConfigCase):
         self.assertEqual(reply["data"]["code"], -32602)
         self.assertIn("未知配置项", reply["data"]["detail"])
         self.assertEqual(config.get_revision(), before)
-        self.assertNotEqual(config.get_config()["jev"]["accept_confidence"], 0.5)
+        self.assertNotEqual(config.get_config()["search"]["limit_max"], 0.5)
 
     def test_partial_patch_is_all_or_nothing(self):
         before = config.get_config()
@@ -596,7 +597,7 @@ class TestConfigRoutes(ConfigCase):
         stderr = io.StringIO()
         with redirect_stderr(stderr):
             config.config_set({"data": {"patch": {
-                "jev": {"accept_confidence": 0.3},
+                "search": {"limit_max": 30},
                 "split": {"max_messages": 0},        # 越界
             }}, **ENVELOPE}, q)
         reply = json.loads(take_all(q)[0])

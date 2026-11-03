@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from contextvars import ContextVar
 import logging
@@ -22,8 +22,39 @@ def get_cur_time() -> str:
     return cur.isoformat(timespec="seconds")
 
 
+def to_utc_iso(value: str | None, *, default: str | None = None) -> str:
+    '''
+    把 ISO 8601 时间归一成 UTC（后缀 +00:00），用于**跨时区**比较与排序。
+
+    时间字符串只在同一时区下才能按字典序比较：外壳可能给 `Z`，模型可能给
+    `+08:00`，混存后 `>=` 比较会整体偏移。归一后长度与格式一致，字典序 = 时间序。
+
+    :param value: 待归一时间；空串/None 返回 default
+    :param default: 解析失败时的兜底值（缺省返回当前东八区时间）
+    '''
+    text = str(value or "").strip()
+    if not text:
+        return default if default is not None else get_cur_time()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return default if default is not None else get_cur_time()
+    if parsed.tzinfo is None:               # 无偏移按 UTC 解释
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
 '''
-消息队列：多生产者，单消费者，每个路由都持有引用
+消息队列：多生产者，单消费者，每个路由都持有引用。
+
+背压策略（2026-11-03 定稿）：
+- 队列有界（`store.queue_max`，默认 1000）；无限队列只会把「外壳不读 stdout」
+  变成内存膨胀，日志里也看不出症状；
+- 入队满时**等待有限时间**（默认 5s）后丢弃该帧并计数，绝不无限阻塞主线程
+  （主线程卡住会连 stdin 都不读，整个内核失去响应）；
+- 丢弃数与当前深度进 `health`，由外壳判断是否重启。
 '''
 class message_queue:
     _q: queue.Queue
@@ -31,13 +62,32 @@ class message_queue:
 
     def __init__(self, max_size: int = 0):
         self._q = queue.Queue(max_size)
+        self._dropped = 0
+        self._cond = threading.Condition()
+        self._closed = False
 
-    def send(self, message: str) -> bool:
+    def _put(self, message: str) -> bool:
+        '''裸入队：不计数、不告警（重试路径不重复记账）。'''
         try:
             self._q.put_nowait(message)
         except queue.Full:
             return False
+        with self._cond:
+            self._cond.notify_all()
         return True
+
+    def _note_drop(self, message: str) -> None:
+        '''记录一次真正的丢弃（重试耗尽后的最终失败）。'''
+        self._dropped += 1
+        log.warning("queue.full", depth=self.depth(), dropped=self._dropped,
+                    size=len(message))
+
+    def send(self, message: str) -> bool:
+        '''只尝试一次；失败即计一次丢弃。'''
+        if self._put(message):
+            return True
+        self._note_drop(message)
+        return False
 
     def send_blocking(self, message: str, timeout: float | None = None,
                       interval: float | None = None) -> bool:
@@ -57,9 +107,10 @@ class message_queue:
 
         deadline = time.monotonic() + timeout
         while True:
-            if self.send(message):
+            if self._put(message):
                 return True
             if time.monotonic() >= deadline:
+                self._note_drop(message)      # 只在真正放弃时记一次
                 return False
             time.sleep(interval)
 
@@ -71,15 +122,19 @@ class message_queue:
             res = self._q.get_nowait()
         except queue.Empty:
             return ""
-
+        with self._cond:
+            self._cond.notify_all()
         return res
 
     def recv_blocking(self, timeout: float | None = None) -> str:
         '''等待取一条消息；超时返回 ""（供常驻写线程使用）。'''
         try:
-            return self._q.get(timeout=timeout)
+            res = self._q.get(timeout=timeout)
         except queue.Empty:
             return ""
+        with self._cond:
+            self._cond.notify_all()
+        return res
 
     def task_done(self):
         '''
@@ -92,6 +147,22 @@ class message_queue:
         当前积压的待发帧数量；持续增大说明输出泵或外壳消费卡住。
         '''
         return self._q.qsize()
+
+    @property
+    def dropped(self) -> int:
+        '''因队列满被丢弃的帧数（背压指标，进 health）。'''
+        return self._dropped
+
+    def wait_empty(self, timeout: float = 3.0) -> bool:
+        '''等待队列清空；用条件变量唤醒，不做忙轮询。超时返回 False。'''
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._cond:
+            while self._q.qsize() > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._cond.wait(remaining)
+            return True
 
 
 # 由 shutdown 处理函数置位，主循环据此收尾退出
@@ -128,13 +199,8 @@ def stop_writer():
 
 
 def wait_drained(q: message_queue, timeout: float = 3.0) -> bool:
-    '''等待写线程把队列排空；超时返回 False。'''
-    deadline = time.monotonic() + max(0.0, timeout)
-    while q.depth() > 0:
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(0.02)
-    return True
+    '''等待写线程把队列排空；超时返回 False（条件变量唤醒，不忙轮询）。'''
+    return q.wait_empty(timeout)
 
 
 def _db_ok(cfg: dict) -> bool:
@@ -171,6 +237,7 @@ def health(data, q: message_queue):
         "ok": True,
         "revision": revision,
         "queue_depth": q.depth(),
+        "queue_dropped": getattr(q, "dropped", 0),
         "db_ok": _db_ok(cfg),
     })
 

@@ -25,6 +25,7 @@ DEFAULT_ALPHA = 0.6
 DEFAULT_EXPLORE_RATIO = 0.1
 DEFAULT_MAX_PER_CLUSTER = 2
 RECALL_LIMIT = 50
+MAX_ASSOCIATIONS = 20      # 联想扩展的总量上限（防止 50 次命中各触发一次查询）
 
 
 @dataclass(frozen=True)
@@ -121,12 +122,26 @@ def _text(row, kind: str) -> str:
     return row.content or ""
 
 
+def _use_count(record, kind: str) -> int:
+    '''
+    使用次数的字段名随类型不同：事件表是 `cnt`，l3 两表是 `use_count`。
+    漏了这层映射，事件的 ACT-R 激活会恒为 0——热度排序与探索位全部失效。
+    '''
+    field = "cnt" if kind == "event" else "use_count"
+    return int(getattr(record, field, 0) or 0)
+
+
+def _last_used(record, kind: str) -> str | None:
+    '''最近一次使用时间；事件与 l3 现在都有该列（老库事件为 NULL 时退化到 created_at）。'''
+    return getattr(record, "last_used_at", None)
+
+
 def _meta(row, kind: str, extra: dict | None = None) -> dict:
     meta = {
         "importance": getattr(row, "importance", None),
         "confidence": getattr(row, "confidence", None),
         "origin_project": getattr(row, "origin_project", None),
-        "use_count": getattr(row, "use_count", None),
+        "use_count": _use_count(row, kind),
     }
     if kind == "event":
         meta["session_id"] = row.session_id
@@ -148,30 +163,49 @@ def _weights() -> dict:
         "explore_ratio": float(search.get("explore_ratio", DEFAULT_EXPLORE_RATIO)),
         "max_per_cluster": int(search.get("max_per_cluster", DEFAULT_MAX_PER_CLUSTER)),
         "rrf_k": int(search.get("rrf_k", RRF_K)),
+        "cross_project_penalty": float(search.get("cross_project_penalty", 0.0)),
     }
 
 
 def _candidates(db: database.Database, query: str, origin_project: str | None,
                 scope: str, kinds: Iterable[str], now: datetime) -> dict:
-    '''召回：{ (kind, id): {"row":..., "rel":..., "assoc":...} }'''
+    '''
+    召回：{ (kind, id): {"row":..., "rel":..., "assoc":...} }
+
+    取数走批量 `get_many`：旧实现每条命中各查一次库，一次检索实测上百条 SQL。
+    '''
     found = {}
-    for rank, item in enumerate(db.search_fts(query, limit=RECALL_LIMIT)):
-        kind, row_id = item["ref_kind"], int(item["ref_id"])
-        if kind not in kinds:
-            continue
-        row = _fetch(db, kind, row_id)
-        if row is None or not _eligible(row, origin_project, scope, now):
-            continue
-        found[(kind, row_id)] = {"row": row, "rel": 1.0 / (1.0 + rank), "assoc": 1.0}
-        # 联想扩展：同 subject / 同 cues 的 l3 以 0.5 分进候选
-        if kind != "event":
+    hits = [item for item in db.search_fts(
+                query, limit=RECALL_LIMIT, origin_project=origin_project,
+                restrict_project=(scope == "project"))
+            if item["ref_kind"] in kinds]
+    grouped: dict[str, list] = {}
+    for rank, item in enumerate(hits):
+        grouped.setdefault(item["ref_kind"], []).append((rank, int(item["ref_id"])))
+
+    associated = 0
+    for kind, entries in grouped.items():
+        rows = db.get_many(kind, [row_id for _, row_id in entries])
+        for rank, row_id in entries:
+            row = rows.get(row_id)
+            if row is None or not _eligible(row, origin_project, scope, now):
+                continue
+            found[(kind, row_id)] = {"row": row, "rel": 1.0 / (1.0 + rank),
+                                     "assoc": 1.0}
+            # 联想扩展：同 subject / 同 cues 的 l3 以 0.5 分进候选。
+            # 有总量上限：否则 50 条命中各查一次，延迟随命中数线性增长。
+            if kind == "event" or associated >= MAX_ASSOCIATIONS:
+                continue
             for other in db.find_l3_candidates(
                     kind, subject=getattr(row, "subject", None),
                     query=_first_cue(row), origin_project=origin_project, limit=3):
+                associated += 1
                 key = (kind, other.id)
                 if key in found or not _eligible(other, origin_project, scope, now):
                     continue
                 found[key] = {"row": other, "rel": 0.5, "assoc": 0.5}
+                if associated >= MAX_ASSOCIATIONS:
+                    break
     return found
 
 
@@ -181,25 +215,52 @@ def _first_cue(row) -> str | None:
 
 
 def _score(found: dict, weights: dict, origin_project: str | None) -> list:
-    act = [activation(getattr(row["row"], "use_count", 0) or 0,
-                      getattr(row["row"], "last_used_at", None),
-                      getattr(row["row"], "created_at", None))
-           for row in found.values()]
-    act_norm = _minmax(act)
-    rel_norm = _minmax([row["rel"] for row in found.values()])
+    '''
+    精排：final = α·rel + (1−α)·strength。
+
+    归一化按 **kind 分组**做：事件用 cnt、l3 用 use_count，两类量纲不同，
+    混在一张量尺上归一会让一类的变化压缩另一类的区间。
+    '''
+    rows = list(found.items())
+    act_norm: dict = {}
+    rel_norm: dict = {}
+    by_kind: dict = {}
+    for key, entry in rows:
+        by_kind.setdefault(key[0], []).append((key, entry))
+
+    for kind, entries in by_kind.items():
+        acts = [activation(_use_count(entry["row"], kind),
+                           _last_used(entry["row"], kind),
+                           getattr(entry["row"], "created_at", None))
+                for _, entry in entries]
+        for (key, _), value in zip(entries, _minmax(acts)):
+            act_norm[key] = value
+        for (key, _), value in zip(entries, _minmax([entry["rel"] for _, entry in entries])):
+            rel_norm[key] = value
 
     scored = []
-    for (key, row), act_value, rel_value in zip(found.items(), act_norm, rel_norm):
+    for key, entry in rows:
         kind, row_id = key
-        record = row["row"]
-        strength = (weights["w_activation"] * act_value
-                    + weights["w_importance"] * ((getattr(record, "importance", 3) - 1) / 4)
-                    + weights["w_confidence"] * float(getattr(record, "confidence", 0.8) or 0)
-                    + weights["w_project"] * _project_match(
-                        getattr(record, "origin_project", None), origin_project)
-                    + 0.05 * row["assoc"])
-        total = weights["alpha"] * rel_value + (1 - weights["alpha"]) * strength
-        scored.append((total, kind, row_id, record, row["assoc"]))
+        record = entry["row"]
+        # 事件没有 importance/confidence：固定中性 0.5，避免用 l3 的默认值白送分
+        if kind == "event":
+            importance = 0.5
+            confidence = 0.5
+        else:
+            importance = (getattr(record, "importance", 3) - 1) / 4
+            confidence = float(getattr(record, "confidence", 0.8) or 0)
+        match = _project_match(getattr(record, "origin_project", None),
+                               origin_project)
+        if match == 0.0 and origin_project is not None:
+            # 跨项目：按配置给负向衰减（默认 0，A/B 有证据再打开）
+            match = -weights["cross_project_penalty"]
+        strength = (weights["w_activation"] * act_norm[key]
+                    + weights["w_importance"] * importance
+                    + weights["w_confidence"] * confidence
+                    + weights["w_project"] * match
+                    + 0.05 * entry["assoc"])
+        total = weights["alpha"] * rel_norm[key] + (1 - weights["alpha"]) * strength
+        scored.append((total, kind, row_id, record, entry["assoc"]))
     scored.sort(key=lambda item: (-item[0], item[1], item[2]))
     return scored
 
@@ -235,20 +296,30 @@ def _select(scored: list, limit: int, weights: dict) -> list:
                 break
             if (item[1], item[2]) in keys:
                 continue
-            if (getattr(item[3], "use_count", 0) or 0) != 0:
+            if _use_count(item[3], item[1]) != 0:
                 continue
             add(item)
     return selected
 
 
 def search(db: database.Database, query: str, *, origin_project: str | None = None,
-           scope: str = "project", limit: int = 10,
+           scope: str | None = None, limit: int = 10,
            kinds: Iterable[str] = ("event", "experience", "cognition"),
            touch: bool = True) -> list:
-    '''记忆检索：返回按综合分排序的 Hit 列表。'''
+    '''
+    记忆检索：返回按综合分排序的 Hit 列表。
+
+    :param scope: project / all；None 表示取 config.search.default_scope
+                  （范围是数据的固有属性，检索侧只决定本次要不要扩大）
+    :raise ValueError: scope 取值非法（由外层转 -32602）
+    '''
     query = (query or "").strip()
     if not query or limit <= 0:
         return []
+    if scope is None:
+        scope = config.get_config().get("search", {}).get("default_scope", "all")
+    if scope not in ("project", "all"):
+        raise ValueError(f"scope 只能是 project / all，收到 {scope!r}")
     weights = _weights()
     now = _now()
     found = _candidates(db, query, origin_project, scope, set(kinds), now)
@@ -283,23 +354,47 @@ def _touch(db: database.Database, hits: list) -> None:
 def recent(db: database.Database, session_id: str, *, from_at: str, to_at: str,
            limit: int = 20, origin_project: str | None = None,
            touch: bool = False) -> list:
-    '''按时间区间取事件摘要与 l3（memory_recent 用）。'''
+    '''
+    按时间区间取事件摘要与 l3，供 memory_recent 使用。
+
+    语义（定稿）：
+    - event：发生区间与 [from_at, to_at] 相交即返回，按结束时间倒序；
+    - experience / cognition：按**入库时间** created_at 落在区间内返回——
+      这是「那段时间沉淀了什么」的口径，不是「事情发生在何时」；
+    - 两者**独立配额**：事件占 limit − l3 配额，l3 最多 3 条。
+      旧实现混排后按固定分排序再截断，事件恒 1.0 > l3 恒 0.5，事件一多 l3 就全灭。
+
+    :raise ValueError: 时间无法解析或 from > to（由 tools 层转 -32602）
+    '''
+    start, end = _parse(from_at), _parse(to_at)
+    if start is None or end is None:
+        raise ValueError("from_at / to_at 必须是 ISO 8601 时间")
+    if start > end:
+        raise ValueError("from_at 不得晚于 to_at")
+
+    limit = max(1, int(limit))
+    l3_quota = min(3, limit)
+    event_quota = max(1, limit - l3_quota)
+
     hits = []
-    for span in db.list_events_overlapping(session_id, from_at, to_at, limit=limit):
+    for span in db.list_events_overlapping(session_id, from_at, to_at,
+                                           limit=event_quota):
         hits.append(Hit(kind="event", id=span.event.id, title=span.event.title,
                         text=span.event.summary or "", score=1.0,
                         meta={"span": {"from": span.first_at, "to": span.last_at},
-                              "session_id": session_id}))
-    for kind, rows in (("experience", db.list_experiences(origin_project=origin_project, limit=limit)),
-                       ("cognition", db.list_cognitions(origin_project=origin_project, limit=limit))):
+                              "session_id": session_id,
+                              "use_count": int(span.event.cnt or 0)}))
+
+    for kind, rows in (
+            ("experience", db.list_experiences(origin_project=origin_project, limit=l3_quota,
+                                               created_from=from_at, created_to=to_at)),
+            ("cognition", db.list_cognitions(origin_project=origin_project, limit=l3_quota,
+                                             created_from=from_at, created_to=to_at))):
         for row in rows:
-            created = _parse(getattr(row, "created_at", None))
-            if created is None or not (_parse(from_at) <= created <= _parse(to_at)):
-                continue
             hits.append(Hit(kind=kind, id=row.id, title=_title(row, kind),
                             text=_text(row, kind), score=0.5,
-                            meta=_meta(row, kind)))
-    hits.sort(key=lambda hit: hit.score, reverse=True)
+                            meta=_meta(row, kind, {"created_at": row.created_at})))
+
     if touch:
         _touch(db, hits)
     return hits[:limit]

@@ -67,7 +67,24 @@ _ACTIONS = ("new", "supersede", "invalidate")
 
 
 class SummaryError(RuntimeError):
-    '''摘要调用失败（外壳回错、超时、应答为空）。'''
+    '''
+    摘要调用失败（外壳回错、超时、应答为空）。
+
+    :param retryable: 是否值得重试——只有超时/模型不可用/队列满这类**瞬时**错误才重试；
+                      参数错误、鉴权失败重试只会浪费一次预算。
+    '''
+
+    def __init__(self, message: str, *, retryable: bool = False,
+                 code: int | None = None):
+        super().__init__(message)
+        self.retryable = retryable
+        self.code = code
+
+
+# 单次事件摘要的总时间预算（秒）：两次尝试共享，避免单线程 worker 被一个事件堵死
+TOTAL_BUDGET_SECONDS = 240.0
+ATTEMPT_TIMEOUT_SECONDS = 180.0
+RETRYABLE_CODES = frozenset({1004})     # 模型不可用（docs/Transmission.md 错误码表）
 
 
 @dataclass(frozen=True)
@@ -95,7 +112,7 @@ class SummaryResult:
 
 
 class SummaryTransport(Protocol):
-    def complete(self, messages: list) -> str:
+    def complete(self, messages: list, *, timeout: float | None = None) -> str:
         ...
 
 
@@ -335,7 +352,7 @@ class FakeSummaryTransport:
         self.responses = list(responses)
         self.calls: list[list] = []
 
-    def complete(self, messages: list) -> str:
+    def complete(self, messages: list, *, timeout: float | None = None) -> str:
         self.calls.append(messages)
         if not self.responses:
             return "{}"
@@ -348,7 +365,7 @@ class FakeSummaryTransport:
 class ShellSummaryTransport:
     '''真实调用：交给外壳代理（llm.request，purpose=summary）。'''
 
-    def __init__(self, client=None, *, timeout: float = 180.0,
+    def __init__(self, client=None, *, timeout: float = ATTEMPT_TIMEOUT_SECONDS,
                  purpose: str = "summary"):
         self._client = client
         self.timeout = timeout
@@ -361,17 +378,27 @@ class ShellSummaryTransport:
             self._client = get_client()
         return self._client
 
-    def complete(self, messages: list) -> str:
+    def complete(self, messages: list, *, timeout: float | None = None) -> str:
         try:
             result = self.client.request(
                 messages,
                 purpose=self.purpose,
                 response_format={"type": "json_object"},
-                timeout=self.timeout,
+                timeout=self.timeout if timeout is None else float(timeout),
             )
         except LlmError as exc:
-            raise SummaryError(str(exc)) from exc
+            raise SummaryError(str(exc), retryable=_retryable(exc),
+                               code=getattr(exc, "code", None)) from exc
         return result.content
+
+
+def _retryable(exc: Exception) -> bool:
+    '''判断 LlmError 是否属于「重试有意义」的瞬时错误。'''
+    code = getattr(exc, "code", None)
+    if code in RETRYABLE_CODES:
+        return True
+    text = str(exc)
+    return ("超时" in text) or ("队列已满" in text) or ("timeout" in text.lower())
 
 
 # ---------------- 入口 ----------------
@@ -379,24 +406,46 @@ class ShellSummaryTransport:
 def extract(meta: EventMeta, messages: list, transport: SummaryTransport, *,
             max_input_chars: int = DEFAULT_MAX_INPUT_CHARS,
             previous_summary: str = "") -> SummaryResult:
-    '''调用 A：摘要 + 经验 + 认知；解析失败重试一次，仍失败返回 ok=False。'''
+    '''
+    调用 A：摘要 + 经验 + 认知；解析失败或瞬时错误重试一次，仍失败返回 ok=False。
+
+    重试策略（2026-11-03 定稿）：
+    - **只重试瞬时错误**（超时 / 模型不可用 1004 / 队列满）——参数与鉴权类重试没意义；
+    - 传输失败时**降半输入重跑**（真重试），不加「上次输出无法解析」的提示后缀；
+    - 解析失败才追加 `RETRY_SUFFIX`；
+    - 两次尝试共享 `TOTAL_BUDGET_SECONDS`，单事件不能无限占用单线程 worker。
+    '''
+    import time
+
+    deadline = time.monotonic() + TOTAL_BUDGET_SECONDS
     payload = build_messages(meta, messages, max_input_chars=max_input_chars,
                              previous_summary=previous_summary)
+    hint_chars = max_input_chars
     last_error = ""
     for attempt in (1, 2):
+        remaining = deadline - time.monotonic()
+        if remaining <= 1.0:
+            last_error = last_error or "budget_exhausted"
+            break
         try:
-            raw = transport.complete(payload)
+            raw = transport.complete(payload,
+                                     timeout=min(ATTEMPT_TIMEOUT_SECONDS, remaining))
         except Exception as exc:          # 外壳超时/回错/测试替身异常
             last_error = str(exc)
-            break
+            if not getattr(exc, "retryable", False) or attempt == 2:
+                break
+            hint_chars = max(1000, hint_chars // 2)     # 降半输入再试
+            payload = build_messages(meta, messages, max_input_chars=hint_chars,
+                                     previous_summary=previous_summary)
+            continue
         result = parse_result(raw)
         if result.ok:
             return result
         last_error = result.error
+        if attempt == 2:
+            break
         payload = [
             {"role": "system", "content": SUMMARY_SYSTEM_PROMPT + RETRY_SUFFIX},
             payload[-1],
         ]
-        if attempt == 2:
-            break
     return SummaryResult(ok=False, error=last_error or "unknown", needs_review=True)

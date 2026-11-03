@@ -28,7 +28,16 @@ CODE_MODEL_UNAVAILABLE = 1004
 
 
 class LlmError(RuntimeError):
-    '''模型调用失败：超时、外壳回错、队列满、应答缺字段。'''
+    '''
+    模型调用失败：超时、外壳回错、队列满、应答缺字段。
+
+    :param code: 外壳返回的业务错误码（如 1004 模型不可用）；None 表示本地错误。
+                 调用方据此判断是否值得重试。
+    '''
+
+    def __init__(self, message: str, *, code: int | None = None):
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -140,16 +149,21 @@ class LlmClient:
 
         error = payload.get("error")
         if error:
+            code = None
             if isinstance(error, dict):
                 message = error.get("message") or "模型调用失败"
                 detail = error.get("detail") or ""
                 text = f"{message}: {detail}".rstrip(": ")
-                code = error.get("code")
-                if code is not None:
-                    text = f"[{code}] {text}"
+                raw_code = error.get("code")
+                if raw_code is not None:
+                    text = f"[{raw_code}] {text}"
+                    try:
+                        code = int(raw_code)
+                    except (TypeError, ValueError):
+                        code = None
             else:
                 text = str(error)
-            future.set_exception(LlmError(text))
+            future.set_exception(LlmError(text, code=code))
             return True
 
         content = payload.get("content")

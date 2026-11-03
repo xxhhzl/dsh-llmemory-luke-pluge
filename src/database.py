@@ -62,7 +62,12 @@ CREATE TABLE IF NOT EXISTS event (
   prev_event_id  INTEGER,
   next_event_id  INTEGER,
   related_events TEXT,
-  cnt            INTEGER NOT NULL DEFAULT 0
+  cnt            INTEGER NOT NULL DEFAULT 0,
+  origin_project TEXT,                       -- 事件归属项目；NULL = 全局可见（情景证据链）
+  summarized_at  TEXT,                       -- 上次摘要时间；用于判断是否需要重跑调用 A
+  needs_review   INTEGER NOT NULL DEFAULT 0, -- 摘要失败/降级，等待复核
+  review_reason  TEXT,
+  last_used_at   TEXT                        -- 最近一次被召回/再认的时间
 );
 
 -- 仅加索引，不改列；related_events 按 doc 要求不建索引
@@ -134,6 +139,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
   ref_id   UNINDEXED,
   title,
   body,
+  origin_project UNINDEXED,     -- 范围列：召回前按项目过滤，别让范围外条目占名额
+  session_id     UNINDEXED,     -- 事件来源会话（l3 为 origin_session）
   tokenize='trigram'
 );
 """
@@ -206,6 +213,11 @@ class Event:
     next_event_id: int | None
     related_events: tuple[int, ...] = field(default_factory=tuple)
     cnt: int = 0            # 被使用/召回次数，新建为 0，用于查询排序
+    origin_project: str | None = None  # 归属项目；NULL = 全局可见
+    summarized_at: str | None = None   # 上次摘要时间；NULL = 尚未摘要
+    needs_review: int = 0              # 1 = 待复核（摘要失败或条目降级）
+    review_reason: str | None = None
+    last_used_at: str | None = None    # 最近一次被召回/再认
 
     def to_dict(self) -> dict:
         return {
@@ -213,6 +225,11 @@ class Event:
             "summary": self.summary, "created_at": self.created_at,
             "prev_event_id": self.prev_event_id, "next_event_id": self.next_event_id,
             "related_events": list(self.related_events), "cnt": self.cnt,
+            "origin_project": self.origin_project,
+            "summarized_at": self.summarized_at,
+            "needs_review": bool(self.needs_review),
+            "review_reason": self.review_reason,
+            "last_used_at": self.last_used_at,
         }
 
     @classmethod
@@ -222,6 +239,7 @@ class Event:
             related = tuple(int(x) for x in json.loads(raw)) if raw else ()
         except (TypeError, ValueError):
             related = ()
+        keys = row.keys()
         return cls(
             id=row["id"],
             session_id=row["session_id"],
@@ -231,7 +249,12 @@ class Event:
             prev_event_id=row["prev_event_id"],
             next_event_id=row["next_event_id"],
             related_events=related,
-            cnt=row["cnt"] if "cnt" in row.keys() else 0,
+            cnt=row["cnt"] if "cnt" in keys else 0,
+            origin_project=row["origin_project"] if "origin_project" in keys else None,
+            summarized_at=row["summarized_at"] if "summarized_at" in keys else None,
+            needs_review=row["needs_review"] if "needs_review" in keys else 0,
+            review_reason=row["review_reason"] if "review_reason" in keys else None,
+            last_used_at=row["last_used_at"] if "last_used_at" in keys else None,
         )
 
 
@@ -351,6 +374,16 @@ def _load_cues(raw) -> tuple:
         return ()
 
 
+class _StaleTarget(Exception):
+    '''supersede 的目标行在事务内已不再是 active（并发或同批重复指向）。'''
+
+
+def _like_escape(text: str) -> str:
+    '''转义 LIKE 的通配符：查询里的 % / _ 是字面量，不是通配符。'''
+    return (str(text).replace("\\", "\\\\")
+            .replace("%", "\\%").replace("_", "\\_"))
+
+
 # ---------------- 存储 ----------------
 
 class Database:
@@ -366,6 +399,8 @@ class Database:
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._savepoint_seq = 0
+        self._savepoint_seq_lock = threading.Lock()
         self._conn = sqlite3.connect(str(self.path),
                                      timeout=self.busy_timeout_ms / 1000,
                                      check_same_thread=False,
@@ -389,6 +424,65 @@ class Database:
         if "cnt" not in columns:
             self._conn.execute(
                 "ALTER TABLE event ADD COLUMN cnt INTEGER NOT NULL DEFAULT 0")
+        if "origin_project" not in columns:
+            self._conn.execute(
+                "ALTER TABLE event ADD COLUMN origin_project TEXT")
+        if "summarized_at" not in columns:
+            self._conn.execute(
+                "ALTER TABLE event ADD COLUMN summarized_at TEXT")
+        if "needs_review" not in columns:
+            self._conn.execute(
+                "ALTER TABLE event ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0")
+        if "review_reason" not in columns:
+            self._conn.execute(
+                "ALTER TABLE event ADD COLUMN review_reason TEXT")
+        if "last_used_at" not in columns:
+            self._conn.execute(
+                "ALTER TABLE event ADD COLUMN last_used_at TEXT")
+        self._ensure_supersede_indexes()
+        self._ensure_fts_scope_columns()
+        version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        if version < 1:
+            self._normalize_timestamps()
+
+    def _ensure_supersede_indexes(self):
+        '''
+        生命周期不变量：同一旧行至多一个 active 后继（supersede 链不分叉）。
+        老库可能已有重复数据，建索引会失败——此时降级为「仅应用层守卫」并告警，
+        不能让索引挡住进程启动。
+        '''
+        for table in ("experience", "cognition"):
+            name = f"idx_{table[:3]}_superseded"
+            try:
+                self._conn.execute(
+                    f"CREATE UNIQUE INDEX IF NOT EXISTS {name} "
+                    f"ON {table}(superseded_id) WHERE superseded_id IS NOT NULL")
+            except sqlite3.IntegrityError as exc:
+                base.log.warning("db.supersede_index_unavailable", table=table,
+                                 error=type(exc).__name__)
+
+    def _normalize_timestamps(self):
+        '''
+        一次性把历史 occur_at 归一成 UTC（user_version 0 → 1）。
+
+        时间只在同一时区下才能按字典序比较；老库是 +08:00，外壳可能给 Z，
+        混存会让 memory_recent 的区间判断整体偏移。改写后长度与格式一致。
+        '''
+        with self.transaction() as conn:
+            for table in ("message", "memory"):
+                rows = conn.execute(
+                    f"SELECT rowid AS rid, occur_at FROM {table}").fetchall()
+                updates = []
+                for row in rows:
+                    normalized = base.to_utc_iso(row["occur_at"], default="")
+                    if normalized and normalized != row["occur_at"]:
+                        updates.append((normalized, row["rid"]))
+                if updates:
+                    conn.executemany(
+                        f"UPDATE {table} SET occur_at = ? WHERE rowid = ?", updates)
+                    base.log.info("db.timestamps_normalized", table=table,
+                                  rows=len(updates))
+            conn.execute("PRAGMA user_version = 1")
 
     def close(self):
         with self._lock:
@@ -412,13 +506,14 @@ class Database:
         '''
         with self._lock:
             if self._conn.in_transaction:
-                name = f"sp_{threading.get_ident()}_{id(object())}"
+                with self._savepoint_seq_lock:
+                    self._savepoint_seq += 1
+                    name = f"sp_{self._savepoint_seq}"
                 self._conn.execute(f"SAVEPOINT {name}")
                 try:
                     yield self._conn
                 except BaseException:
-                    self._conn.execute(f"ROLLBACK TO {name}")
-                    self._conn.execute(f"RELEASE {name}")
+                    self._rollback_to(name)
                     raise
                 else:
                     self._conn.execute(f"RELEASE {name}")
@@ -428,64 +523,175 @@ class Database:
             try:
                 yield self._conn
             except BaseException:
-                self._conn.execute("ROLLBACK")
+                self._rollback_all()
                 raise
             else:
                 self._conn.execute("COMMIT")
 
+    def _ensure_fts_scope_columns(self):
+        '''
+        memory_fts 加范围列（origin_project / session_id）。
+
+        FTS5 虚拟表不能 ALTER ADD COLUMN，只能重建；老库在这里做一次性迁移：
+        删表重建后从源表回灌（memory_fts 只存渲染后的 body，必须回源取）。
+        '''
+        columns = [row["name"] for row in
+                   self._conn.execute("PRAGMA table_info(memory_fts)")]
+        if "origin_project" in columns and "session_id" in columns:
+            return
+        base.log.warning("db.fts_scope_columns_missing", existing=columns)
+        with self.transaction() as conn:
+            conn.execute("DROP TABLE IF EXISTS memory_fts")
+            conn.execute(
+                "CREATE VIRTUAL TABLE memory_fts USING fts5("
+                "ref_kind UNINDEXED, ref_id UNINDEXED, title, body, "
+                "origin_project UNINDEXED, session_id UNINDEXED, "
+                "tokenize='trigram')")
+        self.reindex_fts()
+
+    def reindex_fts(self) -> dict:
+        '''从源表重建全文索引，返回各类型重建条数。'''
+        counts = {"event": 0, "experience": 0, "cognition": 0}
+        with self.transaction() as conn:
+            conn.execute("DELETE FROM memory_fts")
+            for row in conn.execute(
+                    "SELECT id, title, summary, origin_project, session_id FROM event"
+            ).fetchall():
+                conn.execute(
+                    "INSERT INTO memory_fts (ref_kind, ref_id, title, body, "
+                    "origin_project, session_id) VALUES ('event', ?, ?, ?, ?, ?)",
+                    (row["id"], row["title"], row["summary"] or "",
+                     row["origin_project"], row["session_id"]))
+                counts["event"] += 1
+            for table in ("experience", "cognition"):
+                for row in conn.execute(
+                        f"SELECT id, content, origin_project, origin_session "
+                        f"FROM {table}").fetchall():
+                    conn.execute(
+                        "INSERT INTO memory_fts (ref_kind, ref_id, title, body, "
+                        "origin_project, session_id) VALUES (?, ?, '', ?, ?, ?)",
+                        (table, row["id"], row["content"],
+                         row["origin_project"], row["origin_session"]))
+                    counts[table] += 1
+        return counts
+
+    def _rollback_to(self, name: str):
+        '''回滚到保存点；回滚自身失败不能掩盖原始异常。'''
+        try:
+            self._conn.execute(f"ROLLBACK TO {name}")
+            self._conn.execute(f"RELEASE {name}")
+        except sqlite3.Error as exc:
+            base.log.error("db.rollback_failed", savepoint=name,
+                           error=type(exc).__name__)
+
+    def _rollback_all(self):
+        try:
+            self._conn.execute("ROLLBACK")
+        except sqlite3.Error as exc:
+            base.log.error("db.rollback_failed", error=type(exc).__name__)
+
     # ---- 写入：记忆 ----
 
     def insert_memory(self, item: Memory) -> bool:
-        '''插入一条引用；已存在返回 False（幂等）。'''
+        '''
+        插入一条引用；message_id 已存在返回 False（幂等）。
+        seq 撞车时也只返回 False 并告警——正文层面的冲突由 insert_message 报告。
+        '''
         with self._lock:
-            cur = self._conn.execute(
-                "INSERT OR IGNORE INTO memory "
-                "(session_id, message_id, owner, seq, occur_at, created_at, event_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (item.session_id, item.message_id, item.owner, item.seq,
-                 item.occur_at, item.created_at, item.event_id))
+            try:
+                cur = self._conn.execute(
+                    "INSERT INTO memory "
+                    "(session_id, message_id, owner, seq, occur_at, created_at, event_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(session_id, message_id) DO NOTHING",
+                    (item.session_id, item.message_id, item.owner, item.seq,
+                     item.occur_at, item.created_at, item.event_id))
+                return cur.rowcount == 1
+            except sqlite3.IntegrityError as exc:
+                base.log.warning("memory.seq_conflict", session_id=item.session_id,
+                                 message_id=item.message_id, seq=item.seq,
+                                 error=type(exc).__name__)
+                return False
+
+    def bind_event(self, session_id: str, message_id: str, event_id: int,
+                   strict: bool = False) -> bool:
+        '''
+        把记忆行归入事件。
+        :param strict: True 只绑定尚未归属的消息（event_id IS NULL）；已归属其他
+                       事件时不改绑、返回 False（事件闭合后正文不再追加）
+        :return: 发生绑定返回 True；行不存在、已归属同一事件、或 strict 下已归属
+                 其他事件返回 False
+        '''
+        with self._lock:
+            if strict:
+                cur = self._conn.execute(
+                    "UPDATE memory SET event_id = ? "
+                    "WHERE session_id = ? AND message_id = ? AND event_id IS NULL",
+                    (event_id, session_id, message_id))
+            else:
+                cur = self._conn.execute(
+                    "UPDATE memory SET event_id = ? "
+                    "WHERE session_id = ? AND message_id = ? "
+                    "AND (event_id IS NULL OR event_id != ?)",
+                    (event_id, session_id, message_id, event_id))
             return cur.rowcount == 1
 
-    def bind_event(self, session_id: str, message_id: str, event_id: int) -> bool:
-        '''把记忆行归入事件；行不存在或已归属同一事件返回 False。'''
-        with self._lock:
-            cur = self._conn.execute(
-                "UPDATE memory SET event_id = ? "
-                "WHERE session_id = ? AND message_id = ? "
-                "AND (event_id IS NULL OR event_id != ?)",
-                (event_id, session_id, message_id, event_id))
-            return cur.rowcount == 1
+    def bound_event_of(self, session_id: str, message_id: str) -> int | None:
+        '''消息当前归属的事件 id（含已归属的）；未归属返回 None。'''
+        row = self._conn.execute(
+            "SELECT event_id FROM memory WHERE session_id = ? AND message_id = ?",
+            (session_id, message_id)).fetchone()
+        if row is None or row["event_id"] is None:
+            return None
+        return int(row["event_id"])
 
     # ---- 写入：消息 ----
 
-    def insert_message(self, item: Message) -> bool:
-        '''插入一条消息；已存在返回 False（幂等）。'''
+    def insert_message(self, item: Message) -> int:
+        '''
+        插入一条消息。
+        :return: 1 新插入；0 message_id 已存在（幂等重复）；-1 seq 撞车（不同
+                 message_id 占用同一 seq，正文未写入，调用方必须告警）
+        '''
         with self._lock:
-            cur = self._conn.execute(
-                "INSERT OR IGNORE INTO message "
-                "(session_id, message_id, owner, seq, role, content, occur_at, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (item.session_id, item.message_id, item.owner, item.seq, item.role,
-                 item.content, item.occur_at, item.created_at))
-            return cur.rowcount == 1
+            try:
+                cur = self._conn.execute(
+                    "INSERT INTO message "
+                    "(session_id, message_id, owner, seq, role, content, occur_at, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(session_id, message_id) DO NOTHING",
+                    (item.session_id, item.message_id, item.owner, item.seq, item.role,
+                     item.content, item.occur_at, item.created_at))
+                return 1 if cur.rowcount == 1 else 0
+            except sqlite3.IntegrityError:
+                # UNIQUE(session_id, seq) 撞车：不是重复，是序号冲突
+                return -1
 
-    def insert_messages(self, items) -> int:
-        '''批量插入；返回实际新增条数，整批在同一事务内。'''
+    def insert_messages(self, items) -> tuple:
+        '''
+        批量插入；整批在同一事务内。
+        :return: (实际新增条数, [(message_id, seq) 冲突列表])；message_id 重复的不算冲突
+        '''
         inserted = 0
+        conflicts = []
         with self.transaction():
             for item in items:
-                if self.insert_message(item):
+                rc = self.insert_message(item)
+                if rc == 1:
                     inserted += 1
-        return inserted
+                elif rc == -1:
+                    conflicts.append((item.message_id, item.seq))
+        return inserted, conflicts
 
     # ---- 写入：事件 ----
 
     def create_event(self, session_id: str, title: str,
                      summary: str | None = None,
-                     related_events=None) -> Event:
+                     related_events=None,
+                     origin_project: str | None = None) -> Event:
         '''
         新建事件并维护同会话双向链：取同会话最大 id 作 prev，回填上一条的 next。
-        三步在同一事务内完成。
+        三步在同一事务内完成。origin_project=None 表示全局可见。
         '''
         related = [int(x) for x in (related_events or [])]
         created_at = base.get_cur_time()
@@ -497,10 +703,11 @@ class Database:
 
             cur = conn.execute(
                 "INSERT INTO event "
-                "(session_id, title, summary, created_at, prev_event_id, next_event_id, related_events) "
-                "VALUES (?, ?, ?, ?, ?, NULL, ?)",
+                "(session_id, title, summary, created_at, prev_event_id, next_event_id, "
+                "related_events, origin_project) "
+                "VALUES (?, ?, ?, ?, ?, NULL, ?, ?)",
                 (session_id, title, summary, created_at, prev_id,
-                 json.dumps(related) if related else None))
+                 json.dumps(related) if related else None, origin_project))
             event_id = cur.lastrowid
 
             if prev_id is not None:
@@ -508,14 +715,24 @@ class Database:
                              (event_id, prev_id))
 
         event = self.get_event(event_id)
-        assert event is not None
+        if event is None:
+            raise RuntimeError(f"create_event 后读取失败: event_id={event_id}")
         return event
 
-    def set_event_summary(self, event_id: int, summary: str | None) -> bool:
-        '''补充/覆盖事件摘要（doc：summary 可后续补充）；传 None 表示清空。'''
+    def set_event_summary(self, event_id: int, summary: str | None,
+                          summarized_at: str | None = None) -> bool:
+        '''
+        补充/覆盖事件摘要（doc：summary 可后续补充）；传 None 表示清空。
+        :param summarized_at: 摘要时间；缺省表示不改该列（重跑阈值靠它判断新近度）
+        '''
         with self._lock:
-            cur = self._conn.execute(
-                "UPDATE event SET summary = ? WHERE id = ?", (summary, event_id))
+            if summarized_at is None:
+                cur = self._conn.execute(
+                    "UPDATE event SET summary = ? WHERE id = ?", (summary, event_id))
+            else:
+                cur = self._conn.execute(
+                    "UPDATE event SET summary = ?, summarized_at = ? WHERE id = ?",
+                    (summary, summarized_at, event_id))
             return cur.rowcount == 1
 
     def set_event_title(self, event_id: int, title: str) -> bool:
@@ -533,9 +750,11 @@ class Database:
         amount = int(by)
         if amount <= 0:
             raise ValueError("by 必须是正整数")
+        now = base.get_cur_time()
         with self._lock:
             cur = self._conn.execute(
-                "UPDATE event SET cnt = cnt + ? WHERE id = ?", (amount, event_id))
+                "UPDATE event SET cnt = cnt + ?, last_used_at = ? WHERE id = ?",
+                (amount, now, event_id))
             if cur.rowcount != 1:
                 return None
             row = self._conn.execute(
@@ -550,11 +769,34 @@ class Database:
         ids = [int(x) for x in event_ids]
         if not ids:
             return 0
-        with self._lock:
-            cur = self._conn.executemany(
-                "UPDATE event SET cnt = cnt + ? WHERE id = ?",
-                [(amount, event_id) for event_id in ids])
+        now = base.get_cur_time()
+        with self.transaction() as conn:
+            cur = conn.executemany(
+                "UPDATE event SET cnt = cnt + ?, last_used_at = ? WHERE id = ?",
+                [(amount, now, event_id) for event_id in ids])
             return cur.rowcount
+
+    def set_event_review(self, event_id: int, needs_review: bool,
+                         reason: str | None = None) -> bool:
+        '''标记/清除事件的复核状态（摘要失败或条目降级时置位）。'''
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE event SET needs_review = ?, review_reason = ? WHERE id = ?",
+                (1 if needs_review else 0, reason, event_id))
+            return cur.rowcount == 1
+
+    def list_events_needing_review(self, session_id: str | None = None,
+                                   limit: int = 50) -> list[Event]:
+        '''待复核事件：重启后仍能被找到（状态落库，不只存在回执里）。'''
+        if session_id is None:
+            rows = self._conn.execute(
+                "SELECT * FROM event WHERE needs_review = 1 "
+                "ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM event WHERE needs_review = 1 AND session_id = ? "
+                "ORDER BY id DESC LIMIT ?", (session_id, limit)).fetchall()
+        return [Event.from_row(row) for row in rows]
 
     # ---- 读取 ----
 
@@ -618,6 +860,29 @@ class Database:
             return None
         return int(row["event_id"])
 
+    def last_bound_seq(self, session_id: str) -> int | None:
+        '''
+        该会话里「已归属某个事件」的最大消息序号；None 表示还没切分过。
+
+        增量切分的起点：序号之后的消息才需要重新判定，之前的一律复用已绑定事件。
+        '''
+        row = self._conn.execute(
+            "SELECT MAX(m.seq) AS last_seq FROM memory r "
+            "JOIN message m ON m.session_id = r.session_id "
+            " AND m.message_id = r.message_id "
+            "WHERE r.session_id = ? AND r.event_id IS NOT NULL",
+            (session_id,)).fetchone()
+        if row is None or row["last_seq"] is None:
+            return None
+        return int(row["last_seq"])
+
+    def message_at_seq(self, session_id: str, seq: int) -> Message | None:
+        '''取指定 seq 的消息（增量切分的锚点）。'''
+        row = self._conn.execute(
+            "SELECT * FROM message WHERE session_id = ? AND seq = ?",
+            (session_id, seq)).fetchone()
+        return Message.from_row(row) if row else None
+
     def list_events(self, session_id: str, limit: int = 50,
                     descending: bool = True, order_by: str = "id") -> list[Event]:
         '''按会话取事件；order_by 支持 id（默认，时间序）与 cnt（使用次数，热度序）。'''
@@ -650,6 +915,9 @@ class Database:
         '''
         取发生区间与 [from_at, to_at] 相交的事件（闭区间）：
         last_at >= from_at AND first_at <= to_at。
+
+        比较走 SQLite 的 `datetime()`：它认识 ISO 8601 的时区后缀并换算到 UTC，
+        所以老库的 +08:00 与新写入的 +00:00 混存时也不会错 8 小时。
         '''
         rows = self._conn.execute(
             "SELECT e.*, t.first_at AS first_at, t.last_at AS last_at FROM event e "
@@ -657,10 +925,13 @@ class Database:
             "             MAX(m.occur_at) AS last_at "
             "      FROM memory r JOIN message m "
             "        ON m.session_id = r.session_id AND m.message_id = r.message_id "
-            "      WHERE r.event_id IS NOT NULL GROUP BY r.event_id) t ON t.eid = e.id "
-            "WHERE e.session_id = ? AND t.last_at >= ? AND t.first_at <= ? "
-            "ORDER BY t.last_at DESC LIMIT ?",
-            (session_id, from_at, to_at, limit)).fetchall()
+            "      WHERE r.event_id IS NOT NULL AND r.session_id = ? "
+            "      GROUP BY r.event_id) t ON t.eid = e.id "
+            "WHERE e.session_id = ? "
+            "  AND datetime(t.last_at) >= datetime(?) "
+            "  AND datetime(t.first_at) <= datetime(?) "
+            "ORDER BY datetime(t.last_at) DESC LIMIT ?",
+            (session_id, session_id, from_at, to_at, limit)).fetchall()
         return [EventSpan(event=Event.from_row(row),
                           first_at=row["first_at"], last_at=row["last_at"])
                 for row in rows]
@@ -709,6 +980,23 @@ class Database:
     def get_cognition(self, item_id: int) -> Cognition | None:
         return self._get_l3("cognition", Cognition, item_id)
 
+    def get_many(self, table: str, ids) -> dict:
+        '''
+        批量按 id 取行：{id: row}。检索层逐条取数的 N+1 改这里一次 IN 查询。
+        :param table: event / experience / cognition
+        '''
+        if table != "event" and table not in _L3_EXTRA:
+            raise ValueError(f"不支持的表: {table!r}")
+        wanted = [int(x) for x in ids]
+        if not wanted:
+            return {}
+        model = {"event": Event, "experience": Experience,
+                 "cognition": Cognition}[table]
+        marks = ", ".join("?" for _ in wanted)
+        rows = self._conn.execute(
+            f"SELECT * FROM {table} WHERE id IN ({marks})", wanted).fetchall()
+        return {row["id"]: model.from_row(row) for row in rows}
+
     def find_l3_id(self, table: str, event_id: int, content: str) -> int | None:
         '''同一来源事件下是否已有相同内容的条目（幂等写入用）。'''
         if table not in _L3_EXTRA:
@@ -732,14 +1020,14 @@ class Database:
             clauses.append("(origin_project IS NULL OR origin_project = ?)")
             params.append(origin_project)
         if subject and query:
-            clauses.append("(subject = ? OR content LIKE ?)")
-            params.extend([subject, f"%{query}%"])
+            clauses.append("(subject = ? OR content LIKE ? ESCAPE '\\')")
+            params.extend([subject, f"%{_like_escape(query)}%"])
         elif subject:
             clauses.append("subject = ?")
             params.append(subject)
         elif query:
-            clauses.append("content LIKE ?")
-            params.append(f"%{query}%")
+            clauses.append("content LIKE ? ESCAPE '\\'")
+            params.append(f"%{_like_escape(query)}%")
         params.append(limit)
         rows = self._conn.execute(
             f"SELECT * FROM {table} WHERE {' AND '.join(clauses)} "
@@ -748,7 +1036,15 @@ class Database:
 
     def _list_l3(self, table: str, model, *, origin_project: str | None = None,
                  status: str = "active", kind: str | None = None,
-                 limit: int = 50, include_expired: bool = False) -> list:
+                 limit: int = 50, include_expired: bool = False,
+                 created_from: str | None = None,
+                 created_to: str | None = None) -> list:
+        '''
+        按条件取 l3。
+        :param created_from/created_to: 入库时间闭区间，**下推到 SQL**——
+               旧实现先按 id 取 top-N 再在 Python 里按时间筛，窗口内条目会被
+               挤出 top-N 而取不到；比较走 datetime()，兼容不同时区后缀
+        '''
         clauses = ["status = ?"]
         params: list = [status]
         if not include_expired:
@@ -760,6 +1056,12 @@ class Database:
         if kind:
             clauses.append("kind = ?")
             params.append(kind)
+        if created_from is not None:
+            clauses.append("datetime(created_at) >= datetime(?)")
+            params.append(created_from)
+        if created_to is not None:
+            clauses.append("datetime(created_at) <= datetime(?)")
+            params.append(created_to)
         params.append(limit)
         rows = self._conn.execute(
             f"SELECT * FROM {table} WHERE {' AND '.join(clauses)} "
@@ -773,36 +1075,59 @@ class Database:
     def list_cognitions(self, **kwargs) -> list:
         return self._list_l3("cognition", Cognition, **kwargs)
 
-    def _supersede_l3(self, table: str, old_id: int, item) -> int:
-        '''用新条目取代旧条目：新行 superseded_id=old，旧行 status='superseded'。'''
+    def _supersede_l3(self, table: str, old_id: int, item) -> int | None:
+        '''
+        用新条目取代旧条目：新行 superseded_id=old，旧行 status='superseded'。
+        :return: 新条目 id；旧行不存在抛 KeyError；旧行已不是 active 返回 None
+                 （调用方应降级为「新增」，不得炸掉整个事件事务）
+        '''
         now = base.get_cur_time()
         with self.transaction() as conn:
             old = conn.execute(
-                f"SELECT id FROM {table} WHERE id = ?", (old_id,)).fetchone()
+                f"SELECT status FROM {table} WHERE id = ?", (old_id,)).fetchone()
             if old is None:
                 raise KeyError(f"{table} {old_id} 不存在")
+            if old["status"] != "active":
+                return None
             new_item = replace(item, superseded_id=old_id, status="active",
                                created_at=item.created_at or now)
             new_id = self._l3_insert(conn, table, new_item)
-            conn.execute(
-                f"UPDATE {table} SET status = 'superseded', valid_to = ? WHERE id = ?",
+            cur = conn.execute(
+                f"UPDATE {table} SET status = 'superseded', valid_to = ? "
+                f"WHERE id = ? AND status = 'active'",
                 (now, old_id))
+            if cur.rowcount != 1:
+                # 状态在读取后被改动：回滚本次取代，交给调用方降级为新增
+                raise _StaleTarget(old_id)
+            # 失效条目退出全文索引，否则会一直占用召回名额（同事务，不留残影）
+            conn.execute("DELETE FROM memory_fts WHERE ref_kind = ? AND ref_id = ?",
+                         (table, old_id))
             return new_id
 
-    def supersede_experience(self, old_id: int, item: Experience) -> int:
-        return self._supersede_l3("experience", old_id, item)
+    def supersede_experience(self, old_id: int, item: Experience) -> int | None:
+        try:
+            return self._supersede_l3("experience", old_id, item)
+        except _StaleTarget:
+            return None
 
-    def supersede_cognition(self, old_id: int, item: Cognition) -> int:
-        return self._supersede_l3("cognition", old_id, item)
+    def supersede_cognition(self, old_id: int, item: Cognition) -> int | None:
+        try:
+            return self._supersede_l3("cognition", old_id, item)
+        except _StaleTarget:
+            return None
 
     def _invalidate_l3(self, table: str, item_id: int, reason: str) -> bool:
         '''失效（无后继）：只改状态与原因，不删行、不改 content。'''
-        with self._lock:
-            cur = self._conn.execute(
+        with self.transaction() as conn:
+            cur = conn.execute(
                 f"UPDATE {table} SET status = 'invalid', invalid_reason = ?, valid_to = ? "
                 f"WHERE id = ? AND status = 'active'",
                 (reason, base.get_cur_time(), item_id))
-            return cur.rowcount == 1
+            if cur.rowcount != 1:
+                return False
+            conn.execute("DELETE FROM memory_fts WHERE ref_kind = ? AND ref_id = ?",
+                         (table, item_id))
+            return True
 
     def invalidate_experience(self, item_id: int, reason: str) -> bool:
         return self._invalidate_l3("experience", item_id, reason)
@@ -859,8 +1184,14 @@ class Database:
     # ---- 索引：统一全文检索 ----
 
     def index_fts(self, ref_kind: str, ref_id: int, title: str = "",
-                  body: str = "") -> None:
-        '''写入/覆盖一条全文索引；ref_kind 取 event / experience / cognition。'''
+                  body: str = "", origin_project: str | None = None,
+                  session_id: str | None = None) -> None:
+        '''
+        写入/覆盖一条全文索引；ref_kind 取 event / experience / cognition。
+
+        范围列（origin_project / session_id）只存不索引：召回时先按它过滤，
+        避免范围外条目占满 top-k 名额（过滤逻辑仍由检索层 `_eligible` 兜底）。
+        '''
         if ref_kind not in _L3_EXTRA and ref_kind != "event":
             raise ValueError(f"不支持的 ref_kind: {ref_kind!r}")
         with self.transaction() as conn:
@@ -868,30 +1199,62 @@ class Database:
                 "DELETE FROM memory_fts WHERE ref_kind = ? AND ref_id = ?",
                 (ref_kind, int(ref_id)))
             conn.execute(
-                "INSERT INTO memory_fts (ref_kind, ref_id, title, body) VALUES (?, ?, ?, ?)",
-                (ref_kind, int(ref_id), title or "", body or ""))
+                "INSERT INTO memory_fts (ref_kind, ref_id, title, body, "
+                "origin_project, session_id) VALUES (?, ?, ?, ?, ?, ?)",
+                (ref_kind, int(ref_id), title or "", body or "",
+                 origin_project, session_id))
 
-    def search_fts(self, query: str, limit: int = 20) -> list[dict]:
-        '''全文检索；trigram 需要 ≥3 字符，更短的查询或语法错误退回 LIKE。'''
+    def search_fts(self, query: str, limit: int = 20, *,
+                   origin_project: str | None = None,
+                   restrict_project: bool = False,
+                   session_id: str | None = None) -> list[dict]:
+        '''
+        全文检索；trigram 需要 ≥3 字符，更短的查询或语法错误退回 LIKE。
+
+        :param restrict_project: True 时在**召回前**按范围列过滤（本项目 + 通用）；
+                                 False 表示跨项目（scope=all）
+        :param session_id: 限定会话（事件按来源会话、l3 按 origin_session）
+        :param origin_project: 当前项目；restrict_project 且为 None 时只剩通用条目
+
+        LIKE 回退的两个细节（中文 2 字查询是热路径）：
+        1. `%` / `_` 必须转义，否则查询本身会被当成通配符；
+        2. 没有 bm25 排名，改按「标题命中优先、正文更短优先」排序。
+        '''
         q = (query or "").strip()
         if not q:
             return []
+
+        clauses, params = [], []
+        if restrict_project:
+            clauses.append("(origin_project IS NULL OR origin_project = ?)")
+            params.append(origin_project)
+        if session_id is not None:
+            clauses.append("(ref_kind != 'event' OR session_id = ?)")
+            params.append(session_id)
+        extra = (" AND " + " AND ".join(clauses)) if clauses else ""
+
         rows = []
         if len(q) >= 3:
             # FTS5 MATCH 里 "."、"-" 等是语法字符，整体加双引号当短语处理
             phrase = '"' + q.replace('"', '""') + '"'
             try:
                 rows = self._conn.execute(
-                    "SELECT ref_kind, ref_id, title, body, bm25(memory_fts) AS rank "
-                    "FROM memory_fts WHERE memory_fts MATCH ? ORDER BY rank LIMIT ?",
-                    (phrase, limit)).fetchall()
+                    "SELECT ref_kind, ref_id, title, body, origin_project, "
+                    "session_id, bm25(memory_fts) AS rank "
+                    "FROM memory_fts WHERE memory_fts MATCH ?" + extra +
+                    " ORDER BY rank LIMIT ?",
+                    [phrase, *params, limit]).fetchall()
             except sqlite3.OperationalError:
                 rows = []
         if not rows:
+            pattern = f"%{_like_escape(q)}%"
             rows = self._conn.execute(
-                "SELECT ref_kind, ref_id, title, body, 0.0 AS rank "
-                "FROM memory_fts WHERE body LIKE ? OR title LIKE ? LIMIT ?",
-                (f"%{q}%", f"%{q}%", limit)).fetchall()
+                "SELECT ref_kind, ref_id, title, body, origin_project, "
+                "session_id, 0.0 AS rank "
+                "FROM memory_fts WHERE (body LIKE ? ESCAPE '\\' "
+                "OR title LIKE ? ESCAPE '\\')" + extra +
+                " ORDER BY (title LIKE ? ESCAPE '\\') DESC, length(body) ASC LIMIT ?",
+                [pattern, pattern, *params, pattern, limit]).fetchall()
         return [dict(row) for row in rows]
 
     # ---- 统计 ----

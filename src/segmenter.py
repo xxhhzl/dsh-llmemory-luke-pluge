@@ -13,6 +13,9 @@
     G3 兜底        仍不确定 → CONTINUE + needs_review
     吸附           判定点不是 user 时顺延到下一条 user；没有后续 user 则合并
 
+增量：`run(..., open_event=..., prev_message=...)` 支持只喂「新消息」——open_event 提供
+已归属事件的 id / 点数 / token / 标题摘要，续写段沿用其 id；没有新消息的空段会被丢弃。
+
 不做的：语义关联、摘要模型调用（summarize_event 目前是占位实现）。
 """
 from __future__ import annotations
@@ -196,6 +199,7 @@ class Event:
     summary: str = ""
     closed: bool = False
     tokens: int = 0          # 事件正文的 token 估算累计
+    event_id: int | None = None   # 非 None 表示这是「已存在事件的续写段」
 
     @property
     def start_seq(self) -> int:
@@ -208,6 +212,7 @@ class Event:
     def to_dict(self) -> dict:
         return {
             "order": self.order,
+            "event_id": self.event_id,
             "start_seq": self.start_seq,
             "end_seq": self.end_seq,
             "message_ids": list(self.message_ids),
@@ -241,6 +246,8 @@ class SegmentationResult:
 
 def summarize_event(messages: list) -> tuple:
     """占位摘要：事件闭合时调用一次。真实实现应换成外壳代理的摘要模型。"""
+    if not messages:                       # 公开函数，空表返回空标题/摘要
+        return "", ""
     first_user = next((m for m in messages if m.get("role") == "user"), messages[0])
     last_assistant = next(
         (m for m in reversed(messages) if m.get("role") == "assistant"), messages[-1])
@@ -255,6 +262,7 @@ class Segmenter:
                  config: Optional[SegmentConfig] = None):
         self.transport = transport or FakeTransport()
         self.config = config or SegmentConfig()
+        self._by_id: dict = {}
 
     def _message_tokens(self, message: dict) -> int:
         """token 预算的计数口径：dialog 只数 user/assistant，all 连工具输出一起数。"""
@@ -359,7 +367,16 @@ class Segmenter:
 
     # ---- 主流程 ----
 
-    def run(self, messages: list) -> SegmentationResult:
+    def run(self, messages: list, *, open_event: Optional[dict] = None,
+            prev_message: Optional[dict] = None) -> SegmentationResult:
+        '''
+        把消息序列切成事件。
+
+        :param open_event: 增量切分时「前一段已归属事件」的状态
+                           {event_id, message_count, tokens, title, summary}；
+                           给出时本次输入被视为该事件的续写段，第一个事件沿用其 id
+        :param prev_message: 输入之前的最后一条消息（用于 gap 与结构性先验）
+        '''
         cfg = self.config
         kept = [m for m in messages if m.get("role") != "system"]   # system 不入库
         self._by_id = {m.get("msg_id"): m for m in kept}
@@ -367,8 +384,16 @@ class Segmenter:
         events: list[Event] = []
         decisions: list[Decision] = []
         current: Optional[Event] = None
-        prev: Optional[dict] = None
+        prev: Optional[dict] = prev_message
         pending_snap = False
+
+        if open_event is not None:
+            current = Event(order=1,
+                            title=open_event.get("title") or "",
+                            summary=open_event.get("summary") or "",
+                            tokens=int(open_event.get("tokens") or 0),
+                            event_id=open_event.get("event_id"))
+            events.append(current)
 
         for index, message in enumerate(kept):
             role = message.get("role")
@@ -416,10 +441,15 @@ class Segmenter:
             current.tokens += self._message_tokens(message)
             prev = message
 
+        # 增量切分时，续写段可能一条新消息都没有（首条就 SPLIT）：丢掉空段
+        events = [event for event in events if event.message_ids]
+
         for event in events:
             event.closed = True
             messages_of_event = [self._by_id[mid] for mid in event.message_ids]
-            event.title, event.summary = summarize_event(messages_of_event)
+            # 续写段沿用原事件标题/摘要；新事件才生成占位摘要
+            if event.event_id is None:
+                event.title, event.summary = summarize_event(messages_of_event)
 
         result = SegmentationResult(events=events, decisions=decisions)
         validate(result, kept)

@@ -49,7 +49,8 @@ def main():
     base.setup_logging()
 
     # 预处理
-    message_q: base.message_queue = base.message_queue()
+    message_q: base.message_queue = base.message_queue(
+        int(config.get_config().get("store", {}).get("queue_max", 1000)))
     routo_table: routo.routo_register = routo.routo_register(message_q)
 
     # 模型调用一律走外壳代理：先绑定队列，后续业务模块用 llm.get_client()
@@ -111,6 +112,7 @@ def main():
             drained = base.wait_drained(message_q, base.shutdown_drain_ms / 1000)
             base.stop_writer()
             writer_thread.join(timeout=1.0)
+            tools.reset_db_cache()
             base.log.info("kernel.stopped", drain_ms=base.shutdown_drain_ms,
                           drained=drained)
             base.clear_log_context()
@@ -120,6 +122,7 @@ def main():
     base.wait_drained(message_q, 3.0)
     base.stop_writer()
     writer_thread.join(timeout=1.0)
+    tools.reset_db_cache()
 
 
 

@@ -146,8 +146,15 @@ def memory_search(query, limit=5, kind=None, scope=None, min_score=None,
                             origin_project=origin_project,
                             limit=effective_limit, kinds=kinds)
     items = [hit.to_dict() for hit in hits if hit.score >= threshold]
+    # 可观测：让调用方分清「真的没有」「被 limit 切了」「被 scope 滤了」
     return {"items": items, "count": len(items),
-            "scope": effective_scope, "limit": effective_limit}
+            "scope": effective_scope, "scope_applied": effective_scope,
+            "limit": effective_limit,
+            # 截断发生在 min_score 过滤之前，用原始命中数判断更准
+            "has_more": len(hits) >= effective_limit or len(items) < len(hits),
+            "filters": {"kind": kind or "all", "min_score": threshold},
+            "total": None,      # FTS 只取 top-50，给不出全局总数，如实置空
+            }
 
 
 class memory_get_args(BaseModel):

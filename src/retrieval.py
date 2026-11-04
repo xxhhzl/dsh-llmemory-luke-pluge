@@ -221,6 +221,21 @@ def _first_cue(row) -> str | None:
     return str(cues[0])[:20] if cues else None
 
 
+REVIEW_PENALTY = 0.5          # 待复核 / 低可信条目的强度折减
+LOW_CONFIDENCE = 0.5
+
+
+def _reliability(record, kind: str) -> float:
+    '''可信度折减：人工上报待复核的事件、confidence 偏低的 l3 都往后排。'''
+    if kind == "event":
+        return REVIEW_PENALTY if getattr(record, "needs_review", 0) else 1.0
+    try:
+        confidence = float(getattr(record, "confidence", 1.0) or 0.0)
+    except (TypeError, ValueError):
+        confidence = 1.0
+    return REVIEW_PENALTY if confidence < LOW_CONFIDENCE else 1.0
+
+
 def _score(found: dict, weights: dict, origin_project: str | None) -> list:
     '''
     精排：final = α·rel + (1−α)·strength。
@@ -266,6 +281,7 @@ def _score(found: dict, weights: dict, origin_project: str | None) -> list:
                     + weights["w_confidence"] * confidence
                     + weights["w_project"] * match
                     + 0.05 * entry["assoc"])
+        strength *= _reliability(record, kind)      # 待复核 / 低可信条目降权
         total = weights["alpha"] * rel_norm[key] + (1 - weights["alpha"]) * strength
         scored.append((total, kind, row_id, record, entry["assoc"]))
     scored.sort(key=lambda item: (-item[0], item[1], item[2]))

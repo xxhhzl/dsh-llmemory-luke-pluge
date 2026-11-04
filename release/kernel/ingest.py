@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 
 import base
 import config
+import sanitize
 import database
 import error
 import frame
@@ -447,7 +448,8 @@ class IngestWorker:
                     session_id=job["session_id"], message_id=msg_id,
                     owner=job.get("agent_id") or "", seq=seq,
                     role=str(item.get("role") or "user"),
-                    content=str(item.get("content") or ""),
+                    # 入库即脱敏：记忆库比 .env 更容易被整库拷走
+                    content=sanitize.redact(str(item.get("content") or "")),
                     occur_at=occur, created_at=now)
                 rc = db.insert_message(message)
                 if rc == 1:

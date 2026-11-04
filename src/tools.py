@@ -208,6 +208,9 @@ def stats(data, q: base.message_queue):
                       "needs_review": bool(event.needs_review)}
     frame.push(q, data, "stats", {
         "db_path": str(db.path),
+        # 外壳用它显示“内壳版本”：改完不重启会一直是旧值，便于发现未生效
+        "plugin_version": config.PLUGIN_VERSION,
+        "protocol_version": config.PROTOCOL_VERSION,
         "messages": db.count_messages(),
         "events": db.count_events(),
         "experiences": db.count_l3("experience"),

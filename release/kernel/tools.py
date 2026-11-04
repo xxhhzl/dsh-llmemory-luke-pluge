@@ -189,6 +189,40 @@ def memory_recent(from_at, to_at, session_id=None, limit=10,
     return {"items": [hit.to_dict() for hit in hits], "count": len(hits)}
 
 
+class memory_report_args(BaseModel):
+    id: int = Field(description="要上报的条目 id（来自 memory_search 的 items[].id）")
+    kind: Literal["event", "experience", "cognition"] = Field(
+        default="event",
+        description="id 的类型，必须与来源一致：event / experience / cognition")
+    reason: str = Field(description="哪里不对：与事实不符、已过时、张冠李戴等，一句话")
+
+
+@tool(memory_report_args)
+def memory_report(id, kind="event", reason=""):
+    '''上报一条记忆有问题：事件置「待复核」，经验/认知置为待复核（不再参与排序靠前）。只标状态，不改内容。'''
+    db = _db()
+    note = (reason or "").strip()[:120] or "reported"
+    if kind == "event":
+        if not db.set_event_review(int(id), True, note):
+            raise ToolError(CODE_NOT_FOUND, f"找不到 event #{id}")
+        return {"kind": "event", "id": int(id), "needs_review": True,
+                "reason": note}
+    if kind in ("experience", "cognition"):
+        # 错条目：置 invalid 并摘掉索引，避免继续被召回；正文保留可追溯
+        with db.transaction() as conn:
+            cur = conn.execute(
+                f"UPDATE {kind} SET status = 'invalid', invalid_reason = ? "
+                f"WHERE id = ?", (note, int(id)))
+            if cur.rowcount != 1:
+                raise ToolError(CODE_NOT_FOUND, f"找不到 {kind} #{id}")
+            conn.execute(
+                "DELETE FROM memory_fts WHERE ref_kind = ? AND ref_id = ?",
+                (kind, int(id)))
+        return {"kind": kind, "id": int(id), "status": "invalid",
+                "reason": note}
+    raise ToolError(-32602, f"未知 kind: {kind!r}")
+
+
 # ---------------- 运行状态 ----------------
 
 def stats(data, q: base.message_queue):

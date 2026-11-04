@@ -194,6 +194,22 @@ decisions 的条数与输入条数一致，index 与输入一一对应。
 - `session_id`（选填, 默认 null）：会话 id；省略=信封里的当前会话
 - `limit`（选填, 默认 10）：返回条数：事件占大头，经验/认知各最多 3 条
 
+### 提示词来源：`src/tools.py` — `memory_report` 工具定义（）
+
+模型看到的是 `description` + 每个参数的 `description`，它们直接决定调用姿势。
+
+**工具描述（description）**
+
+```text
+上报一条记忆有问题：事件置「待复核」，经验/认知置为待复核（不再参与排序靠前）。只标状态，不改内容。
+```
+
+**参数**
+
+- `id`（必填）：要上报的条目 id（来自 memory_search 的 items[].id）
+- `kind`（选填, 默认 "event"）：id 的类型，必须与来源一致：event / experience / cognition
+- `reason`（必填）：哪里不对：与事实不符、已过时、张冠李戴等，一句话
+
 ---
 
 ## 维护约定

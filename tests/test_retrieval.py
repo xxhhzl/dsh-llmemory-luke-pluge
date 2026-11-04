@@ -192,8 +192,9 @@ class TestTools(RetrievalCase):
                                 "session_id": S1, "agent_id": "a1"}, q)
         frame = json.loads(q.recv())
         names = [item["name"] for item in frame["data"]]
-        self.assertEqual(names, ["memory_search", "memory_get", "memory_recent"])
+        self.assertEqual(names, ["memory_search", "memory_get", "memory_recent", "memory_report"])
 
 
 if __name__ == "__main__":
     unittest.main()
+

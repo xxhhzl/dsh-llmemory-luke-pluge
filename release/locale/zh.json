@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "长期记忆",
+    "description": "把会话切成事件、蒸馏经验与认知，并向模型提供 memory_search / memory_get / memory_recent 三把记忆工具。"
+  }
+}

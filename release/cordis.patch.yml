@@ -1,0 +1,9 @@
+- insert:
+    - id: dsh-longmemory
+      name: '@local/dsh-longmemory'
+      config:
+        pythonPath: python
+        agentId: dsh-longmemory
+        ingestDebounceMs: 2500
+        requestTimeoutMs: 30000
+        llmTimeoutMs: 120000

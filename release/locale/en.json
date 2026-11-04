@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Long-term Memory",
+    "description": "Splits sessions into events, distils experiences and cognitions, and exposes memory_search / memory_get / memory_recent to the agent."
+  }
+}

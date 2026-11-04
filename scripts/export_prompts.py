@@ -22,7 +22,7 @@ import jev                       # noqa: E402
 import summary                   # noqa: E402
 import tools                     # noqa: E402
 
-OUT = ROOT / "prompt.md"
+OUT = ROOT / "docs" / "prompt.md"
 
 
 def _fence(text: str, lang: str = "text") -> str:

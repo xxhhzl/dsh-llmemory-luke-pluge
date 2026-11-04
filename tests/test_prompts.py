@@ -18,7 +18,7 @@ import consolidate  # noqa: E402
 import jev  # noqa: E402
 import summary  # noqa: E402
 
-DOC = ROOT / "prompt.md"
+DOC = ROOT / "docs" / "prompt.md"
 
 
 class TestPromptDoc(unittest.TestCase):

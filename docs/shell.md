@@ -89,7 +89,7 @@ src/js/
 | 打包一致性与语法 | `build_release.py --check` + `node --check` | ✅ |
 | `ctx.llm` / `ctx.tools` 两条桥 | 需在 Harness 内安装后验收 | ⏳ 见 release/README.md「验收」 |
 
-## 7. 本机安装记录（2026-11-03）
+## 7. 本机安装记录（2026-11-03 安装 / 2026-11-04 更新到 0.2.0）
 
 按 profile `desktop` 的既有约定安装（与 `@local/dsh-custom-mode` 的 `link:` 同型）：
 
@@ -99,6 +99,17 @@ src/js/
 | `~/.dsh/profiles/desktop/node_modules/@local/dsh-longmemory` | **实体目录**（复制 release/；先试过目录联接，宿主按 `routeLinked` 解析不到宿主包） |
 | `~/.dsh/profiles/desktop/cordis.patch.yml` | 追加 `id: dsh-longmemory` 覆盖行（pythonPath / dbPath / provider=workbuddy / model=deepseek-v4.1-flash） |
 | 备份 | 两个文件各有 `.bak-<时间戳>` |
+
+更新流程（幂等，改完源码就走这三步）：
+
+```powershell
+python scripts/build_release.py            # 装配 release/
+python scripts/build_release.py --check    # 逐字节核对
+Copy-Item release/* "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\@local\dsh-longmemory" -Recurse -Force
+```
+
+当前产物 **0.2.0**、51 个文件（`lib/` 12 个 JS + `kernel/` 22 个 py + 根 6 个 + locale/icon），
+与 `release/` 哈希逐一相同。版本号改了之后，运行中的进程仍报旧值，**重启 Harness** 才会刷新。
 
 生效方式：**重启 Harness**（插件解析表在启动时构建；`ResolutionRouter` 对新增包也要求重启）。
 

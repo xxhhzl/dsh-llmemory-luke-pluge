@@ -313,19 +313,23 @@ test('准入判定：路由层真的拒掉外来 Origin（不是只测函数）'
   assert.equal(called, 0, '被拒的请求不应触达内核')
 })
 
-test('tailLog 只读文件尾部，且丢掉被截断的首行', async () => {  const dir = await mkdtemp(path.join(tmpdir(), 'longmemory-logs-'))
+test('tailLog 只读文件尾部，且丢掉被截断的首行', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'longmemory-logs-'))
   try {
     const lines = []
     for (let index = 0; index < 500; index += 1) {
       lines.push(`2026-11-03T10:00:00.000Z 第 ${index} 行日志`)
     }
-    await writeFile(path.join(dir, 'shell.log'), lines.join('\n'), 'utf8')
+    // 真实日志以换行结尾：split 会多一个空串，不能被当成"最后一行"
+    await writeFile(path.join(dir, 'shell.log'), `${lines.join('\n')}\n`, 'utf8')
     const tail = tailLog('shell', { baseDir: dir, maxBytes: 2000 })
     assert.ok(tail.length > 1)
     assert.ok(tail.length < 500, '不该把整文件读回来')
     assert.equal(tail[tail.length - 1], '2026-11-03T10:00:00.000Z 第 499 行日志')
     assert.ok(tail[0].startsWith('2026-11-03T10:00:00.000Z 第 '),
       '首行必须完整，不能是半截时间戳')
+    assert.deepEqual(tailLog('shell', { baseDir: dir, maxBytes: 2000 }).slice(-1),
+      ['2026-11-03T10:00:00.000Z 第 499 行日志'], '末尾空行不应占位')
     // 文件不存在时返回空数组，而不是抛
     assert.deepEqual(tailLog('kernel', { baseDir: dir }), [])
   } finally {

@@ -137,6 +137,8 @@ export function tailLog(source, {
     let lines = buffer.toString('utf8').split('\n')
     // 从文件中间开始读会把第一行切成半截，丢掉它
     if (start > 0) lines = lines.slice(1)
+    // 文件以换行结尾时 split 会多出一个空串：留着会让 lines=1 只拿到空行
+    while (lines.length && lines[lines.length - 1] === '') lines.pop()
     return lines
   } catch {
     return []

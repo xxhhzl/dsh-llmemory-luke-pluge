@@ -193,7 +193,7 @@ class TestToolsSchema(QueueCase):
         self.assertEqual(frame["plugin_version"], config.PLUGIN_VERSION)
         # 中文不得被 \uXXXX 转义
         self.assertNotIn("\\u", raw)
-        self.assertIn("检索长期记忆", raw)
+        self.assertIn("长期记忆", raw)
         self.assertNotIn("\n", raw)
 
     def test_tool_definition_shape(self):

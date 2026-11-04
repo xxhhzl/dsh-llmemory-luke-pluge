@@ -11,7 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import ingest
-from database import Cognition, Database, Experience
+from database import Cognition, Database, Experience, Memory, Message
 from summary import SummaryResult
 
 BASE_TMP = Path(__file__).resolve().parents[1] / ".tmp" / "test_review_fixes"
@@ -195,6 +195,105 @@ class TestMinmax(FixCase):
         self.assertEqual(_minmax([3.2]), [1.0], "单条命中不该被压到 0.5")
         self.assertEqual(_minmax([2.0, 2.0]), [0.5, 0.5], "全等值保持中性")
         self.assertEqual(_minmax([1.0, 3.0]), [0.0, 1.0])
+
+
+class TestMultiWordQuery(FixCase):
+    """自然语言多词查询：整串当短语会必然召回 0，改成分级放宽。"""
+
+    def _event(self, title: str, summary: str) -> int:
+        event = self.db.create_event(S1, title, summary=summary)
+        self.db.index_fts("event", event.id, title, summary, session_id=S1)
+        return event.id
+
+    def test_multi_word_matches_without_being_contiguous(self):
+        event = self._event("部署自由猫", "把自由猫客户端部署到服务器，随后写启动脚本")
+        rows = self.db.search_fts("自由猫 脚本")
+        self.assertEqual([row["ref_id"] for row in rows], [event],
+                         "两个词分别出现即可命中，不要求相邻")
+
+    def test_natural_language_query_is_not_empty(self):
+        self._event("部署自由猫", "用户之前让我做的事情：把自由猫部署上去，项目在桌面")
+        rows = self.db.search_fts("用户之前让我做的事情 任务 项目 自由猫")
+        self.assertTrue(rows, "自然语言长查询不该召回 0 条")
+
+    def test_or_fallback_when_one_token_missing(self):
+        event = self._event("自由猫部署", "自由猫客户端说明")
+        rows = self.db.search_fts("自由猫 量子西瓜")
+        self.assertEqual([row["ref_id"] for row in rows], [event],
+                         "有词缺失时放宽为 OR，而不是整条 0 结果")
+
+    def test_no_token_at_all_still_empty(self):
+        self._event("自由猫部署", "自由猫客户端说明")
+        self.assertEqual(self.db.search_fts("量子纠缠西瓜"), [],
+                         "一个词都不在库里时仍应 0 结果")
+
+    def test_short_tokens_fall_back_to_like(self):
+        self._event("猫猫脚本", "猫猫 与 脚本 两个短词")
+        rows = self.db.search_fts("脚本 猫")
+        self.assertTrue(rows, "2 字词走 LIKE，不该因为 trigram 限制而丢召回")
+
+    def test_search_tool_returns_items_for_natural_language(self):
+        import retrieval
+        self._event("部署自由猫", "用户之前让我做的事情：部署自由猫客户端")
+        hits = retrieval.search(self.db, "用户之前让我做的事情 任务 项目 自由猫",
+                                touch=False)
+        self.assertTrue(hits, "memory_search 层也应拿到结果")
+        self.assertEqual(hits[0].kind, "event")
+
+
+class TestRecentWindow(FixCase):
+    """memory_recent 的窗口必须先归一到 UTC，否则 +08:00 会整体偏 8 小时。"""
+
+    def _event_at(self, occur_at: str) -> int:
+        event = self.db.create_event(S1, "窗口内事件", summary="摘要")
+        self.db.insert_message(Message(
+            session_id=S1, message_id="m1", owner="a", seq=0, role="user",
+            content="窗口内正文", occur_at=occur_at, created_at=occur_at))
+        self.db.insert_memory(Memory(
+            session_id=S1, message_id="m1", owner="a", seq=0,
+            occur_at=occur_at, created_at=occur_at))
+        self.db.bind_event(S1, "m1", event.id, strict=True)
+        return event.id
+
+    def test_local_offset_window_matches_utc_rows(self):
+        import retrieval
+        event_id = self._event_at("2026-11-04T01:00:00+00:00")   # = 09:00 +08:00
+        hits = retrieval.recent(self.db, S1,
+                                from_at="2026-11-04T08:30:00+08:00",
+                                to_at="2026-11-04T09:30:00+08:00")
+        self.assertEqual([hit.id for hit in hits], [event_id],
+                         "带 +08:00 的窗口要能命中 UTC 存的行")
+
+    def test_window_outside_stays_empty(self):
+        import retrieval
+        self._event_at("2026-11-04T01:00:00+00:00")
+        hits = retrieval.recent(self.db, S1,
+                                from_at="2026-11-04T10:00:00+08:00",
+                                to_at="2026-11-04T11:00:00+08:00")
+        self.assertEqual(hits, [])
+
+
+class TestToolSchemaText(unittest.TestCase):
+    """schema 描述本身就是提示词：query 不能只说“检索语句”。"""
+
+    def test_search_query_description_teaches_keyword_use(self):
+        from tools import memory_search_args
+        description = memory_search_args.model_json_schema()[
+            "properties"]["query"]["description"]
+        self.assertIn("空格分隔", description)
+        self.assertNotEqual(description.strip(), "检索语句")
+
+    def test_recent_window_description_requires_timezone(self):
+        from tools import memory_recent_args
+        schema = memory_recent_args.model_json_schema()["properties"]
+        self.assertIn("时区", schema["from_at"]["description"])
+        self.assertIn("UTC", schema["to_at"]["description"])
+
+    def test_get_id_description_points_at_search(self):
+        from tools import memory_get_args
+        description = memory_get_args.model_json_schema()[
+            "properties"]["id"]["description"]
+        self.assertIn("memory_search", description)
 
 
 if __name__ == "__main__":

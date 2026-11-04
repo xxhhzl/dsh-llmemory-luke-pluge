@@ -114,24 +114,26 @@ def _search_defaults() -> dict:
 # ---------------- 工具定义 ----------------
 
 class memory_search_args(BaseModel):
-    query: str = Field(description="检索语句")
+    query: str = Field(description=(
+        "检索关键词：用名词或短语，多个关键词用空格分隔（默认要求同时出现，"
+        "缺一个会自动放宽）。不要写整句提问——整句里只有一两个词真正能命中"))
     limit: int = Field(default=5, ge=1, le=100,
-                       description="返回条数（运行时按 search.limit_max 收敛）")
+                       description="返回条数，默认 5；上限受配置 search.limit_max（默认 20）约束")
     kind: Literal["event", "experience", "cognition"] | None = Field(
         default=None,
-        description="限定类型：event / experience / cognition；省略表示全部")
+        description="限定类型：event=事件摘要、experience=做法、cognition=事实/偏好；省略=三类都搜")
     scope: Literal["project", "all"] | None = Field(
         default=None,
-        description="project=本项目+通用；all=跨项目；省略取配置默认值")
+        description="project=本项目+通用；all=跨项目；省略取配置默认值（当前 all）")
     min_score: float | None = Field(
         default=None, ge=0.0, le=1.0,
-        description="融合分下限；省略取配置默认值")
+        description="融合分下限（0–1），低于它的不返回；一般省略")
 
 
 @tool(memory_search_args)
 def memory_search(query, limit=5, kind=None, scope=None, min_score=None,
                   *, session_id=None, origin_project=None):
-    '''检索长期记忆：事件摘要、经验、认知，按相关性 × 记忆强度排序。'''
+    '''在长期记忆里找线索：返回事件摘要、经验、认知（按相关性 × 记忆强度排序）。先用它定位拿 id，再用 memory_get 读正文；问「刚才那段时间」用 memory_recent。'''
     search_cfg = _search_defaults()
     effective_limit = max(1, min(int(limit), int(search_cfg.get("limit_max", 20))))
     effective_scope = scope or search_cfg.get("default_scope", "all")
@@ -149,14 +151,15 @@ def memory_search(query, limit=5, kind=None, scope=None, min_score=None,
 
 
 class memory_get_args(BaseModel):
-    id: int = Field(description="条目 id")
+    id: int = Field(description="条目 id（来自 memory_search 返回的 items[].id）")
     kind: Literal["event", "experience", "cognition"] = Field(
-        default="event", description="event / experience / cognition")
+        default="event",
+        description="id 的类型，必须与来源一致：event / experience / cognition")
 
 
 @tool(memory_get_args)
 def memory_get(id, kind="event"):
-    '''按 id 取一条记忆：event 返回事件与全部正文消息，l3 返回整行。'''
+    '''按 id 读一条完整记忆：event 返回事件行 + 全部正文消息；经验/认知返回整行。'''
     db = _db()          # 共享连接，勿关闭
     out = retrieval.get(db, kind, int(id))
     if not out:
@@ -165,17 +168,20 @@ def memory_get(id, kind="event"):
 
 
 class memory_recent_args(BaseModel):
-    from_at: str = Field(description="起始时间（ISO8601，含）")
-    to_at: str = Field(description="结束时间（ISO8601，含）")
+    from_at: str = Field(description=(
+        "窗口起点，ISO 8601 且带时区，例如 2026-11-04T08:30:00+08:00（内部归一到 UTC）"))
+    to_at: str = Field(description=(
+        "窗口终点，ISO 8601 且带时区，例如 2026-11-04T09:45:00+08:00（含边界，内部归一到 UTC）"))
     session_id: str | None = Field(
-        default=None, description="会话 id；省略取信封里的当前会话")
-    limit: int = Field(default=10, ge=1, le=50, description="返回条数")
+        default=None, description="会话 id；省略=信封里的当前会话")
+    limit: int = Field(default=10, ge=1, le=50,
+                       description="返回条数：事件占大头，经验/认知各最多 3 条")
 
 
 @tool(memory_recent_args)
 def memory_recent(from_at, to_at, session_id=None, limit=10,
                   *, origin_project=None):
-    '''按时间区间取事件摘要与经验/认知，用于「刚才那段时间聊了什么」。'''
+    '''按时间区间回放：那段时间发生了什么（事件摘要）+ 沉淀了什么（经验/认知）。'''
     db = _db()          # 共享连接，勿关闭
     hits = retrieval.recent(db, session_id or "", from_at=from_at,
                             to_at=to_at, limit=limit,

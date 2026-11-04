@@ -22,19 +22,30 @@ MAX_CANDIDATES = 5
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.S)
 _ACTIONS = ("new", "supersede", "invalidate")
 
-CONSOLIDATE_SYSTEM_PROMPT = """你是长期记忆的合并裁决器。输入是若干「新条目」以及每条检索到的候选旧条目。
-对每条新条目选一个动作：
-- new：与候选不重复、不冲突；
+CONSOLIDATE_SYSTEM_PROMPT = """【角色】你是长期记忆的合并裁决器：判断每条新条目是否与已有记忆重复或冲突，决定它如何入库。
+
+【输入】user 消息是一个 JSON 数组，每项含：
+index（序号）、table（experience/cognition）、new（新条目）、candidates（候选旧条目，每条有 id/content）。
+
+【动作】
+- new：与候选不重复、不冲突，直接新增；
 - supersede：新条目取代某条旧条目（旧条目过时、被更新）；
-- invalidate：新条目表明某条旧条目不再成立，且没有替代（必须给 reason）。
+- invalidate：新条目证明某条旧条目不再成立，且没有替代（必须给 reason）。
 
-规则：
-1. 只有候选里明确重复或冲突时才 supersede / invalidate；不确定一律 new。
-2. target_id 必须是该条目候选列表里的 id，不得编造。
-3. 不要合并两条语义不同但用词相近的条目。
+【规则】
+1. 只在候选里明确重复或冲突时才选 supersede / invalidate，其余一律 new。
+2. target_id 必须原样取自该条目的 candidates 里的 id，不编造。
+3. 语义不同但用词相近的条目保持独立，分别新增。
+4. reason 用一句话说明依据（≤60 字符），supersede / invalidate 必填。
 
-只输出 JSON：{"decisions":[{"index":0,"action":"new","target_id":null,"reason":""}]}
-不要解释、不要 markdown。"""
+【输出】只输出一个 JSON 对象，键与类型固定如下（无 markdown 代码块、无解释文字）：
+{"decisions":[{"index":0,"action":"new|supersede|invalidate","target_id":null,"reason":""}]}
+decisions 的条数与输入条数一致，index 与输入一一对应。
+
+【示例】输入：[{"index":0,"table":"cognition","new":{"content":"项目用 pnpm"},"candidates":[{"id":7,"content":"项目用 npm"}]}]
+输出：{"decisions":[{"index":0,"action":"supersede","target_id":7,"reason":"包管理器由 npm 改为 pnpm"}]}
+
+【边界】候选为空时该条选 new；无法判断时选 new。"""
 
 
 @dataclass(frozen=True)

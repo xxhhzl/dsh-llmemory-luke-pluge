@@ -1245,28 +1245,48 @@ class Database:
             params.append(session_id)
         extra = (" AND " + " AND ".join(clauses)) if clauses else ""
 
-        rows = []
-        if len(q) >= 3:
-            # FTS5 MATCH 里 "."、"-" 等是语法字符，整体加双引号当短语处理
-            phrase = '"' + q.replace('"', '""') + '"'
+        # 查询级联：整串当短语会让自然语言查询必然召回 0
+        # （"用户之前让我做的事 任务 项目 自由猫" 要求这些词在文档里连续出现）。
+        # 顺序：全部长词 AND → 长词 OR → 全部词 LIKE(AND) → 全部词 LIKE(OR)，
+        # 逐级放宽，先精确后召回。
+        tokens = q.split() or [q]
+        long_tokens = [token for token in tokens if len(token) >= 3]
+
+        def fts(match: str):
             try:
-                rows = self._conn.execute(
+                return self._conn.execute(
                     "SELECT ref_kind, ref_id, title, body, origin_project, "
                     "session_id, bm25(memory_fts) AS rank "
                     "FROM memory_fts WHERE memory_fts MATCH ?" + extra +
                     " ORDER BY rank LIMIT ?",
-                    [phrase, *params, limit]).fetchall()
+                    [match, *params, limit]).fetchall()
             except sqlite3.OperationalError:
-                rows = []
-        if not rows:
-            pattern = f"%{_like_escape(q)}%"
-            rows = self._conn.execute(
+                return []
+
+        def like(mode_and: bool):
+            conditions, flat = [], []
+            for token in tokens:
+                pattern = f"%{_like_escape(token)}%"
+                conditions.append(
+                    "(body LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\')")
+                flat.extend([pattern, pattern])
+            joiner = " AND " if mode_and else " OR "
+            head = f"%{_like_escape(tokens[0])}%"
+            return self._conn.execute(
                 "SELECT ref_kind, ref_id, title, body, origin_project, "
-                "session_id, 0.0 AS rank "
-                "FROM memory_fts WHERE (body LIKE ? ESCAPE '\\' "
-                "OR title LIKE ? ESCAPE '\\')" + extra +
+                "session_id, 0.0 AS rank FROM memory_fts WHERE "
+                + joiner.join(conditions) + extra +
                 " ORDER BY (title LIKE ? ESCAPE '\\') DESC, length(body) ASC LIMIT ?",
-                [pattern, pattern, *params, pattern, limit]).fetchall()
+                [*flat, *params, head, limit]).fetchall()
+
+        quoted = ['"' + token.replace('"', '""') + '"' for token in long_tokens]
+        rows = fts(" AND ".join(quoted)) if quoted else []
+        if not rows and len(quoted) > 1:
+            rows = fts(" OR ".join(quoted))
+        if not rows:
+            rows = like(mode_and=True)
+        if not rows and len(tokens) > 1:
+            rows = like(mode_and=False)
         return [dict(row) for row in rows]
 
     # ---- 统计 ----

@@ -391,12 +391,16 @@ def recent(db: database.Database, session_id: str, *, from_at: str, to_at: str,
     if start > end:
         raise ValueError("from_at 不得晚于 to_at")
 
+    # 库里所有时间列都是 UTC 字符串；窗口也必须归一成 UTC 再比较，
+    # 否则模型传 +08:00 时，字符串比较会整体偏 8 小时（漏掉/多收一大段）。
+    start_iso, end_iso = base.to_utc_iso(from_at), base.to_utc_iso(to_at)
+
     limit = max(1, int(limit))
     l3_quota = min(3, limit)
     event_quota = max(1, limit - l3_quota)
 
     hits = []
-    for span in db.list_events_overlapping(session_id, from_at, to_at,
+    for span in db.list_events_overlapping(session_id, start_iso, end_iso,
                                            limit=event_quota):
         hits.append(Hit(kind="event", id=span.event.id, title=span.event.title,
                         text=span.event.summary or "", score=1.0,
@@ -406,9 +410,9 @@ def recent(db: database.Database, session_id: str, *, from_at: str, to_at: str,
 
     for kind, rows in (
             ("experience", db.list_experiences(origin_project=origin_project, limit=l3_quota,
-                                               created_from=from_at, created_to=to_at)),
+                                               created_from=start_iso, created_to=end_iso)),
             ("cognition", db.list_cognitions(origin_project=origin_project, limit=l3_quota,
-                                             created_from=from_at, created_to=to_at))):
+                                             created_from=start_iso, created_to=end_iso))):
         for row in rows:
             hits.append(Hit(kind=kind, id=row.id, title=_title(row, kind),
                             text=_text(row, kind), score=0.5,

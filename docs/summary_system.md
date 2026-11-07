@@ -71,6 +71,14 @@ AWM 归纳 workflow 时把实例专属值抽象成占位符（「dry cat food」
 cues 保留 `build_release`。摘要不受影响（仍原样保留路径/命令）。
 真实会话四片段对比：正文含项目专属值的经验 **3 → 0**，条数不变（9 → 9）。
 
+v0.7（2026-11-07）给经验加**显式适用范围** `scope`（`global` / `project`）。
+调研结论：主流系统多数不设该字段，而用作用域（mem0 的 `user_id/agent_id`、LangMem 的 namespace）、
+抽象化（AWM）或两级记忆（ExpeL 的 insights vs experiences）表达同一件事；我们已有
+`origin_project`（存储范围）与 `promote_experiences`（使用次数达标后晋升为全局），
+补 `scope` 是为了把「模型判断的适用范围」与「存在哪个项目」分开：
+正文写得再通用，只要依赖本项目约定就标 `project`。
+判定口诀：**把这条经验原样搬到陌生项目，会不会因「这里的规矩不一样」失败？会 → project。**
+
 ## 4. 用户消息模板（user）
 
 ```text
@@ -97,6 +105,7 @@ cues 保留 `build_release`。摘要不受影响（仍原样保留路径/命令�
       "context": "编辑 drawio 图形样式并导出 SVG 时",
       "content": "导出前统一 strokeWidth，导出后再改无效",
       "kind": "technique",
+      "scope": "global",
       "importance": 4,
       "confidence": 0.9,
       "cues": ["drawio", "svg", "导出"],
@@ -125,6 +134,7 @@ cues 保留 `build_release`。摘要不受影响（仍原样保留路径/命令�
 | `subject`（认知） | 字符串 ≤40 | 命题主体：`用户` / 项目名 / 工具名 |
 | `content` | 字符串 ≤200 | 做法或事实，一句话 |
 | `kind` | 经验：`technique/pitfall/command`；认知：`fact/preference/constraint` | 子类，检索时过滤 |
+| `scope`（经验） | `global` / `project` | 适用范围：global=换项目仍成立；project=依赖本项目结构、配置或流程；缺省 project |
 | `importance` | 1–5 | 显著性 |
 | `confidence` | 0–1 | 经验=可靠性；认知=确信度 |
 | `cues` | 字符串数组 ≤10 | 检索线索 |
@@ -197,6 +207,7 @@ ingest.apply_summary(decisions=...)  ── 新行 / 取代 / 失效 + FTS + dig
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v0.7 | 2026-11-07 | 经验加 `scope`（global/project）：模型判断适用范围，缺省 project；晋升时置 global |
 | v0.6 | 2026-11-07 | 经验可迁移性：正文抽象（项目专属值→通用说法），具体值放 cues |
 | v0.5 | 2026-11-07 | 认知主体写法规范 + 调用 B 主体归一（召回双向包含、裁决带 `subject`）|
 | v0.4 | 2026-11-07 | 按 mem0/LangMem/Reflexion/A-MEM 调研重写提取判据：类型枚举 + 反问自检 + 打分锚点 + 三个 few-shot；真实模型四用例对比验证后替换 |

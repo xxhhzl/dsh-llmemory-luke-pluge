@@ -307,6 +307,27 @@ class TestL3(DatabaseCase):
         self.assertEqual(cog.kind, "preference")
         self.assertEqual(cog.origin_project, None)
 
+    def test_scope_defaults_project_and_global_roundtrip(self):
+        default_id = self.db.insert_experience(self._exp())
+        self.assertEqual(self.db.get_experience(default_id).scope, "project")
+        global_id = self.db.insert_experience(self._exp(scope="global"))
+        self.assertEqual(self.db.get_experience(global_id).scope, "global")
+
+    def test_migration_adds_scope_and_backfills_global(self):
+        '''老库没有 scope 列：重开库应补列，并把 origin_project IS NULL 回填为 global。'''
+        self.db.insert_experience(self._exp(origin_project=None))
+        self.db.insert_experience(self._exp(origin_project="proj_a"))
+        try:
+            self.db._conn.execute("ALTER TABLE experience DROP COLUMN scope")
+            self.db._conn.commit()
+        except sqlite3.OperationalError as exc:      # SQLite < 3.35 不支持 DROP COLUMN
+            self.skipTest(f"当前 SQLite 不支持 DROP COLUMN: {exc}")
+        self.db.close()
+        self.db = Database(self.db_path)
+        scopes = {e.origin_project: e.scope for e in self.db.list_experiences()}
+        self.assertEqual(scopes[None], "global")
+        self.assertEqual(scopes["proj_a"], "project")
+
     def test_list_filters_status_and_origin(self):
         a = self.db.insert_experience(self._exp(origin_project="proj_a"))
         b = self.db.insert_experience(self._exp(origin_project="proj_b"))

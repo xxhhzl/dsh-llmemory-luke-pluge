@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS experience (
   importance      INTEGER NOT NULL DEFAULT 3,
   origin_session  TEXT,                       -- 从哪次会话学到的
   origin_project  TEXT,                       -- 从哪个项目学到的；NULL = 通用
+  scope           TEXT    NOT NULL DEFAULT 'project',  -- global / project：适用范围的模型判断
   source_event_id INTEGER NOT NULL,
   cues            TEXT,                       -- JSON 数组：检索线索
   use_count       INTEGER NOT NULL DEFAULT 0,
@@ -287,6 +288,7 @@ class Experience:
     importance: int = 3
     origin_session: str | None = None
     origin_project: str | None = None
+    scope: str = "project"        # global（跨项目成立）/ project（依赖本项目结构）
     source_event_id: int | None = None
     cues: tuple[str, ...] = ()
     use_count: int = 0
@@ -303,7 +305,8 @@ class Experience:
             id=row["id"], context=row["context"], content=row["content"],
             kind=row["kind"], confidence=row["confidence"],
             importance=row["importance"], origin_session=row["origin_session"],
-            origin_project=row["origin_project"], source_event_id=row["source_event_id"],
+            origin_project=row["origin_project"], scope=row["scope"],
+            source_event_id=row["source_event_id"],
             cues=_load_cues(row["cues"]), use_count=row["use_count"],
             last_used_at=row["last_used_at"], created_at=row["created_at"],
             status=row["status"], superseded_id=row["superseded_id"],
@@ -442,6 +445,14 @@ class Database:
         if "last_used_at" not in columns:
             self._conn.execute(
                 "ALTER TABLE event ADD COLUMN last_used_at TEXT")
+        # 经验补 scope（适用范围）：老库按「跨项目可见即通用」回填
+        exp_columns = {row["name"] for row in self._conn.execute(
+            "PRAGMA table_info(experience)")}
+        if "scope" not in exp_columns:
+            self._conn.execute(
+                "ALTER TABLE experience ADD COLUMN scope TEXT NOT NULL DEFAULT 'project'")
+            self._conn.execute(
+                "UPDATE experience SET scope = 'global' WHERE origin_project IS NULL")
         self._ensure_supersede_indexes()
         self._ensure_fts_scope_columns()
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
@@ -950,6 +961,13 @@ class Database:
 
     # ---- 写入：l3（经验 / 认知） ----
 
+    def _l3_columns(self, table: str) -> tuple:
+        '''表 → 写入列；scope 只属于经验，认知没有这一列。'''
+        columns = (_L3_EXTRA[table],) + _L3_COLUMNS
+        if table == "experience":
+            columns = columns + ("scope",)
+        return columns
+
     def _l3_values(self, table: str, item) -> tuple:
         extra = _L3_EXTRA[table]
         values = [getattr(item, extra)]
@@ -960,11 +978,12 @@ class Database:
             elif name == "created_at" and not value:
                 value = base.get_cur_time()
             values.append(value)
+        if table == "experience":
+            values.append(getattr(item, "scope", "project"))
         return tuple(values)
 
     def _l3_insert(self, conn, table: str, item) -> int:
-        extra = _L3_EXTRA[table]
-        columns = (extra,) + _L3_COLUMNS
+        columns = self._l3_columns(table)
         placeholders = ", ".join("?" for _ in columns)
         cur = conn.execute(
             f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})",

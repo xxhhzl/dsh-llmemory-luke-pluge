@@ -114,6 +114,7 @@ CREATE TABLE experience (
   importance      INTEGER NOT NULL DEFAULT 3,
   origin_session  TEXT,
   origin_project  TEXT,
+  scope           TEXT    NOT NULL DEFAULT 'project',  -- global / project
   source_event_id INTEGER NOT NULL,
   cues            TEXT,                       -- JSON 数组
   use_count       INTEGER NOT NULL DEFAULT 0,
@@ -131,6 +132,7 @@ CREATE TABLE experience (
 | context | 条件侧（触发线索） | 什么情形下适用；缺了它经验会变成无条件建议 |
 | content | 程序（做法） | 一句话做法：改哪里、跑什么命令、避开什么 |
 | kind | 程序子类 | `technique` / `pitfall` / `command` |
+| scope | 适用范围 | `global`（换项目仍成立）/ `project`（依赖本项目结构、配置或流程）；模型在提取时判断，缺省 `project` |
 | confidence | 可靠性 | 被验证过的程度（做得成），与认知的「信得过」同名不同义 |
 | importance | 显著性 | 排序乘子，默认 3 |
 | origin_session / origin_project | 源记忆 | 从哪次会话、哪个项目学到的；`origin_project` 为 NULL 表示通用 |

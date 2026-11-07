@@ -66,6 +66,7 @@ def build_experience(item: dict, *, event_id: int, session_id: str,
         importance=int(item.get("importance", 3)),
         origin_session=session_id,
         origin_project=origin_project,
+        scope=item.get("scope") if item.get("scope") in ("global", "project") else "project",
         source_event_id=event_id,
         cues=tuple(item.get("cues") or ()),
         created_at=base.get_cur_time(),
@@ -307,9 +308,9 @@ def promote_experiences(db: database.Database, *, min_use: int = 3,
         if row.origin_project is None or int(row.use_count or 0) < min_use:
             continue
         candidate = replace(
-            row, id=0, origin_project=None, superseded_id=None, status="active",
-            valid_to=None, invalid_reason=None, use_count=0, last_used_at=None,
-            created_at=base.get_cur_time())
+            row, id=0, origin_project=None, scope="global", superseded_id=None,
+            status="active", valid_to=None, invalid_reason=None,
+            use_count=0, last_used_at=None, created_at=base.get_cur_time())
         new_id = db.supersede_experience(row.id, candidate)
         if new_id is None:
             continue

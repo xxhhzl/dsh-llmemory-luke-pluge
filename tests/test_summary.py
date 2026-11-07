@@ -83,6 +83,23 @@ class TestParse(unittest.TestCase):
         self.assertEqual(result.cognitions[0]["subject"], "用户")
         self.assertFalse(result.needs_review)
 
+    def test_scope_defaults_to_project(self):
+        raw = json.dumps({"title": "t", "summary": "s",
+                          "experiences": [{"content": "做法"}]}, ensure_ascii=False)
+        self.assertEqual(parse_result(raw).experiences[0]["scope"], "project")
+
+    def test_scope_global_kept(self):
+        raw = json.dumps({"title": "t", "summary": "s",
+                          "experiences": [{"content": "做法", "scope": "GLOBAL"}]},
+                         ensure_ascii=False)
+        self.assertEqual(parse_result(raw).experiences[0]["scope"], "global")
+
+    def test_unknown_scope_falls_back_to_project(self):
+        raw = json.dumps({"title": "t", "summary": "s",
+                          "experiences": [{"content": "做法", "scope": "everywhere"}]},
+                         ensure_ascii=False)
+        self.assertEqual(parse_result(raw).experiences[0]["scope"], "project")
+
     def test_fenced_json(self):
         raw = '```json\n{"title": "t", "summary": "s"}\n```'
         result = parse_result(raw)

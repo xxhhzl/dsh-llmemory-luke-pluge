@@ -187,6 +187,7 @@ class TestPromotion(Batch8Case):
 
         new_row = self.db.get_experience(new_id)
         self.assertIsNone(new_row.origin_project, "晋升后应为通用")
+        self.assertEqual(new_row.scope, "global", "晋升即视为跨项目适用")
         self.assertEqual(new_row.content, "先跑迁移再改库", "正文不变")
         old_row = self.db.get_experience(item)
         self.assertEqual(old_row.status, "superseded", "旧行保留但退休")

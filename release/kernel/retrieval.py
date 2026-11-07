@@ -155,6 +155,8 @@ def _meta(row, kind: str, extra: dict | None = None) -> dict:
         meta["session_id"] = row.session_id
         meta.pop("importance", None)
         meta.pop("confidence", None)
+    elif kind == "experience":
+        meta["scope"] = getattr(row, "scope", "project")
     if extra:
         meta.update(extra)
     return meta
@@ -462,6 +464,7 @@ def get(db: database.Database, kind: str, item_id: int, *, touch: bool = True) -
             "confidence": row.confidence, "importance": row.importance,
             "origin_session": row.origin_session,
             "origin_project": row.origin_project,
+            "scope": getattr(row, "scope", None) if kind == "experience" else None,
             "source_event_id": row.source_event_id,
             "status": row.status, "valid_to": row.valid_to,
             "use_count": row.use_count, "last_used_at": row.last_used_at,

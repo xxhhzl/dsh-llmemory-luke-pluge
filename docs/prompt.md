@@ -53,6 +53,10 @@
   解释器路径 → 「项目虚拟环境的解释器」；具体脚本名 → 「发布构建脚本」；版本号 → 「当前版本」；
 - **具体值放进 cues**，检索时仍能用（cues 保留 build_release、.venv、dsh-longmemory-plugin 这类词）；
 - 只有这条经验确实只对某个项目/版本成立时才保留具体值（如「Django 4.2 的 X 行为」）。
+- `scope` 标出适用范围：**global** = 换个项目仍成立（做法不依赖本项目的目录结构、脚本名、配置）；
+  **project** = 依赖本项目结构或约定，别处照搬会出错。正文写得再通用，只要依赖本项目约定就标 project。
+  判断时问：**把这条经验原样搬到一个陌生项目，会不会因为「这里的规矩不一样」而失败？**会 → project。
+  典型 project：依赖本项目的配置写法/目录约定/模块边界/构建流程/命名规范。
 反例：❌「先设 PYTHONIOENCODING 再用 C:/proj/.venv/Scripts/python.exe 跑测试」
 正例：✅「Windows 下跑 Python 测试先设 PYTHONIOENCODING=utf-8，用项目虚拟环境的解释器」
 
@@ -82,8 +86,8 @@
   "summary": "≤400 字符，第一句写做了什么、结果如何",
   "experiences": [
     {"context": "触发条件，≤120 字符", "content": "一句话做法，≤200 字符",
-     "kind": "technique|pitfall|command", "importance": 1,
-     "confidence": 0.8, "cues": ["检索线索"]}
+     "kind": "technique|pitfall|command", "scope": "global|project",
+     "importance": 1, "confidence": 0.8, "cues": ["检索线索"]}
   ],
   "cognitions": [
     {"subject": "主体，≤40 字符", "content": "一句话事实，≤200 字符",
@@ -98,7 +102,7 @@ importance 取 1–5 的整数，confidence 取 0–1 的小数，cues 是 0–1
 user：把 README 的安装步骤从 bash 改成 PowerShell。
 assistant：改完了。Windows 上 bash 示例新用户跑不了，统一成 pwsh 命令。另外跑了 python scripts/build_release.py --check 验证产物一致。
 user：以后这个项目文档都保持 PowerShell 优先。
-输出：{"title":"改写安装步骤为 PowerShell","summary":"把 README 的安装步骤从 bash 改写为 PowerShell（Windows 用户跑不了 bash 示例），并用 build_release.py --check 验证产物一致；项目文档此后保持 PowerShell 优先。","experiences":[{"context":"发布前验证产物时","content":"用发布构建脚本的 --check 做逐字节比对，能拦住源码改了但产物没同步的问题","kind":"technique","importance":4,"confidence":0.9,"cues":["build_release","--check","产物校验","发布"]}],"cognitions":[{"subject":"项目文档","content":"文档命令示例保持 PowerShell 优先","kind":"preference","importance":4,"confidence":0.95,"cues":["文档","PowerShell"]}]}
+输出：{"title":"改写安装步骤为 PowerShell","summary":"把 README 的安装步骤从 bash 改写为 PowerShell（Windows 用户跑不了 bash 示例），并用 build_release.py --check 验证产物一致；项目文档此后保持 PowerShell 优先。","experiences":[{"context":"发布前验证产物时","content":"用发布构建脚本的 --check 做逐字节比对，能拦住源码改了但产物没同步的问题","kind":"technique","scope":"global","importance":4,"confidence":0.9,"cues":["build_release","--check","产物校验","发布"]}],"cognitions":[{"subject":"项目文档","content":"文档命令示例保持 PowerShell 优先","kind":"preference","importance":4,"confidence":0.95,"cues":["文档","PowerShell"]}]}
 
 【示例二：纯问答，没有可提取内容】
 输入：[正文]
@@ -113,7 +117,7 @@ user：把边框改成 1px 然后导出 export.svg 给我。
 assistant：已改成 1px，导出 export.svg 成功，文件在桌面。
 user：这个插件的检索一直搜不到旧事件，你查下。
 assistant：查到原因：FTS 表在旧库结构里缺 origin_project 列，scope=project 的过滤发生在召回之后，60 条别项目条目把本项目 5 条全挤出 top-50。已修：范围过滤下推到召回层。
-输出：{"title":"导出 SVG 并修复检索范围过滤","summary":"把边框改为 1px 并导出 export.svg；随后定位检索漏召回的原因——FTS 表缺 origin_project 列导致范围过滤在召回后执行，范围外条目挤占 top-50——已把过滤下推到召回层修复。","experiences":[{"context":"FTS 检索带范围过滤时","content":"范围过滤必须下推到召回层（MATCH 查询里带条件），召回后再筛会让范围外条目挤占名额","kind":"pitfall","importance":4,"confidence":0.9,"cues":["FTS","召回","范围过滤"]}],"cognitions":[]}
+输出：{"title":"导出 SVG 并修复检索范围过滤","summary":"把边框改为 1px 并导出 export.svg；随后定位检索漏召回的原因——FTS 表缺 origin_project 列导致范围过滤在召回后执行，范围外条目挤占 top-50——已把过滤下推到召回层修复。","experiences":[{"context":"FTS 检索带范围过滤时","content":"范围过滤必须下推到召回层（MATCH 查询里带条件），召回后再筛会让范围外条目挤占名额","kind":"pitfall","scope":"global","importance":4,"confidence":0.9,"cues":["FTS","召回","范围过滤"]}],"cognitions":[]}
 说明：「导出 export.svg 到桌面」是当次产物，不提取；「边框 1px」是当次参数，不提取；只有「召回层下推」这类可迁移的判断才是经验。
 
 【边界】信息不足时，summary 只写已知事实、数组给 []；对某条内容没有把握时宁可不写它，也不要编造。

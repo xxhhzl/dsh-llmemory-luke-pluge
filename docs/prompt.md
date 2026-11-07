@@ -4,7 +4,7 @@
 > 不要手改本文件（`--check` 会校验是否过期）。
 
 模型看到的提示词有五处：事件归档（调用 A）、事件边界判定、合并裁决（调用 B）、
-洞见归纳（归纳层）、以及四个记忆工具的定义。下面按「来源 → 提示词原文」逐条列出。
+洞见归纳（归纳层）、以及五个记忆工具的定义。下面按「来源 → 提示词原文」逐条列出。
 
 ## 目录
 
@@ -17,6 +17,7 @@
 7. `memory_get` 工具（`src/tools.py`）
 8. `memory_recent` 工具（`src/tools.py`）
 9. `memory_report` 工具（`src/tools.py`）
+10. `memory_self_write` 工具（`src/tools.py`）
 
 ---
 
@@ -364,6 +365,22 @@ id 是经验编号，用于在输出里标注证据。
 - `id`（必填）：要上报的条目 id（来自 memory_search 的 items[].id）
 - `kind`（选填, 默认 "event"）：id 的类型，必须与来源一致：event / experience / cognition / insight
 - `reason`（必填）：哪里不对：与事实不符、已过时、张冠李戴等，一句话
+
+### 提示词来源：`src/tools.py` — `memory_self_write` 工具定义（）
+
+模型看到的是 `description` + 每个参数的 `description`，它们直接决定调用姿势。
+
+**工具描述（description）**
+
+```text
+给自己写一条自我认知：只写 self_memory 的 agent 区，进动态上下文 <self_notes>。
+```
+
+**参数**
+
+- `content`（必填）：一句话自我认知（第一人称，≤300 字），写你自己的教训/行为准则/边界/目标；不要写用户或项目的事实——那些由系统自动提取
+- `kind`（选填, 默认 "behavior"）：identity=身份、behavior=行为准则、limitation=能力边界、goal=目标
+- `reason`（选填, 默认 null）：为什么写这条（可选，≤120 字，便于日后审计）
 
 ---
 

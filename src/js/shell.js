@@ -170,6 +170,12 @@ export function createShell(ctx, config = {}, {
 
   /** 记忆写入完成后刷新核心记忆（版本不变时内部不更新文本）。 */
   const onKernelFrame = frame => {
+    if (frame?.type === 'notify' && frame?.data?.kind === 'core') {
+      corePrompt.refresh().catch(error => {
+        trace(`core refresh failed: ${error?.message ?? error}`)
+      })
+      return
+    }
     if (frame?.type !== 'ingest.completed') return
     corePrompt.refresh().catch(error => {
       trace(`core refresh failed: ${error?.message ?? error}`)

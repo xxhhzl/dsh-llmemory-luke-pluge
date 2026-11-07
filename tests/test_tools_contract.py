@@ -185,5 +185,43 @@ class TestDeadConfigGone(ContractCase):
                 config.patch_config(patch)
 
 
+class TestSelfWrite(ContractCase):
+    '''模型写工具：只写 self_memory 的 agent 区，带 revision 与上限。'''
+
+    def test_writes_agent_note_with_revision(self):
+        first = self.call([{"call_id": "c1", "name": "memory_self_write",
+                            "arguments": {"content": "长会话里先检索再回答",
+                                          "kind": "behavior"}}])[0]
+        self.assertTrue(first["ok"])
+        self.assertEqual(first["data"]["revision"], 1)
+        second = self.call([{"call_id": "c2", "name": "memory_self_write",
+                             "arguments": {"content": "改文件前先重读",
+                                           "kind": "behavior"}}])[0]
+        self.assertEqual(second["data"]["revision"], 2)
+        rows = self.db.list_self_memory(source="agent", limit=10)
+        self.assertEqual([row.content for row in rows][:2],
+                         ["改文件前先重读", "长会话里先检索再回答"])
+        self.assertTrue(all(row.source == "agent" for row in rows))
+
+    def test_content_too_long_rejected(self):
+        result = self.call([{"call_id": "c1", "name": "memory_self_write",
+                             "arguments": {"content": "x" * 301}}])[0]
+        self.assertFalse(result["ok"])
+        self.assertIn("300", result["error"]["message"])
+
+    def test_limit_applies(self):
+        config.patch_config({"core": {"max_self_notes": 1}})
+        try:
+            ok = self.call([{"call_id": "c1", "name": "memory_self_write",
+                             "arguments": {"content": "第一条"}}])[0]
+            self.assertTrue(ok["ok"])
+            blocked = self.call([{"call_id": "c2", "name": "memory_self_write",
+                                  "arguments": {"content": "第二条"}}])[0]
+            self.assertFalse(blocked["ok"])
+            self.assertIn("上限", blocked["error"]["message"])
+        finally:
+            config.patch_config({"core": {"max_self_notes": 10}})
+
+
 if __name__ == "__main__":
     unittest.main()

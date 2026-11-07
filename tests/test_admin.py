@@ -2,6 +2,7 @@
 """管理 API（src/admin.py）：表描述、增删查改与索引同步。"""
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 import unittest
@@ -11,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import admin
+import base
 from database import Cognition, Database, Experience, Memory, Message
 
 BASE_TMP = Path(__file__).resolve().parents[1] / ".tmp" / "test_admin"
@@ -369,6 +371,62 @@ class TestDelete(AdminCase):
         admin.delete_row(self.db, table="message", row_id=row_id)
         self.assertIsNone(self.db.get_message(S1, "m2"))
         self.assertIsNone(self.db.get_memory(S1, "m2"), "引用应一并删除")
+
+
+class TestSelf(AdminCase):
+    '''用户写「设置的自我」：按 kind 取代、revision 递增、只接受 configured。'''
+
+    def test_set_creates_and_supersedes_same_kind(self):
+        first = admin.self_set(self.db, {"kind": "identity", "content": "我是 A"})
+        second = admin.self_set(self.db, {"kind": "identity", "content": "我是 B"})
+        self.assertEqual(first["revision"], 1)
+        self.assertEqual(second["revision"], 2)
+        items = admin.self_list(self.db, {"source": "configured"})["items"]
+        active = [item for item in items if item["status"] == "active"]
+        self.assertEqual([item["content"] for item in active], ["我是 B"])
+        old = self.db.get_self_memory(first["id"])
+        self.assertEqual(old.status, "superseded")
+        self.assertEqual(old.superseded_id, second["id"])
+
+    def test_different_kind_keeps_both(self):
+        admin.self_set(self.db, {"kind": "identity", "content": "我是 A"})
+        admin.self_set(self.db, {"kind": "limitation", "content": "只读"})
+        active = [item for item in admin.self_list(self.db, {})["items"]
+                  if item["status"] == "active"]
+        self.assertEqual(len(active), 2)
+
+    def test_rejects_agent_source(self):
+        with self.assertRaises(admin.AdminError):
+            admin.self_set(self.db, {"source": "agent", "content": "x"})
+
+    def test_validates_kind_and_length(self):
+        with self.assertRaises(admin.AdminError):
+            admin.self_set(self.db, {"kind": "unknown", "content": "x"})
+        with self.assertRaises(admin.AdminError):
+            admin.self_set(self.db, {"kind": "identity", "content": "x" * 501})
+        with self.assertRaises(admin.AdminError):
+            admin.self_set(self.db, {"kind": "identity", "content": "   "})
+
+    def test_disable_marks_invalid(self):
+        created = admin.self_set(self.db, {"kind": "identity", "content": "我是 A"})
+        admin.self_disable(self.db, {"id": created["id"], "reason": "改口"})
+        row = self.db.get_self_memory(created["id"])
+        self.assertEqual(row.status, "invalid")
+        self.assertEqual(row.invalid_reason, "改口")
+        self.assertEqual(admin.self_list(self.db, {})["items"], [])
+
+    def test_set_pushes_core_notify(self):
+        q = base.message_queue()
+        admin.admin({"type": "admin", "request_id": "r1", "session_id": S1,
+                     "agent_id": "a1",
+                     "data": {"op": "self.set", "kind": "identity",
+                              "content": "我是 A"}}, q)
+        first = json.loads(q.recv())
+        second = json.loads(q.recv())
+        self.assertEqual(first["type"], "admin")
+        self.assertTrue(first["data"]["ok"])
+        self.assertEqual(second["type"], "notify")
+        self.assertEqual(second["data"]["kind"], "core")
 
 
 if __name__ == "__main__":

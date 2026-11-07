@@ -117,6 +117,28 @@ FTS5 trigram 召回 top-50（<3 字符退回 LIKE，按标题命中优先排序�
 
 ---
 
+## 3.5 `memory_self_write`（写：只写自述自我）
+
+**作用**：给自己写一条自我认知，落到 `self_memory(source=agent)`；下一轮以
+`<self_notes source="assistant" revision="N">` 进入动态上下文。这是唯一的写工具，
+且**只能写 agent 区**（设置的自我走管理端 `self.set`）。用户/项目事实不要用它——
+那些由 ingest 自动提取。
+
+**输入**
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `content` | string | 是 | 第一人称一句话，≤300 字 |
+| `kind` | enum(`identity`,`behavior`,`limitation`,`goal`) | 否 | 默认 `behavior` |
+| `reason` | string \| null | 否 | 为什么写这条（≤120 字，便于审计） |
+
+**返回**：`{id, kind, revision, limit, content, reason}`。
+
+**限制**：active 自述总量 ≤ `core.max_self_notes`（默认 10）；每次写 `revision + 1`，
+只追加、可在设置页停用回滚；写入后内核推 `notify {kind:"core"}`，外壳刷新 `core.get`。
+
+---
+
 ## 4. 错误码对照
 
 | code | 场景 |

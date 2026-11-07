@@ -231,6 +231,44 @@ def memory_report(id, kind="event", reason=""):
     raise ToolError(-32602, f"未知 kind: {kind!r}")
 
 
+class memory_self_write_args(BaseModel):
+    content: str = Field(description=(
+        "一句话自我认知（第一人称，≤300 字），写你自己的教训/行为准则/边界/目标；"
+        "不要写用户或项目的事实——那些由系统自动提取"))
+    kind: Literal["identity", "behavior", "limitation", "goal"] = Field(
+        default="behavior",
+        description="identity=身份、behavior=行为准则、limitation=能力边界、goal=目标")
+    reason: str | None = Field(
+        default=None, description="为什么写这条（可选，≤120 字，便于日后审计）")
+
+
+@tool(memory_self_write_args)
+def memory_self_write(content, kind="behavior", reason=None, *,
+                      session_id=None, origin_project=None):
+    '''给自己写一条自我认知：只写 self_memory 的 agent 区，进动态上下文 <self_notes>。'''
+    text = str(content or "").strip()
+    if not text:
+        raise ToolError(-32602, "content 不能为空")
+    if len(text) > 300:
+        raise ToolError(-32602, "content 超过 300 字")
+    if kind not in ("identity", "behavior", "limitation", "goal"):
+        raise ToolError(-32602, f"未知 kind: {kind!r}")
+
+    db = _db()
+    rows = db.list_self_memory(source="agent", limit=1000)
+    limit = int(config.get_config().get("core", {}).get("max_self_notes", 10))
+    if len(rows) >= limit:
+        raise ToolError(-32602, f"自述已达上限 {limit} 条，请让用户在设置页清理")
+    revision = max([int(row.revision or 1) for row in rows], default=0) + 1
+    new_id = db.insert_self_memory(database.SelfMemory(
+        source="agent", kind=kind, content=text, revision=revision,
+        origin_session=session_id, created_at=base.get_cur_time()))
+    base.log.info("self.write", id=new_id, kind=kind, revision=revision)
+    return {"id": new_id, "kind": kind, "revision": revision,
+            "limit": limit, "content": text,
+            "reason": (str(reason or "").strip()[:120])}
+
+
 # ---------------- 运行状态 ----------------
 
 def stats(data, q: base.message_queue):
@@ -310,6 +348,7 @@ def tools_call(data, q: base.message_queue):
     }
 
     results = []
+    self_written = False
     for call in calls:
         call_id = call.get("call_id") or ""
         name = call.get("name") or ""
@@ -345,6 +384,11 @@ def tools_call(data, q: base.message_queue):
             results.append(_error(call_id, f"执行失败: {exc}", -32603))
             continue
         results.append({"call_id": call_id, "ok": True, "data": output})
+        if name == "memory_self_write":
+            self_written = True
 
     frame.push(q, data, "tools.result", results,
                detail="消息队列已满，tools.result 未能下发")
+    if self_written:
+        # 自述变化 → 通知外壳刷新 core.get（下一轮动态上下文生效）
+        frame.push(q, data, "notify", {"kind": "core"})

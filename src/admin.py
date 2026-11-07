@@ -389,6 +389,79 @@ def delete_row(db, *, table: str, row_id) -> dict:
     return {"table": table, "id": row_id, "deleted": True}
 
 
+SELF_KINDS = ("identity", "behavior", "limitation", "goal")
+SELF_MAX_CHARS = 500
+
+
+def _self_dict(row) -> dict:
+    return {"id": row.id, "source": row.source, "kind": row.kind,
+            "content": row.content, "revision": row.revision,
+            "origin_session": row.origin_session, "status": row.status,
+            "created_at": row.created_at}
+
+
+def self_list(db, data: dict) -> dict:
+    '''列自我认知；source 省略表示两类都列。'''
+    source = str(data.get("source") or "").strip() or None
+    if source not in (None, "configured", "agent"):
+        raise AdminError("source 只能是 configured / agent")
+    rows = db.list_self_memory(source=source, limit=int(data.get("limit", 50)))
+    return {"items": [_self_dict(row) for row in rows]}
+
+
+def self_set(db, data: dict) -> dict:
+    '''
+    用户写「设置的自我」（只接受 source=configured）。
+
+    同一 kind 已有 active 行时：旧行 superseded，新行 revision+1（只追加）。
+    模型自述（source=agent）走工具 `memory_self_write`，不从这里写。
+    '''
+    source = str(data.get("source") or "configured").strip()
+    if source != "configured":
+        raise AdminError("用户接口只能写 source=configured；agent 由模型工具写")
+    kind = str(data.get("kind") or "identity").strip()
+    if kind not in SELF_KINDS:
+        raise AdminError(f"kind 只能是 {', '.join(SELF_KINDS)}")
+    content = str(data.get("content") or "").strip()
+    if not content:
+        raise AdminError("content 不能为空")
+    if len(content) > SELF_MAX_CHARS:
+        raise AdminError(f"content 超过 {SELF_MAX_CHARS} 字")
+
+    limit = int(config.get_config().get("core", {}).get("max_self_configured", 20))
+    active = db.list_self_memory(source="configured", limit=1000)
+    same_kind = [row for row in active if row.kind == kind]
+    if not same_kind and len(active) >= limit:
+        raise AdminError(f"自我设定已达上限 {limit} 条，请先停用旧条目")
+    revision = max([int(row.revision or 1) for row in same_kind], default=0) + 1
+    now = base.get_cur_time()
+    new_id = db.insert_self_memory(database.SelfMemory(
+        source="configured", kind=kind, content=content, revision=revision,
+        origin_session=str(data.get("session_id") or "") or None,
+        created_at=now))
+    for row in same_kind:
+        db._conn.execute(
+            "UPDATE self_memory SET status = 'superseded', valid_to = ?, "
+            "superseded_id = ? WHERE id = ?", (now, new_id, row.id))
+    db._conn.commit()
+    return {"id": new_id, "kind": kind, "revision": revision,
+            "superseded": [row.id for row in same_kind]}
+
+
+def self_disable(db, data: dict) -> dict:
+    '''停用一条自我认知（configured / agent 都可，用户有权停用）。'''
+    row_id = int(data.get("id") or 0)
+    reason = str(data.get("reason") or "用户停用")[:120]
+    cur = db._conn.execute(
+        "UPDATE self_memory SET status = 'invalid', invalid_reason = ?, valid_to = ? "
+        "WHERE id = ? AND status = 'active'",
+        (reason, base.get_cur_time(), row_id))
+    db._conn.commit()
+    if cur.rowcount != 1:
+        raise AdminError(f"self_memory 中没有 active 的 {row_id}")
+    return {"id": row_id, "status": "invalid", "reason": reason}
+
+
 def describe(db) -> dict:
     conn = db._conn
     tables = []
@@ -419,6 +492,9 @@ _OPS = {
                                           values=data.get("values") or {}),
     "delete": lambda db, data: delete_row(db, table=data.get("table", ""),
                                           row_id=data.get("id")),
+    "self.list": self_list,
+    "self.set": self_set,
+    "self.disable": self_disable,
 }
 
 
@@ -435,6 +511,10 @@ def admin(data, q: base.message_queue):
     try:
         result = handler(db, payload)
         frame.push(q, data, "admin", {"ok": True, "op": op, "result": result})
+        # 自我认知变化 → 通知外壳刷新 core（系统提示词/动态上下文下一轮生效）
+        if op.startswith("self.") or (op in ("insert", "update", "delete")
+                                      and payload.get("table") == "self_memory"):
+            frame.push(q, data, "notify", {"kind": "core"})
     except AdminError as exc:
         frame.push(q, data, "admin", {"ok": False, "op": op, "error": str(exc)})
     except Exception as exc:      # 兜底：管理界面不能把内核打挂

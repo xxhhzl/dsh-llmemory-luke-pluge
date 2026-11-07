@@ -186,13 +186,14 @@ class TestTools(RetrievalCase):
         self.assertTrue(frame["data"][0]["ok"])
         self.assertFalse(frame["data"][1]["ok"])
 
-    def test_tools_schema_lists_three(self):
+    def test_tools_schema_lists_all(self):
         q = base.message_queue()
         tools.get_tools_schema({"type": "tools.schema", "request_id": "r1",
                                 "session_id": S1, "agent_id": "a1"}, q)
         frame = json.loads(q.recv())
         names = [item["name"] for item in frame["data"]]
-        self.assertEqual(names, ["memory_search", "memory_get", "memory_recent", "memory_report"])
+        self.assertEqual(names, ["memory_search", "memory_get", "memory_recent",
+                                 "memory_report", "memory_self_write"])
 
 
 if __name__ == "__main__":

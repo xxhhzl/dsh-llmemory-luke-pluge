@@ -79,10 +79,17 @@
 
 ## 5. 写入边界
 
-- `configured`（设置的自我）：设置页/初始化种子；模型不可改。
-- `agent`（自述）：设计上由模型自己写，但当前版本**未开放模型写工具**——
-  仍由设置页维护；开放 `memory_self_write` 需要单独确认（它是对
-  「模型侧只读」不变量的例外）。
+两类自我各有写入口，物理隔离：
+
+| 接口 | 谁能调 | 写哪 | 生效到 |
+|---|---|---|---|
+| 管理端 `self.set / self.list / self.disable`（`POST /longmemory/api`，仅回环） | 用户/管理员 | `source=configured` | 系统提示词 `<self_configured>` |
+| 工具 `memory_self_write` | 模型 | `source=agent` | 动态上下文 `<self_notes>` |
+
+- `self.set` 按 `kind` 取代：旧行 `superseded`、新行 `revision+1`（只追加、可停用回滚）；
+  拒绝 `source=agent`（那是模型工具的区）。
+- `memory_self_write` 拒绝写 `configured`，单条 ≤300 字、总量受 `core.max_self_notes` 限制。
+- 两边写入后都推 `notify {kind:"core"}`，外壳立即 `core.get` 刷新，下一轮生效。
 - 其余记忆（经验/认知/洞见）保持只读，核心块只是它们的**只读视图**。
 
 ## 6. 已知限制

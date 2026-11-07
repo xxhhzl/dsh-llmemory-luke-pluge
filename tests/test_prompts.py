@@ -44,7 +44,8 @@ class TestPromptDoc(unittest.TestCase):
         ):
             first_line = prompt.strip("\n").splitlines()[0]
             self.assertIn(first_line[:20], text, f"{label} 未被收录")
-        for tool in ("memory_search", "memory_get", "memory_recent", "memory_report"):
+        for tool in ("memory_search", "memory_get", "memory_recent",
+                     "memory_report", "memory_self_write"):
             self.assertIn(f"`{tool}` 工具定义", text, f"{tool} 的定义未被收录")
 
     def test_sections_use_required_heading(self):

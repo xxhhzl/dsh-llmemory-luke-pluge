@@ -12,6 +12,8 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { registerMemoryCommand } from '../../src/js/commands.js'
+import { CorePrompt, CORE_SECTION, SELF_NOTES_CONTEXT }
+  from '../../src/js/core-prompt.js'
 import { buildFrame, decodeFrame, encodeFrame } from '../../src/js/frames.js'
 import { IngestBridge, contentToText } from '../../src/js/ingest-bridge.js'
 import { registerLongmemoryRoutes, isLoopback, authorizeRequest,
@@ -409,4 +411,54 @@ test('路由错误分支：405 / 404 / 503 / 400', async () => {
   })
   assert.equal(badJson.status, 400, '坏 JSON 是客户端错误，不是内核不可用')
   assert.equal(badJson.body.error, 'bad_request')
+})
+
+test('核心记忆：注册 section/context，按版本更新文本', async () => {
+  const calls = []
+  const disposers = []
+  const ctx = {
+    effect: fn => { const disposer = fn(); disposers.push(disposer); return disposer },
+    systemPrompt: {
+      section: options => { calls.push(['section', options]); return () => {} },
+      context: options => { calls.push(['context', options]); return () => {} },
+    },
+  }
+  let payload = {
+    enabled: true,
+    version: 'v1',
+    text: '<long_term_memory><self_configured>x</self_configured></long_term_memory>',
+    notes_version: 'n1',
+    notes_text: '<self_notes source="assistant" revision="1">y</self_notes>',
+  }
+  const kernel = { request: async type => { assert.equal(type, 'core.get'); return payload } }
+  const prompt = new CorePrompt(ctx, kernel, { trace: () => {} })
+
+  assert.equal(prompt.attach(), true)
+  const section = calls.find(item => item[0] === 'section')[1]
+  const context = calls.find(item => item[0] === 'context')[1]
+  assert.equal(section.name, CORE_SECTION)
+  assert.equal(section.order, 700)
+  assert.equal(section.interpolate, false)
+  assert.equal(context.name, SELF_NOTES_CONTEXT)
+  assert.equal(context.order, 850)
+  assert.equal(section.text(), '', '刷新前为空')
+  assert.equal(context.text(), '', '刷新前为空')
+
+  await prompt.refresh()
+  assert.match(section.text(), /<long_term_memory>/)
+  assert.match(context.text(), /<self_notes/)
+
+  payload = { ...payload, text: '<changed/>' }   // 版本不变时不应替换
+  await prompt.refresh()
+  assert.match(section.text(), /<long_term_memory>/)
+
+  payload = { ...payload, version: 'v2', text: '<long_term_memory>new</long_term_memory>' }
+  await prompt.refresh()
+  assert.match(section.text(), /new/)
+})
+
+test('核心记忆：宿主没有 systemPrompt 时安全跳过', () => {
+  const prompt = new CorePrompt({}, {}, { trace: () => {} })
+  assert.equal(prompt.attach(), false)
+  prompt.dispose()
 })

@@ -27,7 +27,7 @@ RELEASE = ROOT / "release"
 # 宿主侧模块 -> release/lib/；client.js 是浏览器入口，必须放包根（manifest 指向 ./client.js）
 JS_FILES = ("index.js", "shell.js", "lifecycle.js", "trace.js", "kernel.js",
             "frames.js", "llm-bridge.js", "tools-bridge.js", "ingest-bridge.js",
-            "commands.js", "stats-route.js", "services.js")
+            "core-prompt.js", "commands.js", "stats-route.js", "services.js")
 CLIENT_FILE = "client.js"
 
 

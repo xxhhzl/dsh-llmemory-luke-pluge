@@ -42,6 +42,8 @@ TABLES = {
     "insight": ("id", ["content", "scope", "confidence", "importance",
                        "origin_session", "origin_project", "source_experience_ids",
                        "cues", "status", "invalid_reason"]),
+    "self_memory": ("id", ["source", "kind", "content", "revision",
+                           "origin_session", "status", "invalid_reason"]),
     "digest": ("session_id", ["session_id", "content"]),
 }
 

@@ -147,12 +147,19 @@ class TestStartupSequence(ShellContractCase):
         self.assertTrue(data["ok"])
         names = {item["name"] for item in data["result"]["tables"]}
         self.assertEqual(names, {"event", "message", "memory", "experience",
-                                 "cognition", "insight", "digest"})
+                                 "cognition", "insight", "self_memory", "digest"})
 
     def test_admin_rejects_bad_op(self):
         frame = self.kernel.request("admin", {"op": "nope"})
         self.assertFalse(frame["data"]["ok"])
         self.assertIn("不支持的 op", frame["data"]["error"])
+
+    def test_core_get_frame(self):
+        frame = self.kernel.request("core.get", {})
+        self.assertEqual(frame["type"], "core")
+        self.assertTrue(frame["data"]["enabled"])
+        self.assertIn("version", frame["data"])
+        self.assertIn("notes_version", frame["data"])
 
     def test_stats_frame(self):
         frame = self.kernel.request("stats", {})

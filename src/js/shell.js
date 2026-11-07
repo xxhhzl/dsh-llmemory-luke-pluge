@@ -10,6 +10,7 @@ import { mkdirSync } from 'node:fs'
 
 import { Kernel } from './kernel.js'
 import { IngestBridge } from './ingest-bridge.js'
+import { CorePrompt } from './core-prompt.js'
 import { registerMemoryCommand } from './commands.js'
 import { registerLongmemoryRoutes } from './stats-route.js'
 import { trace as defaultTrace } from './trace.js'
@@ -93,6 +94,13 @@ export function createShell(ctx, config = {}, {
     logger: console,
     trace,
   })
+  // 核心记忆注入：设置的自我/核心规则 → 系统提示词段；自述 → 动态上下文
+  const corePrompt = new CorePrompt(ctx, kernel, {
+    order: config.coreSectionOrder ?? 700,
+    contextOrder: config.coreContextOrder ?? 850,
+    timeoutMs: config.requestTimeoutMs ?? 15000,
+    trace,
+  })
 
   const toolDisposers = []
   const extraDisposers = []
@@ -136,6 +144,12 @@ export function createShell(ctx, config = {}, {
     await waitHealthy(kernel)
     // 环境变量已给出库路径；再显式 set 一次，保证运行期配置一致
     await kernel.request('config.set', { patch: { store: { db_path: dbFile } } })
+    // 核心记忆在每次（重）连后刷新；失败不阻塞启动
+    try {
+      await corePrompt.refresh()
+    } catch (error) {
+      trace(`core refresh failed: ${error?.message ?? error}`)
+    }
   }
 
   /**
@@ -154,10 +168,19 @@ export function createShell(ctx, config = {}, {
     restarter.schedule(info)
   }
 
+  /** 记忆写入完成后刷新核心记忆（版本不变时内部不更新文本）。 */
+  const onKernelFrame = frame => {
+    if (frame?.type !== 'ingest.completed') return
+    corePrompt.refresh().catch(error => {
+      trace(`core refresh failed: ${error?.message ?? error}`)
+    })
+  }
+
   const start = async () => {
     if (disposed) return { tools: 0 }     // 已被卸载：别再起进程
     trace(`start (kernel=${script})`)
     stopped = false
+    corePrompt.attach()                   // 只需注册一次；重启不重复
     await connect()
 
     if (disposed) return { tools: 0 }
@@ -170,6 +193,7 @@ export function createShell(ctx, config = {}, {
     }))
     if (disposed) return { tools: toolDisposers.length }
     bridge.attach()
+    kernel.on('frame', onKernelFrame)
     // 附加能力（命令 / 统计路由）各自隔离：任一失败都不影响工具与会话投递
     for (const [label, register] of [
       ['command:/memory', () => registerMemoryCommand(ctx, {
@@ -205,7 +229,9 @@ export function createShell(ctx, config = {}, {
       /* 尽力而为：退出路径不抛 */
     }
     kernel.off?.('llm.request', onLlmRequest)
+    kernel.off?.('frame', onKernelFrame)
     bridge.dispose?.()
+    corePrompt.dispose()
     for (const disposer of [...toolDisposers, ...extraDisposers]) {
       try {
         disposer?.()
@@ -218,5 +244,5 @@ export function createShell(ctx, config = {}, {
     kernel.stop()
   }
 
-  return { kernel, bridge, start, dispose }
+  return { kernel, bridge, corePrompt, start, dispose }
 }

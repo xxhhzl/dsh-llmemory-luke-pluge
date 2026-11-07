@@ -24,7 +24,7 @@ export { restartDelay, DEFAULT_RESTART_DELAYS } from './lifecycle.js'
 export const name = 'dsh-longmemory'
 
 /** 依赖的工具与模型服务；缺一不可。 */
-export const inject = ['tools', 'llm', 'sessions']
+export const inject = ['tools', 'llm', 'sessions', 'systemPrompt']
 
 trace(`module loaded (pid=${process.pid})`)
 
@@ -42,6 +42,10 @@ export const Config = z.object({
     .description('外壳等内核应答的超时（毫秒）'),
   llmTimeoutMs: z.number().step(1).min(1000).default(120000)
     .description('单次模型调用超时（毫秒）'),
+  coreSectionOrder: z.number().step(1).default(700)
+    .description('核心记忆在系统提示词中的段顺序（persona 之后、文件引用之前）'),
+  coreContextOrder: z.number().step(1).default(850)
+    .description('自述自我在动态上下文中的顺序'),
 })
 
 /** Cordis 插件入口。 */

@@ -5,6 +5,7 @@ import config
 import base
 import admin
 import commands
+import core
 import ingest
 import llm
 import routo
@@ -42,6 +43,7 @@ def routo_init(routo_table: routo.routo_register):
     routo_table.register("config.get", config.config_get)
     routo_table.register("health", base.health)
     routo_table.register("stats", tools.stats)
+    routo_table.register("core.get", core.get_core)
     routo_table.register("admin", admin.admin)
     routo_table.register("shutdown", base.shutdown)
     # 写入链路：立即回执，后台 worker 切分/摘要/落库

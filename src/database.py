@@ -139,6 +139,21 @@ CREATE TABLE IF NOT EXISTS insight (
   invalid_reason       TEXT
 );
 
+-- 自我认知：configured（设置，进系统提示词）/ agent（自己写，进动态上下文）
+CREATE TABLE IF NOT EXISTS self_memory (
+  id              INTEGER PRIMARY KEY,
+  source          TEXT    NOT NULL DEFAULT 'configured',  -- configured / agent
+  kind            TEXT    NOT NULL DEFAULT 'identity',    -- identity / behavior / limitation / goal
+  content         TEXT    NOT NULL,
+  revision        INTEGER NOT NULL DEFAULT 1,             -- 每次改写 +1（只追加，可回滚）
+  origin_session  TEXT,
+  created_at      TEXT    NOT NULL,
+  status          TEXT    NOT NULL DEFAULT 'active',
+  superseded_id   INTEGER,
+  valid_to        TEXT,
+  invalid_reason  TEXT
+);
+
 -- 工作记忆：可覆盖的缓存
 CREATE TABLE IF NOT EXISTS digest (
   session_id    TEXT PRIMARY KEY,
@@ -154,6 +169,7 @@ CREATE INDEX IF NOT EXISTS idx_cog_origin  ON cognition(origin_project, status);
 CREATE INDEX IF NOT EXISTS idx_cog_subject ON cognition(subject);
 CREATE INDEX IF NOT EXISTS idx_cog_event   ON cognition(source_event_id);
 CREATE INDEX IF NOT EXISTS idx_ins_origin  ON insight(origin_project, status);
+CREATE INDEX IF NOT EXISTS idx_self_source ON self_memory(source, status);
 
 -- 统一全文索引：跨 event / experience / cognition；trigram 支持中文子串
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
@@ -400,6 +416,32 @@ class Insight:
             source_experience_ids=_load_ids(row["source_experience_ids"]),
             cues=_load_cues(row["cues"]), use_count=row["use_count"],
             last_used_at=row["last_used_at"], created_at=row["created_at"],
+            status=row["status"], superseded_id=row["superseded_id"],
+            valid_to=row["valid_to"], invalid_reason=row["invalid_reason"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SelfMemory:
+    '''自我认知：source=configured 进系统提示词；source=agent 进动态上下文。'''
+    id: int = 0
+    source: str = "configured"
+    kind: str = "identity"
+    content: str = ""
+    revision: int = 1
+    origin_session: str | None = None
+    created_at: str = ""
+    status: str = "active"
+    superseded_id: int | None = None
+    valid_to: str | None = None
+    invalid_reason: str | None = None
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> "SelfMemory":
+        return cls(
+            id=row["id"], source=row["source"], kind=row["kind"],
+            content=row["content"], revision=row["revision"],
+            origin_session=row["origin_session"], created_at=row["created_at"],
             status=row["status"], superseded_id=row["superseded_id"],
             valid_to=row["valid_to"], invalid_reason=row["invalid_reason"],
         )
@@ -1113,6 +1155,40 @@ class Database:
             f"SELECT * FROM insight WHERE {' AND '.join(clauses)} "
             f"ORDER BY importance DESC, id DESC LIMIT ?", params).fetchall()
         return [Insight.from_row(row) for row in rows]
+
+    def insert_self_memory(self, item: SelfMemory) -> int:
+        '''写入一条自我认知，返回新 id。'''
+        with self.transaction() as conn:
+            cur = conn.execute(
+                "INSERT INTO self_memory (source, kind, content, revision, "
+                "origin_session, created_at, status, superseded_id, valid_to, "
+                "invalid_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (item.source, item.kind, item.content, item.revision,
+                 item.origin_session, item.created_at or base.get_cur_time(),
+                 item.status, item.superseded_id, item.valid_to,
+                 item.invalid_reason))
+            return int(cur.lastrowid)
+
+    def get_self_memory(self, item_id: int) -> SelfMemory | None:
+        row = self._conn.execute(
+            "SELECT * FROM self_memory WHERE id = ?", (item_id,)).fetchone()
+        return SelfMemory.from_row(row) if row else None
+
+    def list_self_memory(self, *, source: str | None = None,
+                         status: str = "active", limit: int = 50,
+                         include_expired: bool = False) -> list:
+        clauses, params = ["status = ?"], [status]
+        if not include_expired:
+            clauses.append("(valid_to IS NULL OR valid_to > ?)")
+            params.append(base.get_cur_time())
+        if source is not None:
+            clauses.append("source = ?")
+            params.append(source)
+        params.append(limit)
+        rows = self._conn.execute(
+            f"SELECT * FROM self_memory WHERE {' AND '.join(clauses)} "
+            f"ORDER BY revision DESC, id DESC LIMIT ?", params).fetchall()
+        return [SelfMemory.from_row(row) for row in rows]
 
     def get_many(self, table: str, ids) -> dict:
         '''

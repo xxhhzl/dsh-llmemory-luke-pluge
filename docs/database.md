@@ -206,6 +206,28 @@ CREATE TABLE insight (
 需要同一主线索下积累 ≥3 条经验才值得调用模型；结果写库后参与检索（`memory_search` 第四类），
 并在工作记忆（digest）里以 `[L4 洞见]` 优先展示。
 
+## 自我认知表（`self_memory`）
+
+```sql
+CREATE TABLE self_memory (
+  id              INTEGER PRIMARY KEY,
+  source          TEXT    NOT NULL DEFAULT 'configured',  -- configured / agent
+  kind            TEXT    NOT NULL DEFAULT 'identity',    -- identity/behavior/limitation/goal
+  content         TEXT    NOT NULL,
+  revision        INTEGER NOT NULL DEFAULT 1,             -- 每次改写 +1
+  origin_session  TEXT,
+  created_at      TEXT    NOT NULL,
+  status          TEXT    NOT NULL DEFAULT 'active',
+  superseded_id   INTEGER,
+  valid_to        TEXT,
+  invalid_reason  TEXT
+);
+```
+
+- `source=configured`：设置的自我，进**系统提示词** `<self_configured>`；
+- `source=agent`：自己写的自我，进**动态上下文** `<self_notes>`（user 快照）；
+- 两者都按 `revision` 排序，取 active；注入细节见 [core_memory.md](core_memory.md)。
+
 ## 工作记忆表（digest，缓存）
 
 ```sql

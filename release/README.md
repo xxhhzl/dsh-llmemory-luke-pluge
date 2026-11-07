@@ -69,6 +69,12 @@ python scripts/build_release.py          # 有差异时重新生成 lib/ 与 ker
 | `ingestDebounceMs` | 2500 | 会话事件去抖窗口 |
 | `requestTimeoutMs` | 30000 | 外壳等内核应答的超时 |
 | `llmTimeoutMs` | 120000 | 单次模型调用超时 |
+| `coreSectionOrder` | 700 | 核心记忆在系统提示词中的段顺序（persona 之后、文件引用之前） |
+| `coreContextOrder` | 850 | 自述自我在动态上下文中的顺序 |
+
+内核侧 `core.*`（`max_chars` / `max_insights` / `max_experiences` / `max_cognitions` /
+`max_self_configured` / `max_self_notes` / `enabled`）可用 `config.set` 热更新；
+注入结构与标签见源码仓库的 `docs/core_memory.md`。
 
 ## 使用
 

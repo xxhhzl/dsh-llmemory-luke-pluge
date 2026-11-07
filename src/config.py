@@ -27,6 +27,7 @@ FrameType = Literal[
     "library.query", "library.data", "notify",
     "llm.request", "llm.result",
     "error", "config.set", "config.get", "health", "shutdown", "stats", "admin",
+    "core.get", "core",
 ]
 
 class Link_Json(BaseModel):
@@ -118,6 +119,17 @@ DEFAULT_CONFIG = {
         "busy_timeout_ms": 5000,
         "queue_max": 1000,
     },
+    "core": {
+        "enabled": True,               # 是否编译并注入核心记忆
+        "max_chars": 2000,             # 系统提示词核心块总预算（字符）
+        "max_insights": 6,             # 入选核心块的洞见上限
+        "max_experiences": 4,          # 入选核心块的全局经验上限
+        "max_cognitions": 4,           # 入选核心块的全局认知上限
+        "max_self_configured": 20,     # 设置的自我（进系统提示词）上限
+        "max_self_notes": 10,          # 自己写的自我（进动态上下文）上限
+        "section_order": 700,          # 系统提示词段顺序（persona 之后）
+        "context_order": 850,          # 动态上下文顺序
+    },
     "log": {"level": "info"},           # debug / info / warn / error
 }
 
@@ -142,6 +154,15 @@ _LEAF_SPEC = {
     "store.db_path": {"type": str, "min_len": 1},
     "store.busy_timeout_ms": {"type": int, "min": 0, "max": 600000},
     "store.queue_max": {"type": int, "min": 1, "max": 1000000},
+    "core.enabled": {"type": bool},
+    "core.max_chars": {"type": int, "min": 200, "max": 20000},
+    "core.max_insights": {"type": int, "min": 0, "max": 50},
+    "core.max_experiences": {"type": int, "min": 0, "max": 50},
+    "core.max_cognitions": {"type": int, "min": 0, "max": 50},
+    "core.max_self_configured": {"type": int, "min": 0, "max": 100},
+    "core.max_self_notes": {"type": int, "min": 0, "max": 100},
+    "core.section_order": {"type": int, "min": -10000, "max": 20000},
+    "core.context_order": {"type": int, "min": -10000, "max": 20000},
     "log.level": {"type": str, "enum": {"debug", "info", "warn", "error"}},
 }
 

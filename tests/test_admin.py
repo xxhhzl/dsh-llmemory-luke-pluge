@@ -36,7 +36,7 @@ class TestDescribe(AdminCase):
         info = admin.describe(self.db)
         names = {item["name"] for item in info["tables"]}
         self.assertEqual(names, {"event", "message", "memory", "experience",
-                                 "cognition", "insight", "digest"})
+                                 "cognition", "insight", "self_memory", "digest"})
         event = next(item for item in info["tables"] if item["name"] == "event")
         self.assertIn("title", [column["name"] for column in event["columns"]])
         self.assertIn("title", event["writable"])

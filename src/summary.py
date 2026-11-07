@@ -60,6 +60,13 @@ SUMMARY_SYSTEM_PROMPT = """【角色】你是长期记忆系统的「事件归�
 不写：临时状态（“今天在做 X”“刚报了错 Y”）、推测出来的偏好、一次性的任务进展。
 提取时问一句：一周后这条还成立吗？不成立就不写。
 
+【认知主体（subject）的写法】subject 是「这是对什么事物的认知」，必须是**具体事物**：
+用户本人、项目、工具、配置、某个机制。
+- 用稳定全名，不加「本项目」「该」「这个」等指代前缀（写「项目文档」，不写「本项目文档」）；
+- 同一事物始终用同一写法：项目用项目名、工具用工具名，不要为同一次对话另造同义主体；
+- 关于用户的稳定属性不要都塞进「用户」：能落到具体领域就写领域（如「用户的语言偏好」「用户的提交流程要求」）；
+- 用词太泛（「系统」「相关配置」）说明还没想清事物是什么——宁可不写这条认知。
+
 【数量与打分】
 - 大多数事件的经验和认知都是 0–2 条；宁可空数组，不凑数。拿不准的不写。
 - importance：5=跨项目长期有效（如开发约束、反复出现的偏好）；4=本项目长期有效；3=本项目内有用；2=偶尔有用；1=勉强相关（1–2 分的基本不要写）。
@@ -88,7 +95,7 @@ importance 取 1–5 的整数，confidence 取 0–1 的小数，cues 是 0–1
 user：把 README 的安装步骤从 bash 改成 PowerShell。
 assistant：改完了。Windows 上 bash 示例新用户跑不了，统一成 pwsh 命令。另外跑了 python scripts/build_release.py --check 验证产物一致。
 user：以后这个项目文档都保持 PowerShell 优先。
-输出：{"title":"改写安装步骤为 PowerShell","summary":"把 README 的安装步骤从 bash 改写为 PowerShell（Windows 用户跑不了 bash 示例），并用 build_release.py --check 验证产物一致；项目文档此后保持 PowerShell 优先。","experiences":[{"context":"该项目发布前验证产物时","content":"用 python scripts/build_release.py --check 做逐字节比对，能拦住源码改了但产物没同步的问题","kind":"technique","importance":4,"confidence":0.9,"cues":["build_release","产物校验","--check"]}],"cognitions":[{"subject":"本项目文档","content":"文档命令示例保持 PowerShell 优先","kind":"preference","importance":4,"confidence":0.95,"cues":["文档","PowerShell"]}]}
+输出：{"title":"改写安装步骤为 PowerShell","summary":"把 README 的安装步骤从 bash 改写为 PowerShell（Windows 用户跑不了 bash 示例），并用 build_release.py --check 验证产物一致；项目文档此后保持 PowerShell 优先。","experiences":[{"context":"该项目发布前验证产物时","content":"用 python scripts/build_release.py --check 做逐字节比对，能拦住源码改了但产物没同步的问题","kind":"technique","importance":4,"confidence":0.9,"cues":["build_release","产物校验","--check"]}],"cognitions":[{"subject":"项目文档","content":"文档命令示例保持 PowerShell 优先","kind":"preference","importance":4,"confidence":0.95,"cues":["文档","PowerShell"]}]}
 
 【示例二：纯问答，没有可提取内容】
 输入：[正文]

@@ -55,6 +55,13 @@
 不写：临时状态（“今天在做 X”“刚报了错 Y”）、推测出来的偏好、一次性的任务进展。
 提取时问一句：一周后这条还成立吗？不成立就不写。
 
+【认知主体（subject）的写法】subject 是「这是对什么事物的认知」，必须是**具体事物**：
+用户本人、项目、工具、配置、某个机制。
+- 用稳定全名，不加「本项目」「该」「这个」等指代前缀（写「项目文档」，不写「本项目文档」）；
+- 同一事物始终用同一写法：项目用项目名、工具用工具名，不要为同一次对话另造同义主体；
+- 关于用户的稳定属性不要都塞进「用户」：能落到具体领域就写领域（如「用户的语言偏好」「用户的提交流程要求」）；
+- 用词太泛（「系统」「相关配置」）说明还没想清事物是什么——宁可不写这条认知。
+
 【数量与打分】
 - 大多数事件的经验和认知都是 0–2 条；宁可空数组，不凑数。拿不准的不写。
 - importance：5=跨项目长期有效（如开发约束、反复出现的偏好）；4=本项目长期有效；3=本项目内有用；2=偶尔有用；1=勉强相关（1–2 分的基本不要写）。
@@ -83,7 +90,7 @@ importance 取 1–5 的整数，confidence 取 0–1 的小数，cues 是 0–1
 user：把 README 的安装步骤从 bash 改成 PowerShell。
 assistant：改完了。Windows 上 bash 示例新用户跑不了，统一成 pwsh 命令。另外跑了 python scripts/build_release.py --check 验证产物一致。
 user：以后这个项目文档都保持 PowerShell 优先。
-输出：{"title":"改写安装步骤为 PowerShell","summary":"把 README 的安装步骤从 bash 改写为 PowerShell（Windows 用户跑不了 bash 示例），并用 build_release.py --check 验证产物一致；项目文档此后保持 PowerShell 优先。","experiences":[{"context":"该项目发布前验证产物时","content":"用 python scripts/build_release.py --check 做逐字节比对，能拦住源码改了但产物没同步的问题","kind":"technique","importance":4,"confidence":0.9,"cues":["build_release","产物校验","--check"]}],"cognitions":[{"subject":"本项目文档","content":"文档命令示例保持 PowerShell 优先","kind":"preference","importance":4,"confidence":0.95,"cues":["文档","PowerShell"]}]}
+输出：{"title":"改写安装步骤为 PowerShell","summary":"把 README 的安装步骤从 bash 改写为 PowerShell（Windows 用户跑不了 bash 示例），并用 build_release.py --check 验证产物一致；项目文档此后保持 PowerShell 优先。","experiences":[{"context":"该项目发布前验证产物时","content":"用 python scripts/build_release.py --check 做逐字节比对，能拦住源码改了但产物没同步的问题","kind":"technique","importance":4,"confidence":0.9,"cues":["build_release","产物校验","--check"]}],"cognitions":[{"subject":"项目文档","content":"文档命令示例保持 PowerShell 优先","kind":"preference","importance":4,"confidence":0.95,"cues":["文档","PowerShell"]}]}
 
 【示例二：纯问答，没有可提取内容】
 输入：[正文]
@@ -191,31 +198,47 @@ index（序号）、table（experience/cognition）、new（新条目）、candi
 - 不同主体、不同断言，只是用词相近 → 不是重复也不是冲突，选 new；
 - 候选为空，或无法确认 → new。
 
+【主体归一】认知条目还要判「它讲的是哪个事物」——**与动作无关，单独判断**：
+- 只要新条目的 subject 与某个候选指向同一事物、只是写法不同（「项目」vs「项目 X 环境」vs「X 项目」）→ 输出该候选的 subject 作为规范主体；
+  即使 action 是 new（断言不同、不该合并），也照样给 subject；
+- 没有同一事物的候选 → 留空；
+- 无法确定是否同一事物 → 留空。
+subject 只能原样取自「新条目的 subject」或改条目的「候选的 subject」，不编造第三种写法。
+
 【规则】
 1. 宁可 new 也不要错误合并：语义不同的条目保持独立，分别新增（错误的 supersede 会丢信息，错误的 new 只是多一条，前者更贵）。
 2. target_id 必须原样取自该条目的 candidates 里的 id，不编造。
 3. reason 用一句话说明依据（≤60 字符），supersede / invalidate 必填。
 
 【输出】只输出一个 JSON 对象，键与类型固定如下（无 markdown 代码块、无解释文字）：
-{"decisions":[{"index":0,"action":"new|supersede|invalidate","target_id":null,"reason":""}]}
-decisions 的条数与输入条数一致，index 与输入一一对应。
+{"decisions":[{"index":0,"action":"new|supersede|invalidate","target_id":null,"reason":"","subject":null}]}
+decisions 的条数与输入条数一致，index 与输入一一对应；subject 只对认知有意义，经验一律给 null。
 
 【示例一】（同一主体同一断言，措辞不同 → supersede）
-输入：[{"index":0,"table":"cognition","new":{"subject":"项目","content":"构建工具用 Vite"},"candidates":[{"id":7,"content":"项目用 Vite 做构建"}]}]
-输出：{"decisions":[{"index":0,"action":"supersede","target_id":7,"reason":"同一事实，新条目表述更完整"}]}
+输入：[{"index":0,"table":"cognition","new":{"subject":"项目","content":"构建工具用 Vite"},"candidates":[{"id":7,"subject":"项目","content":"项目用 Vite 做构建"}]}]
+输出：{"decisions":[{"index":0,"action":"supersede","target_id":7,"reason":"同一事实，新条目表述更完整","subject":"项目"}]}
 
 【示例二】（同一主体，断言矛盾且新条目有依据 → supersede）
-输入：[{"index":0,"table":"cognition","new":{"subject":"摘要配置","content":"摘要上限 400 字符"},"candidates":[{"id":3,"content":"摘要上限 200 字符"}]}]
-输出：{"decisions":[{"index":0,"action":"supersede","target_id":3,"reason":"上限由 200 改为 400，新值取代旧值"}]}
+输入：[{"index":0,"table":"cognition","new":{"subject":"摘要配置","content":"摘要上限 400 字符"},"candidates":[{"id":3,"subject":"摘要配置","content":"摘要上限 200 字符"}]}]
+输出：{"decisions":[{"index":0,"action":"supersede","target_id":3,"reason":"上限由 200 改为 400，新值取代旧值","subject":"摘要配置"}]}
 
 【示例三】（用词相近但语义不同 → new）
-输入：[{"index":0,"table":"cognition","new":{"subject":"检索","content":"范围过滤已下推到召回层"},"candidates":[{"id":9,"content":"过滤后的结果按相关性排序"}]}]
-输出：{"decisions":[{"index":0,"action":"new","target_id":null,"reason":""}]}
+输入：[{"index":0,"table":"cognition","new":{"subject":"检索","content":"范围过滤已下推到召回层"},"candidates":[{"id":9,"subject":"检索","content":"过滤后的结果按相关性排序"}]}]
+输出：{"decisions":[{"index":0,"action":"new","target_id":null,"reason":"","subject":null}]}
 说明：都提到「过滤」，但一条说的是过滤的位置（架构事实），一条说的是排序（另一件事），语义不同，保持独立。
 
-【示例四】（无候选 → new）
+【示例四】（无候选 → new，主体保持原样）
 输入：[{"index":0,"table":"experience","new":{"content":"导出前统一 strokeWidth"},"candidates":[]}]
-输出：{"decisions":[{"index":0,"action":"new","target_id":null,"reason":""}]}
+输出：{"decisions":[{"index":0,"action":"new","target_id":null,"reason":"","subject":null}]}
+
+【示例五】（同一事物不同写法 → 归一到候选的写法）
+输入：[{"index":0,"table":"cognition","new":{"subject":"dsh-longmemory-plugin 项目","content":"构建用 pnpm"},"candidates":[{"id":12,"subject":"dsh-longmemory-plugin","content":"项目用 pnpm 做构建"}]}]
+输出：{"decisions":[{"index":0,"action":"supersede","target_id":12,"reason":"同一项目同一事实，写法归一","subject":"dsh-longmemory-plugin"}]}
+
+【示例六】（同一事物、不同断言 → new，但主体仍归一）
+输入：[{"index":0,"table":"cognition","new":{"subject":"dsh-longmemory-plugin 项目","content":"lint 用 ruff"},"candidates":[{"id":12,"subject":"dsh-longmemory-plugin","content":"项目用 pnpm 做构建"}]}]
+输出：{"decisions":[{"index":0,"action":"new","target_id":null,"reason":"","subject":"dsh-longmemory-plugin"}]}
+说明：lint 和构建工具是两件事，不该合并（action=new），但都是关于同一个项目，subject 仍归一到候选的写法。
 ```
 
 #### 配套的 user 消息模板（由 `build_messages` 拼装）

@@ -59,6 +59,13 @@ class TestGather(ConsolidateCase):
         candidates = gather_candidates(self.db, items)
         self.assertEqual([row.id for row in candidates[0]], [old])
 
+    def test_matches_subject_variant(self):
+        '''同物异名也要召回：主体写「项目 X 环境」时能找到「项目 X」。'''
+        old = self.seed_cognition(subject="项目 X")
+        items = [cog_item(subject="项目 X 环境")]
+        candidates = gather_candidates(self.db, items)
+        self.assertEqual([row.id for row in candidates[0]], [old])
+
     def test_excludes_superseded(self):
         old = self.seed_cognition()
         self.db.invalidate_cognition(old, "旧结论")
@@ -85,6 +92,48 @@ class TestParse(ConsolidateCase):
         result = parse_decisions("不是 json", [cog_item()], [[]])
         self.assertTrue(result.needs_review)
         self.assertEqual(result.error, "json_parse")
+
+    def test_canonical_subject_taken_from_candidate(self):
+        '''同物异名：模型给出候选的写法，裁决沿用该写法。'''
+        self.seed_cognition(subject="项目 X")
+        items = [cog_item(subject="项目 X 环境")]
+        candidates = gather_candidates(self.db, items)
+        raw = json.dumps({"decisions": [{"index": 0, "action": "supersede",
+                                          "target_id": candidates[0][0].id,
+                                          "reason": "同一项目",
+                                          "subject": "项目 X"}]})
+        result = parse_decisions(raw, items, candidates)
+        self.assertEqual(result.items[0]["subject"], "项目 X")
+
+    def test_fabricated_subject_is_ignored(self):
+        '''模型自造第三种写法 → 忽略（保持原样），防止又造一个变体。'''
+        self.seed_cognition(subject="项目 X")
+        items = [cog_item(subject="项目 X 环境")]
+        candidates = gather_candidates(self.db, items)
+        raw = json.dumps({"decisions": [{"index": 0, "action": "new",
+                                          "subject": "X 项目的运行环境"}]})
+        result = parse_decisions(raw, items, candidates)
+        self.assertIsNone(result.items[0]["subject"])
+
+    def test_subject_same_as_own_is_ignored(self):
+        self.seed_cognition(subject="项目 X")
+        items = [cog_item(subject="项目 X 环境")]
+        candidates = gather_candidates(self.db, items)
+        raw = json.dumps({"decisions": [{"index": 0, "action": "new",
+                                          "subject": "项目 X 环境"}]})
+        result = parse_decisions(raw, items, candidates)
+        self.assertIsNone(result.items[0]["subject"])
+
+    def test_experience_subject_is_never_taken(self):
+        old = self.seed_experience()
+        items = [{"table": "experience", "content": "改库前先跑迁移脚本",
+                  "kind": "technique"}]
+        candidates = gather_candidates(self.db, items)
+        raw = json.dumps({"decisions": [{"index": 0, "action": "supersede",
+                                          "target_id": old, "reason": "同一做法",
+                                          "subject": "随便一个主体"}]})
+        result = parse_decisions(raw, items, candidates)
+        self.assertIsNone(result.items[0]["subject"])
 
 
 class TestDecide(ConsolidateCase):
@@ -152,6 +201,20 @@ class TestIngestWithDecisions(ConsolidateCase):
                               transport=transport)
         self.assertEqual(len(result.cognition_ids), 1)
         self.assertEqual(self.db.get_cognition(result.cognition_ids[0]).status, "active")
+
+    def test_canonical_subject_applied_on_insert(self):
+        '''落库时用裁决给的规范主体，而不是模型新造的写法。'''
+        old = self.seed_cognition(subject="项目 X")
+        transport = FakeSummaryTransport([json.dumps(
+            {"decisions": [{"index": 0, "action": "new",
+                            "subject": "项目 X"}]})])
+        result = ingest_event(self.db, session_id=S1,
+                              summary=summary_with(cognitions=[
+                                  cog_item(subject="项目 X 环境")]),
+                              transport=transport)
+        row = self.db.get_cognition(result.cognition_ids[0])
+        self.assertEqual(row.subject, "项目 X")
+        self.assertEqual(self.db.get_cognition(old).status, "active")
 
 
 if __name__ == "__main__":

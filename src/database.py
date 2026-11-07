@@ -1022,7 +1022,12 @@ class Database:
                            query: str | None = None,
                            origin_project: str | None = None,
                            limit: int = 5) -> list:
-        '''召回合并候选（active、未过期）：主体精确或内容 LIKE。'''
+        '''召回合并候选（active、未过期）：主体包含或内容 LIKE。
+
+        subject 用包含匹配而不是等值匹配：同一事物的写法会分叉
+        （「dsh-longmemory-plugin」/「dsh-longmemory-plugin 项目」/「记忆插件」），
+        等值匹配下这些条目互相召回不到，同义条目只会不断新增。
+        '''
         if table not in _L3_EXTRA:
             raise ValueError(f"不支持的 l3 表: {table!r}")
         model = Experience if table == "experience" else Cognition
@@ -1032,11 +1037,17 @@ class Database:
             clauses.append("(origin_project IS NULL OR origin_project = ?)")
             params.append(origin_project)
         if subject and query:
-            clauses.append("(subject = ? OR content LIKE ? ESCAPE '\\')")
-            params.extend([subject, f"%{_like_escape(query)}%"])
+            # 双向包含：新写法包含旧写法，或旧写法包含新写法，都算同一事物
+            clauses.append("(subject LIKE ? ESCAPE '\\' "
+                           "OR ? LIKE '%' || subject || '%' ESCAPE '\\' "
+                           "OR content LIKE ? ESCAPE '\\')")
+            escaped = _like_escape(subject)
+            params.extend([f"%{escaped}%", escaped, f"%{_like_escape(query)}%"])
         elif subject:
-            clauses.append("subject = ?")
-            params.append(subject)
+            clauses.append("(subject LIKE ? ESCAPE '\\' "
+                           "OR ? LIKE '%' || subject || '%' ESCAPE '\\')")
+            escaped = _like_escape(subject)
+            params.extend([f"%{escaped}%", escaped])
         elif query:
             clauses.append("content LIKE ? ESCAPE '\\'")
             params.append(f"%{_like_escape(query)}%")

@@ -59,6 +59,11 @@ v0.4 相对 v0.2 的具体改动：
 纯问答不再误提推测条目、当次变更不再被记成稳定事实、同一约束不再重复落两条、
 打分拉开区分度；标题/摘要质量与 JSON 解析成功率持平。
 
+v0.5（2026-11-07）补「认知主体（subject）的写法」一节：subject 是「对什么事物的认知」，
+必须是具体事物（用户本人/项目/工具/配置/机制），用稳定全名、不加「本项目」「该」等指代前缀；
+用户属性要落到具体领域（如「用户的语言偏好」），不要都堆在「用户」下；用词太泛宁可不写。
+配合调用 B 的主体归一（见 §6.1），解决同一事物多种写法互相召回不到、同义条目堆积的问题。
+
 ## 4. 用户消息模板（user）
 
 ```text
@@ -140,12 +145,13 @@ v0.4 相对 v0.2 的具体改动：
 调用 A 拿到的条目一律是候选（`action=new`），真正落库前由调用 B 决定它和旧记忆的关系。
 
 ```
-gather_candidates  ── 认知按 subject + content 召回；经验按 cues/content 召回
+gather_candidates  ── 认知按 subject（双向包含）+ content 召回；经验按 cues/content 召回
       │               （只取 active、未过期、同 origin 可见范围，top-5）
       ▼
 build_messages     ── 一次请求装多条「新条目 + 各自候选」
       ▼
 parse_decisions    ── action ∈ new / supersede / invalidate；target 必须在候选里
+      │               + 认知主体归一：subject 只能取自候选或原值（防新造变体）
       ▼
 ingest.apply_summary(decisions=...)  ── 新行 / 取代 / 失效 + FTS + digest
 ```
@@ -156,9 +162,21 @@ ingest.apply_summary(decisions=...)  ── 新行 / 取代 / 失效 + FTS + dig
 | 模型调用失败 / JSON 解析失败 | 全部按 new 落库，标记 `needs_review`（宁可重复，不丢记忆） |
 | `target_id` 不在候选里 / 动作非法 | 该条降级为 new |
 | `invalidate` 缺 reason | 降级为 new |
+| 主体归一给出的写法既不是候选的、也不是原值 | 忽略（保持原样）——防止模型又造一个变体 |
 | 落库 | `supersede` = 新行 + 旧行 `status='superseded'`；`invalidate` = 旧行 `status='invalid'` |
 
 调用 B 的 prompt 约束：只有候选里明确重复或冲突才动旧条目，不确定一律 `new`；不得编造 `target_id`。
+
+### 6.1 主体归一（v0.5）
+
+同一事物在库里有多种写法（`dsh-longmemory-plugin` / `dsh-longmemory-plugin 项目` / `记忆插件`）时，
+等值匹配召回不到彼此，同义条目只会不断新增。采用 Graphiti（[arXiv:2501.13956](https://arxiv.org/abs/2501.13956)，
+[`dedupe_nodes` 实现](https://github.com/getzep/graphiti/blob/main/graphiti_core/prompts/dedupe_nodes.py)）的思路：
+**判重时顺带判「是不是同一个现实事物」，并把规范写法带出来**。落在两处：
+
+1. 召回放宽：`find_l3_candidates` 的 subject 从等值改为**双向包含**（新写法含旧写法，或旧写法含新写法）；
+2. 裁决归一：调用 B 对认知额外输出 `subject`（只能是候选的写法或原值），
+   落库时用它替换新条目的主体——新认知向已有规范写法收敛，等价于「规范名更新」的反向用法。
 
 ## 7. 待定项
 
@@ -172,6 +190,7 @@ ingest.apply_summary(decisions=...)  ── 新行 / 取代 / 失效 + FTS + dig
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v0.5 | 2026-11-07 | 认知主体写法规范 + 调用 B 主体归一（召回双向包含、裁决带 `subject`）|
 | v0.4 | 2026-11-07 | 按 mem0/LangMem/Reflexion/A-MEM 调研重写提取判据：类型枚举 + 反问自检 + 打分锚点 + 三个 few-shot；真实模型四用例对比验证后替换 |
 | v0.3 | 2026-11-02 | 补调用 B（合并裁决）流程与失败策略；实现进度更新到 ingest |
 | v0.2 | 2026-11-02 | 输出契约补 `experiences` / `cognitions` 字段与 `action/target_id/reason`；经验/认知字段定稿 |

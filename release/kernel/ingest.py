@@ -221,6 +221,13 @@ def _apply_item(db: database.Database, event_id: int, item: dict, decision: dict
     target = (decision or {}).get("target_id")
     reason = (decision or {}).get("reason") or "新事件表明该条目不再成立"
 
+    # 调用 B 给出的规范主体：向候选已有写法收敛，避免同物异名越积越多。
+    # 只对认知生效；写法已在 parse_decisions 校验过来源（候选或自值）。
+    if item["table"] == "cognition":
+        canonical = (decision or {}).get("subject")
+        if canonical and canonical != item.get("subject"):
+            item = {**item, "subject": canonical}
+
     if item["table"] == "experience":
         row = build_experience(item, event_id=event_id, session_id=session_id,
                                origin_project=origin_project)

@@ -245,7 +245,7 @@ class memory_self_write_args(BaseModel):
 @tool(memory_self_write_args)
 def memory_self_write(content, kind="behavior", reason=None, *,
                       session_id=None, origin_project=None):
-    '''给自己写一条自我认知：只写 self_memory 的 agent 区，进动态上下文 <self_notes>。'''
+    '''给自己写一条自我认知：只影响你自己下一轮看到的动态上下文 <self_notes>，不会改用户/项目事实。'''
     text = str(content or "").strip()
     if not text:
         raise ToolError(-32602, "content 不能为空")

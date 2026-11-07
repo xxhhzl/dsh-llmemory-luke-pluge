@@ -48,6 +48,14 @@
 不写：某次具体的输出内容、一次性结论、临时路径、只适用于本事件上下文的中间状态。
 提取时问一句：换一个项目／换一天，这条还成立吗？不成立就不写。
 
+【经验的可迁移性】经验正文写成**换个项目也成立**的通用表述（摘要仍按上面的规则原样保留路径/命令）：
+- 项目专属的值换成通用说法或占位符：项目名 → 「项目」或省略；绝对路径 → 「项目的…目录」；
+  解释器路径 → 「项目虚拟环境的解释器」；具体脚本名 → 「发布构建脚本」；版本号 → 「当前版本」；
+- **具体值放进 cues**，检索时仍能用（cues 保留 build_release、.venv、dsh-longmemory-plugin 这类词）；
+- 只有这条经验确实只对某个项目/版本成立时才保留具体值（如「Django 4.2 的 X 行为」）。
+反例：❌「先设 PYTHONIOENCODING 再用 C:/proj/.venv/Scripts/python.exe 跑测试」
+正例：✅「Windows 下跑 Python 测试先设 PYTHONIOENCODING=utf-8，用项目虚拟环境的解释器」
+
 【认知提取】认知 = 关于用户／项目／工具的稳定事实、偏好或约束。只从以下三类提取：
 - preference：用户明确表达的偏好（语言、风格、工作方式、工具选择）；
 - constraint：项目或环境的硬约束（版本、目录结构、禁令、审批流程）；
@@ -90,7 +98,7 @@ importance 取 1–5 的整数，confidence 取 0–1 的小数，cues 是 0–1
 user：把 README 的安装步骤从 bash 改成 PowerShell。
 assistant：改完了。Windows 上 bash 示例新用户跑不了，统一成 pwsh 命令。另外跑了 python scripts/build_release.py --check 验证产物一致。
 user：以后这个项目文档都保持 PowerShell 优先。
-输出：{"title":"改写安装步骤为 PowerShell","summary":"把 README 的安装步骤从 bash 改写为 PowerShell（Windows 用户跑不了 bash 示例），并用 build_release.py --check 验证产物一致；项目文档此后保持 PowerShell 优先。","experiences":[{"context":"该项目发布前验证产物时","content":"用 python scripts/build_release.py --check 做逐字节比对，能拦住源码改了但产物没同步的问题","kind":"technique","importance":4,"confidence":0.9,"cues":["build_release","产物校验","--check"]}],"cognitions":[{"subject":"项目文档","content":"文档命令示例保持 PowerShell 优先","kind":"preference","importance":4,"confidence":0.95,"cues":["文档","PowerShell"]}]}
+输出：{"title":"改写安装步骤为 PowerShell","summary":"把 README 的安装步骤从 bash 改写为 PowerShell（Windows 用户跑不了 bash 示例），并用 build_release.py --check 验证产物一致；项目文档此后保持 PowerShell 优先。","experiences":[{"context":"发布前验证产物时","content":"用发布构建脚本的 --check 做逐字节比对，能拦住源码改了但产物没同步的问题","kind":"technique","importance":4,"confidence":0.9,"cues":["build_release","--check","产物校验","发布"]}],"cognitions":[{"subject":"项目文档","content":"文档命令示例保持 PowerShell 优先","kind":"preference","importance":4,"confidence":0.95,"cues":["文档","PowerShell"]}]}
 
 【示例二：纯问答，没有可提取内容】
 输入：[正文]

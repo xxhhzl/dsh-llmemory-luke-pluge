@@ -451,9 +451,6 @@ window.__ModuleLoader__.load({
 
     const SELF_KINDS = [
       ['identity', '身份', '我是谁、我的定位'],
-      ['behavior', '行为准则', '我该怎么做（工作方式）'],
-      ['limitation', '能力边界', '我不能做什么、何时需要用户确认'],
-      ['goal', '目标', '我长期要达成什么'],
     ]
 
     /** 自我设定（configured → 系统提示词）/ 模型自述（agent → 动态上下文）。 */

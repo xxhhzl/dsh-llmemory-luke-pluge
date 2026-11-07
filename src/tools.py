@@ -134,7 +134,7 @@ class memory_search_args(BaseModel):
 @tool(memory_search_args)
 def memory_search(query, limit=5, kind=None, scope=None, min_score=None,
                   *, session_id=None, origin_project=None):
-    '''在长期记忆里找线索：返回事件摘要、经验、认知（按相关性 × 记忆强度排序）。先用它定位拿 id，再用 memory_get 读正文；问「刚才那段时间」用 memory_recent。'''
+    '''在长期记忆里找线索：返回事件摘要、经验、认知、洞见（按相关性 × 记忆强度排序）。先用它定位拿 id，再用 memory_get 读正文；问「刚才那段时间」用 memory_recent。'''
     search_cfg = _search_defaults()
     effective_limit = max(1, min(int(limit), int(search_cfg.get("limit_max", 20))))
     effective_scope = scope or search_cfg.get("default_scope", "all")
@@ -167,7 +167,7 @@ class memory_get_args(BaseModel):
 
 @tool(memory_get_args)
 def memory_get(id, kind="event"):
-    '''按 id 读一条完整记忆：event 返回事件行 + 全部正文消息；经验/认知返回整行。'''
+    '''按 id 读一条完整记忆：event 返回事件行 + 全部正文消息；经验/认知/洞见返回整行。'''
     db = _db()          # 共享连接，勿关闭
     out = retrieval.get(db, kind, int(id))
     if not out:
@@ -207,7 +207,7 @@ class memory_report_args(BaseModel):
 
 @tool(memory_report_args)
 def memory_report(id, kind="event", reason=""):
-    '''上报一条记忆有问题：事件置「待复核」，经验/认知置为待复核（不再参与排序靠前）。只标状态，不改内容。'''
+    '''上报一条记忆有问题：事件置「待复核」，经验/认知/洞见置为 invalid（不再参与召回）。只标状态，不改内容。'''
     db = _db()
     note = (reason or "").strip()[:120] or "reported"
     if kind == "event":

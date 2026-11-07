@@ -39,6 +39,9 @@ TABLES = {
     "cognition": ("id", ["subject", "content", "kind", "confidence", "importance",
                          "origin_session", "origin_project", "source_event_id",
                          "cues", "status", "invalid_reason"]),
+    "insight": ("id", ["content", "scope", "confidence", "importance",
+                       "origin_session", "origin_project", "source_experience_ids",
+                       "cues", "status", "invalid_reason"]),
     "digest": ("session_id", ["session_id", "content"]),
 }
 

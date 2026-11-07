@@ -333,11 +333,16 @@ def refresh_digest(db: database.Database, session_id: str, *,
     cognitions = sorted(
         db.list_cognitions(origin_project=origin_project, limit=50),
         key=lambda item: (-item.importance, -item.id))[:top_l3]
+    insights = sorted(
+        db.list_insights(origin_project=origin_project, limit=50),
+        key=lambda item: (-item.importance, -item.id))[:2]      # 洞见优先展示
 
     lines = []
     for event in reversed(events):
         body = f"{event.title}：{event.summary}" if event.summary else event.title
         lines.append(f"[L2 #{event.id}] {body}")
+    for item in insights:
+        lines.append(f"[L4 洞见] {item.content}")
     for item in experiences:
         lines.append(f"[L3 经验] {item.content}")
     for item in cognitions:

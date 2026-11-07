@@ -115,12 +115,16 @@ def _fetch(db: database.Database, kind: str, row_id: int):
         return db.get_experience(row_id)
     if kind == "cognition":
         return db.get_cognition(row_id)
+    if kind == "insight":
+        return db.get_insight(row_id)
     return None
 
 
 def _title(row, kind: str) -> str:
     if kind == "event":
         return row.title or ""
+    if kind == "insight":
+        return "归纳洞见"
     return getattr(row, "subject", "") or getattr(row, "context", "") or ""
 
 
@@ -155,7 +159,7 @@ def _meta(row, kind: str, extra: dict | None = None) -> dict:
         meta["session_id"] = row.session_id
         meta.pop("importance", None)
         meta.pop("confidence", None)
-    elif kind == "experience":
+    elif kind in ("experience", "insight"):
         meta["scope"] = getattr(row, "scope", "project")
     if extra:
         meta.update(extra)
@@ -203,7 +207,8 @@ def _candidates(db: database.Database, query: str, origin_project: str | None,
                                      "assoc": 1.0}
             # 联想扩展：同 subject / 同 cues 的 l3 以 0.5 分进候选。
             # 有总量上限：否则 50 条命中各查一次，延迟随命中数线性增长。
-            if kind == "event" or associated >= MAX_ASSOCIATIONS:
+            # 洞见没有 l3 的 subject/context 结构，不做联想扩展。
+            if kind in ("event", "insight") or associated >= MAX_ASSOCIATIONS:
                 continue
             for other in db.find_l3_candidates(
                     kind, subject=getattr(row, "subject", None),
@@ -341,7 +346,7 @@ def _select(scored: list, limit: int, weights: dict) -> list:
 
 def search(db: database.Database, query: str, *, origin_project: str | None = None,
            scope: str | None = None, limit: int = 10,
-           kinds: Iterable[str] = ("event", "experience", "cognition"),
+           kinds: Iterable[str] = ("event", "experience", "cognition", "insight"),
            touch: bool = True) -> list:
     '''
     记忆检索：返回按综合分排序的 Hit 列表。
@@ -380,12 +385,15 @@ def _touch(db: database.Database, hits: list) -> None:
     events = [hit.id for hit in hits if hit.kind == "event"]
     experiences = [hit.id for hit in hits if hit.kind == "experience"]
     cognitions = [hit.id for hit in hits if hit.kind == "cognition"]
+    insights = [hit.id for hit in hits if hit.kind == "insight"]
     if events:
         db.bump_events(events)
     if experiences:
         db.touch_experiences(experiences)
     if cognitions:
         db.touch_cognitions(cognitions)
+    if insights:
+        db.touch_insights(insights)
 
 
 def recent(db: database.Database, session_id: str, *, from_at: str, to_at: str,
@@ -467,6 +475,22 @@ def get(db: database.Database, kind: str, item_id: int, *, touch: bool = True) -
             "scope": getattr(row, "scope", None) if kind == "experience" else None,
             "source_event_id": row.source_event_id,
             "status": row.status, "valid_to": row.valid_to,
+            "use_count": row.use_count, "last_used_at": row.last_used_at,
+            "created_at": row.created_at,
+        }}
+    if kind == "insight":
+        row = db.get_insight(item_id)
+        if row is None:
+            return {}
+        if touch:
+            db.touch_insights([item_id])
+        return {"kind": "insight", "item": {
+            "id": row.id, "content": row.content, "scope": row.scope,
+            "confidence": row.confidence, "importance": row.importance,
+            "origin_session": row.origin_session,
+            "origin_project": row.origin_project,
+            "source_experience_ids": list(row.source_experience_ids),
+            "cues": list(row.cues), "status": row.status,
             "use_count": row.use_count, "last_used_at": row.last_used_at,
             "created_at": row.created_at,
         }}

@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 import consolidate  # noqa: E402
+import insight  # noqa: E402
 import jev  # noqa: E402
 import summary  # noqa: E402
 
@@ -39,10 +40,11 @@ class TestPromptDoc(unittest.TestCase):
             (summary.RETRY_SUFFIX, "重试后缀"),
             (jev.SYSTEM_PROMPT, "事件边界判定器"),
             (consolidate.CONSOLIDATE_SYSTEM_PROMPT, "合并裁决器"),
+            (insight.INDUCTION_SYSTEM_PROMPT, "洞见归纳器"),
         ):
             first_line = prompt.strip("\n").splitlines()[0]
             self.assertIn(first_line[:20], text, f"{label} 未被收录")
-        for tool in ("memory_search", "memory_get", "memory_recent"):
+        for tool in ("memory_search", "memory_get", "memory_recent", "memory_report"):
             self.assertIn(f"`{tool}` 工具定义", text, f"{tool} 的定义未被收录")
 
     def test_sections_use_required_heading(self):

@@ -119,6 +119,26 @@ CREATE TABLE IF NOT EXISTS cognition (
   invalid_reason  TEXT
 );
 
+-- 洞见（归纳层）：由多条经验归纳出的通用规则，证据链在 source_experience_ids
+CREATE TABLE IF NOT EXISTS insight (
+  id                   INTEGER PRIMARY KEY,
+  content              TEXT    NOT NULL,      -- 归纳后的规则（≤200 字符）
+  scope                TEXT    NOT NULL DEFAULT 'global',  -- global / project
+  confidence           REAL    NOT NULL DEFAULT 0.8,
+  importance           INTEGER NOT NULL DEFAULT 4,
+  origin_session       TEXT,
+  origin_project       TEXT,
+  source_experience_ids TEXT,                 -- JSON 数组：支撑这条洞见的经验 id
+  cues                 TEXT,                  -- JSON 数组
+  use_count            INTEGER NOT NULL DEFAULT 0,
+  last_used_at         TEXT,
+  created_at           TEXT    NOT NULL,
+  status               TEXT    NOT NULL DEFAULT 'active',
+  superseded_id        INTEGER,
+  valid_to             TEXT,
+  invalid_reason       TEXT
+);
+
 -- 工作记忆：可覆盖的缓存
 CREATE TABLE IF NOT EXISTS digest (
   session_id    TEXT PRIMARY KEY,
@@ -133,6 +153,7 @@ CREATE INDEX IF NOT EXISTS idx_exp_event   ON experience(source_event_id);
 CREATE INDEX IF NOT EXISTS idx_cog_origin  ON cognition(origin_project, status);
 CREATE INDEX IF NOT EXISTS idx_cog_subject ON cognition(subject);
 CREATE INDEX IF NOT EXISTS idx_cog_event   ON cognition(source_event_id);
+CREATE INDEX IF NOT EXISTS idx_ins_origin  ON insight(origin_project, status);
 
 -- 统一全文索引：跨 event / experience / cognition；trigram 支持中文子串
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
@@ -350,6 +371,41 @@ class Cognition:
 
 
 @dataclass(frozen=True, slots=True)
+class Insight:
+    '''洞见（归纳层）：由多条经验归纳出的规则，source_experience_ids 是证据链。'''
+    id: int = 0
+    content: str = ""
+    scope: str = "global"
+    confidence: float = 0.8
+    importance: int = 4
+    origin_session: str | None = None
+    origin_project: str | None = None
+    source_experience_ids: tuple[int, ...] = ()
+    cues: tuple[str, ...] = ()
+    use_count: int = 0
+    last_used_at: str | None = None
+    created_at: str = ""
+    status: str = "active"
+    superseded_id: int | None = None
+    valid_to: str | None = None
+    invalid_reason: str | None = None
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> "Insight":
+        return cls(
+            id=row["id"], content=row["content"], scope=row["scope"],
+            confidence=row["confidence"], importance=row["importance"],
+            origin_session=row["origin_session"],
+            origin_project=row["origin_project"],
+            source_experience_ids=_load_ids(row["source_experience_ids"]),
+            cues=_load_cues(row["cues"]), use_count=row["use_count"],
+            last_used_at=row["last_used_at"], created_at=row["created_at"],
+            status=row["status"], superseded_id=row["superseded_id"],
+            valid_to=row["valid_to"], invalid_reason=row["invalid_reason"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class Digest:
     '''工作记忆快照：可覆盖的缓存，不是事实源。'''
     session_id: str
@@ -373,6 +429,14 @@ class Digest:
 def _load_cues(raw) -> tuple:
     try:
         return tuple(str(x) for x in json.loads(raw)) if raw else ()
+    except (TypeError, ValueError):
+        return ()
+
+
+def _load_ids(raw) -> tuple:
+    '''JSON 数组 → 整数元组（洞见的证据链）。'''
+    try:
+        return tuple(int(x) for x in json.loads(raw)) if raw else ()
     except (TypeError, ValueError):
         return ()
 
@@ -1011,18 +1075,57 @@ class Database:
     def get_cognition(self, item_id: int) -> Cognition | None:
         return self._get_l3("cognition", Cognition, item_id)
 
+    def get_insight(self, item_id: int) -> Insight | None:
+        row = self._conn.execute(
+            "SELECT * FROM insight WHERE id = ?", (item_id,)).fetchone()
+        return Insight.from_row(row) if row else None
+
+    def insert_insight(self, item: Insight) -> int:
+        '''写入一条洞见（归纳层），返回新 id。'''
+        with self.transaction() as conn:
+            cur = conn.execute(
+                "INSERT INTO insight (content, scope, confidence, importance, "
+                "origin_session, origin_project, source_experience_ids, cues, "
+                "use_count, last_used_at, created_at, status, superseded_id, "
+                "valid_to, invalid_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (item.content, item.scope, item.confidence, item.importance,
+                 item.origin_session, item.origin_project,
+                 json.dumps(list(item.source_experience_ids), ensure_ascii=False)
+                 if item.source_experience_ids else None,
+                 json.dumps(list(item.cues), ensure_ascii=False) if item.cues else None,
+                 item.use_count, item.last_used_at,
+                 item.created_at or base.get_cur_time(), item.status,
+                 item.superseded_id, item.valid_to, item.invalid_reason))
+            return int(cur.lastrowid)
+
+    def list_insights(self, *, origin_project: str | None = None,
+                      status: str = "active", limit: int = 50,
+                      include_expired: bool = False) -> list:
+        clauses, params = ["status = ?"], [status]
+        if not include_expired:
+            clauses.append("(valid_to IS NULL OR valid_to > ?)")
+            params.append(base.get_cur_time())
+        if origin_project is not None:
+            clauses.append("(origin_project IS NULL OR origin_project = ?)")
+            params.append(origin_project)
+        params.append(limit)
+        rows = self._conn.execute(
+            f"SELECT * FROM insight WHERE {' AND '.join(clauses)} "
+            f"ORDER BY importance DESC, id DESC LIMIT ?", params).fetchall()
+        return [Insight.from_row(row) for row in rows]
+
     def get_many(self, table: str, ids) -> dict:
         '''
         批量按 id 取行：{id: row}。检索层逐条取数的 N+1 改这里一次 IN 查询。
         :param table: event / experience / cognition
         '''
-        if table != "event" and table not in _L3_EXTRA:
+        if table != "event" and table not in _L3_EXTRA and table != "insight":
             raise ValueError(f"不支持的表: {table!r}")
         wanted = [int(x) for x in ids]
         if not wanted:
             return {}
         model = {"event": Event, "experience": Experience,
-                 "cognition": Cognition}[table]
+                 "cognition": Cognition, "insight": Insight}[table]
         marks = ", ".join("?" for _ in wanted)
         rows = self._conn.execute(
             f"SELECT * FROM {table} WHERE id IN ({marks})", wanted).fetchall()
@@ -1198,6 +1301,9 @@ class Database:
     def touch_cognitions(self, ids, by: int = 1) -> int:
         return self._touch_l3("cognition", ids, by)
 
+    def touch_insights(self, ids, by: int = 1) -> int:
+        return self._touch_l3("insight", ids, by)
+
     # ---- 写入：digest（工作记忆缓存） ----
 
     def upsert_digest(self, session_id: str, content: str,
@@ -1234,7 +1340,7 @@ class Database:
         范围列（origin_project / session_id）只存不索引：召回时先按它过滤，
         避免范围外条目占满 top-k 名额（过滤逻辑仍由检索层 `_eligible` 兜底）。
         '''
-        if ref_kind not in _L3_EXTRA and ref_kind != "event":
+        if ref_kind not in _L3_EXTRA and ref_kind not in ("event", "insight"):
             raise ValueError(f"不支持的 ref_kind: {ref_kind!r}")
         with self.transaction() as conn:
             conn.execute(
@@ -1340,8 +1446,8 @@ class Database:
         return int(row["n"])
 
     def count_l3(self, table: str, session_id: str | None = None) -> int:
-        '''统计经验/认知条数（含历史行，按来源会话可选过滤）。'''
-        if table not in _L3_EXTRA:
+        '''统计经验/认知/洞见条数（含历史行，按来源会话可选过滤）。'''
+        if table not in _L3_EXTRA and table != "insight":
             raise ValueError(f"不支持的 l3 表: {table!r}")
         if session_id is None:
             row = self._conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()

@@ -169,6 +169,43 @@ CREATE TABLE cognition (
 
 其余字段含义与经验表一致；两表共用列，检索时用 `UNION ALL` 合成一个视图。
 
+## 洞见表（归纳层：多条经验提炼的规则）
+
+对应 ExpeL 的 insights（[AAAI-24, arXiv:2308.10144](https://arxiv.org/abs/2308.10144)）：
+经验是「某次怎么做」，洞见是「多条经验共同支持的通用规则」。
+
+```sql
+CREATE TABLE insight (
+  id                    INTEGER PRIMARY KEY,
+  content               TEXT    NOT NULL,     -- 规则（≤200 字符）
+  scope                 TEXT    NOT NULL DEFAULT 'global',  -- global / project
+  confidence            REAL    NOT NULL DEFAULT 0.8,
+  importance            INTEGER NOT NULL DEFAULT 4,
+  origin_session        TEXT,
+  origin_project        TEXT,
+  source_experience_ids TEXT,                 -- JSON 数组：证据链（≥2 条经验）
+  cues                  TEXT,                 -- JSON 数组
+  use_count             INTEGER NOT NULL DEFAULT 0,
+  last_used_at          TEXT,
+  created_at            TEXT    NOT NULL,
+  status                TEXT    NOT NULL DEFAULT 'active',
+  superseded_id         INTEGER,
+  valid_to              TEXT,
+  invalid_reason        TEXT
+);
+```
+
+| 字段 | 说明 |
+|---|---|
+| `content` | 一般化规则；不带项目名、版本号等一次性细节 |
+| `scope` | `global` / `project`，由归纳模型判断 |
+| `source_experience_ids` | **证据链**：支撑这条洞见的经验 id，至少 2 条；解析时校验必须来自本次输入，不编造 |
+| 生命周期字段 | 与 l3 相同（active / superseded / invalid），但洞见不替代源经验 |
+
+归纳是**显式离线操作**（`insight.induce()`，见 `scripts/induce_insights.py`），不挂在 ingest 热路径上：
+需要同一主线索下积累 ≥3 条经验才值得调用模型；结果写库后参与检索（`memory_search` 第四类），
+并在工作记忆（digest）里以 `[L4 洞见]` 优先展示。
+
 ## 工作记忆表（digest，缓存）
 
 ```sql

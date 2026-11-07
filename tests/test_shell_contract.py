@@ -146,8 +146,8 @@ class TestStartupSequence(ShellContractCase):
         data = frame["data"]
         self.assertTrue(data["ok"])
         names = {item["name"] for item in data["result"]["tables"]}
-        self.assertEqual(names, {"event", "message", "memory",
-                                 "experience", "cognition", "digest"})
+        self.assertEqual(names, {"event", "message", "memory", "experience",
+                                 "cognition", "insight", "digest"})
 
     def test_admin_rejects_bad_op(self):
         frame = self.kernel.request("admin", {"op": "nope"})

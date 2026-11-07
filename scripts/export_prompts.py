@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT / "src"))
 import base                      # noqa: E402
 import config                    # noqa: E402
 import consolidate               # noqa: E402
+import insight                   # noqa: E402
 import jev                       # noqa: E402
 import summary                   # noqa: E402
 import tools                     # noqa: E402
@@ -62,6 +63,21 @@ def _consolidate_user_template() -> str:
     return consolidate.build_messages(items, rows)[1]["content"]
 
 
+def _insight_user_template() -> str:
+    rows = [
+        type("Row", (), {"id": 1, "kind": "pitfall", "scope": "global",
+                         "context": "edit 报 old_string not found 时",
+                         "content": "先重新 read 目标文件再改"})(),
+        type("Row", (), {"id": 2, "kind": "technique", "scope": "global",
+                         "context": "批量改文件前",
+                         "content": "逐个 read 确认当前内容"})(),
+        type("Row", (), {"id": 3, "kind": "pitfall", "scope": "project",
+                         "context": "改文档表格时",
+                         "content": "先用 Select-String 定位实际行"})(),
+    ]
+    return insight.build_messages(rows)[1]["content"]
+
+
 def render() -> str:
     parts = [
         "# 长期记忆插件 · 提示词清单",
@@ -69,8 +85,8 @@ def render() -> str:
         "> 由 `python scripts/export_prompts.py` 从 `src/` 自动生成，改提示词请改源码后重跑，",
         "> 不要手改本文件（`--check` 会校验是否过期）。",
         "",
-        "模型看到的提示词有四处：事件归档（调用 A）、事件边界判定、合并裁决（调用 B）、",
-        "以及三个记忆工具的定义。下面按「来源 → 提示词原文」逐条列出。",
+        "模型看到的提示词有五处：事件归档（调用 A）、事件边界判定、合并裁决（调用 B）、",
+        "洞见归纳（归纳层）、以及四个记忆工具的定义。下面按「来源 → 提示词原文」逐条列出。",
         "",
         "## 目录",
         "",
@@ -78,9 +94,11 @@ def render() -> str:
         "2. 归档失败重试后缀（`src/summary.py`）",
         "3. 事件边界判定器（`src/jev.py`）",
         "4. 合并裁决器（`src/consolidate.py`）",
-        "5. `memory_search` 工具（`src/tools.py`）",
-        "6. `memory_get` 工具（`src/tools.py`）",
-        "7. `memory_recent` 工具（`src/tools.py`）",
+        "5. 洞见归纳器（`src/insight.py`）",
+        "6. `memory_search` 工具（`src/tools.py`）",
+        "7. `memory_get` 工具（`src/tools.py`）",
+        "8. `memory_recent` 工具（`src/tools.py`）",
+        "9. `memory_report` 工具（`src/tools.py`）",
         "",
         "---",
         "",
@@ -120,11 +138,25 @@ def render() -> str:
         "",
         _fence(_consolidate_user_template(), "json"),
         "",
+        "### 提示词来源：`src/insight.py` — 洞见归纳器（归纳层）",
+        "",
+        "触发时机：离线显式调用 `insight.induce()`，把同一线索下 ≥3 条经验提炼成通用规则；",
+        "不挂在 ingest 热路径上（模型调用昂贵，且要等同类经验攒够样本）。",
+        '输出契约：`{"insights":[{"content","scope","confidence","cues","source_ids"}]}`，'
+        "`source_ids` 必须原样来自输入经验，且至少 2 条支撑。",
+        "",
+        _fence(insight.INDUCTION_SYSTEM_PROMPT),
+        "",
+        "#### 配套的 user 消息模板（由 `build_messages` 拼装）",
+        "",
+        _fence(_insight_user_template(), "json"),
+        "",
     ]
 
     titles = {"memory_search": "检索工具：模糊找，先定位再 get",
               "memory_get": "取值工具：按 id 读整条",
-              "memory_recent": "时间线工具：按区间回放"}
+              "memory_recent": "时间线工具：按区间回放",
+              "memory_report": "纠错工具：把条目标为待复核"}
     for schema in _tool_schemas():
         name = schema["name"]
         parts.extend([

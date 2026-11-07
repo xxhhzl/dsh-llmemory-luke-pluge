@@ -26,7 +26,7 @@
 
 ## 1. `memory_search`
 
-**作用**：检索三类对象——事件（情景记忆）、经验（程序记忆）、认知（语义记忆）——返回按「相关性 × 记忆强度」融合排序的混合列表。
+**作用**：检索四类对象——事件（情景记忆）、经验（程序记忆）、认知（语义记忆）、洞见（归纳层：多条经验提炼的通用规则）——返回按「相关性 × 记忆强度」融合排序的混合列表。
 
 **流程**
 
@@ -45,7 +45,7 @@ FTS5 trigram 召回 top-50（<3 字符退回 LIKE，按标题命中优先排序�
 |---|---|---|---|---|
 | `query` | string | 是 | — | 检索语句 |
 | `limit` | integer | 否 | 5 | 1–100，运行时按 `search.limit_max` 收敛 |
-| `kind` | enum(`event`,`experience`,`cognition`) \| null | 否 | 全部 | 单值；省略表示三类都搜 |
+| `kind` | enum(`event`,`experience`,`cognition`,`insight`) \| null | 否 | 全部 | 单值；省略表示四类都搜 |
 | `scope` | enum(`project`,`all`) \| null | 否 | `config.search.default_scope`（当前 `all`） | `project` 只看本项目 + 通用 |
 | `min_score` | number \| null | 否 | `config.search.min_score`（0） | 融合分下限 |
 
@@ -77,7 +77,7 @@ FTS5 trigram 召回 top-50（<3 字符退回 LIKE，按标题命中优先排序�
 | 字段 | 类型 | 必填 | 默认 | 说明 |
 |---|---|---|---|---|
 | `id` | integer | 是 | — | 条目主键（事件或 l3） |
-| `kind` | enum(`event`,`experience`,`cognition`) | 否 | `event` | 取哪类对象 |
+| `kind` | enum(`event`,`experience`,`cognition`,`insight`) | 否 | `event` | 取哪类对象 |
 
 **返回**
 

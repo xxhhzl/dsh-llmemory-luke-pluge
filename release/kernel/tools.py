@@ -119,9 +119,10 @@ class memory_search_args(BaseModel):
         "缺一个会自动放宽）。不要写整句提问——整句里只有一两个词真正能命中"))
     limit: int = Field(default=5, ge=1, le=100,
                        description="返回条数，默认 5；上限受配置 search.limit_max（默认 20）约束")
-    kind: Literal["event", "experience", "cognition"] | None = Field(
+    kind: Literal["event", "experience", "cognition", "insight"] | None = Field(
         default=None,
-        description="限定类型：event=事件摘要、experience=做法、cognition=事实/偏好；省略=三类都搜")
+        description=("限定类型：event=事件摘要、experience=做法、cognition=事实/偏好、"
+                     "insight=多条经验归纳出的规则；省略=四类都搜"))
     scope: Literal["project", "all"] | None = Field(
         default=None,
         description="project=本项目+通用；all=跨项目；省略取配置默认值（当前 all）")
@@ -140,7 +141,7 @@ def memory_search(query, limit=5, kind=None, scope=None, min_score=None,
     if effective_scope not in ("project", "all"):
         raise ToolError(-32602, f"scope 只能是 project / all，收到 {effective_scope!r}")
     threshold = float(search_cfg.get("min_score", 0.0) if min_score is None else min_score)
-    kinds = ((kind,) if kind else ("event", "experience", "cognition"))
+    kinds = ((kind,) if kind else ("event", "experience", "cognition", "insight"))
     db = _db()          # 共享连接：不能用 with，退出时会把它关掉
     hits = retrieval.search(db, query, scope=effective_scope,
                             origin_project=origin_project,
@@ -159,9 +160,9 @@ def memory_search(query, limit=5, kind=None, scope=None, min_score=None,
 
 class memory_get_args(BaseModel):
     id: int = Field(description="条目 id（来自 memory_search 返回的 items[].id）")
-    kind: Literal["event", "experience", "cognition"] = Field(
+    kind: Literal["event", "experience", "cognition", "insight"] = Field(
         default="event",
-        description="id 的类型，必须与来源一致：event / experience / cognition")
+        description="id 的类型，必须与来源一致：event / experience / cognition / insight")
 
 
 @tool(memory_get_args)
@@ -198,9 +199,9 @@ def memory_recent(from_at, to_at, session_id=None, limit=10,
 
 class memory_report_args(BaseModel):
     id: int = Field(description="要上报的条目 id（来自 memory_search 的 items[].id）")
-    kind: Literal["event", "experience", "cognition"] = Field(
+    kind: Literal["event", "experience", "cognition", "insight"] = Field(
         default="event",
-        description="id 的类型，必须与来源一致：event / experience / cognition")
+        description="id 的类型，必须与来源一致：event / experience / cognition / insight")
     reason: str = Field(description="哪里不对：与事实不符、已过时、张冠李戴等，一句话")
 
 
@@ -214,7 +215,7 @@ def memory_report(id, kind="event", reason=""):
             raise ToolError(CODE_NOT_FOUND, f"找不到 event #{id}")
         return {"kind": "event", "id": int(id), "needs_review": True,
                 "reason": note}
-    if kind in ("experience", "cognition"):
+    if kind in ("experience", "cognition", "insight"):
         # 错条目：置 invalid 并摘掉索引，避免继续被召回；正文保留可追溯
         with db.transaction() as conn:
             cur = conn.execute(
@@ -256,6 +257,7 @@ def stats(data, q: base.message_queue):
         "events": db.count_events(),
         "experiences": db.count_l3("experience"),
         "cognitions": db.count_l3("cognition"),
+        "insights": db.count_l3("insight"),
         "session_id": session_id,
         "latest_event": latest,
     })

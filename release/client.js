@@ -358,6 +358,97 @@ window.__ModuleLoader__.load({
         h('pre', { style: S.pre }, lines.join('\n')))
     }
 
+    const BROWSER_KIND = 'longmemory-browser'
+    const BROWSER_ID = 'longmemory-browser'
+    const BROWSER_TABLES = [
+      ['event', '事件'], ['experience', '经验'], ['cognition', '认知'], ['insight', '洞见'],
+    ]
+
+    /** 右侧栏「长期记忆」浏览器：搜索 + 分页 + 详情（只读）。 */
+    function MemoryBrowser() {
+      const [table, setTable] = React.useState('event')
+      const [query, setQuery] = React.useState('')
+      const [rows, setRows] = React.useState([])
+      const [total, setTotal] = React.useState(0)
+      const [offset, setOffset] = React.useState(0)
+      const [detail, setDetail] = React.useState(null)
+      const [error, setError] = React.useState('')
+      const limit = 20
+
+      const load = React.useCallback(async (nextOffset, nextQuery) => {
+        try {
+          const result = await callApi({
+            op: 'list', table, limit, offset: nextOffset, query: nextQuery,
+          })
+          setRows(result.rows)
+          setTotal(result.total)
+          setOffset(nextOffset)
+          setError('')
+        } catch (e) {
+          setError(String(e?.message ?? e))
+        }
+      }, [table])
+
+      React.useEffect(() => { void load(0, '') }, [load]) // eslint-disable-line
+
+      const openDetail = async row => {
+        try {
+          setDetail(await callApi({ op: 'get', table, id: row.id }))
+          setError('')
+        } catch (e) {
+          setError(String(e?.message ?? e))
+        }
+      }
+
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px',
+                                 padding: '8px' } },
+        h('div', { style: S.bar }, ...BROWSER_TABLES.map(([id, label]) =>
+          h('button', {
+            key: id, type: 'button',
+            style: { ...S.button, ...(table === id ? { fontWeight: 600 } : {}) },
+            onClick: () => setTable(id),
+          }, label))),
+        h('div', { style: S.bar },
+          h('input', { style: S.input, placeholder: '搜索…', value: query,
+                       onChange: e => setQuery(e.target.value),
+                       onKeyDown: e => { if (e.key === 'Enter') void load(0, query) } }),
+          h('button', { style: S.button, type: 'button', onClick: () => load(0, query) },
+            '搜索'),
+          h('span', { style: S.cardLabel }, `共 ${total} 条`)),
+        error && h('div', { style: S.error }, error),
+        h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
+          ...rows.map(row => h('button', {
+            key: row.id, type: 'button',
+            style: { ...S.button, textAlign: 'left', display: 'block', width: '100%' },
+            onClick: () => openDetail(row),
+          }, h('div', { style: S.cardLabel }, `#${row.id} ${row.title ?? row.subject ?? row.kind ?? ''}`),
+             h('div', { style: { fontSize: '12px' } }, clip(row.summary ?? row.content, 120))))),
+        h('div', { style: S.bar },
+          h('button', { style: S.button, type: 'button', disabled: offset === 0,
+                        onClick: () => load(Math.max(0, offset - limit), query) }, '上一页'),
+          h('button', { style: S.button, type: 'button',
+                        disabled: offset + limit >= total,
+                        onClick: () => load(offset + limit, query) }, '下一页')),
+        detail && h('div', { style: S.modal, role: 'dialog' },
+          h('div', { style: S.dialog },
+            h('div', { style: S.bar },
+              h('strong', null, `${table} #${detail.id ?? ''}`),
+              h('button', { style: { ...S.button, marginLeft: 'auto' }, type: 'button',
+                            onClick: () => setDetail(null) }, '关闭')),
+            h('pre', { style: S.pre }, JSON.stringify(detail, null, 2)))))
+    }
+
+    function MemoryBrowserTitle() {
+      return h('span', null, '长期记忆')
+    }
+
+    function MemoryHeaderButton({ open } = {}) {
+      return h('button', {
+        style: S.button, type: 'button', title: '打开长期记忆',
+        onClick: () => open?.(),
+      }, '记忆')
+    }
+
     const SELF_KINDS = [
       ['identity', '身份', '我是谁、我的定位'],
       ['behavior', '行为准则', '我该怎么做（工作方式）'],
@@ -469,7 +560,7 @@ window.__ModuleLoader__.load({
               }, '停用')))))))
     }
 
-    function MemorySettings() {
+    function MemorySettings({ openBrowser } = {}) {
       const [tab, setTab] = React.useState('overview')
       const [schema, setSchema] = React.useState(null)
       const [error, setError] = React.useState('')
@@ -487,7 +578,10 @@ window.__ModuleLoader__.load({
         && tab !== 'self_configured' && tab !== 'self_notes'
 
       return h('section', { style: S.wrap },
-        h('div', { style: S.head }, h('h2', { style: S.title }, '长期记忆')),
+        h('div', { style: S.head },
+          h('h2', { style: S.title }, '长期记忆'),
+          h('button', { style: S.button, type: 'button',
+                        onClick: () => openBrowser?.() }, '在右侧栏打开')),
         h('div', { style: S.tabs }, ...TABS.map(item =>
           h('button', {
             key: item.id, type: 'button',
@@ -505,14 +599,43 @@ window.__ModuleLoader__.load({
     }
 
     return {
-      inject: ['slots'],
+      inject: ['slots', 'sidebarRight', 'sidebarRightTabs'],
       apply(ctx) {
+        const openBrowser = () => {
+          try {
+            ctx.sidebarRight?.openTab(BROWSER_KIND)
+          } catch {
+            /* 没有可用会话时忽略 */
+          }
+        }
+        ctx.effect(() => ctx.sidebarRightTabs.register({
+          id: BROWSER_ID,
+          kind: BROWSER_KIND,
+          priority: 'builtin',
+          title: () => '长期记忆',
+        }), 'longmemory: browser tab type')
+        ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
+          name: 'sidebar.right.pane.tab',
+          key: BROWSER_ID,
+        }, MemoryBrowser))
+        ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register({
+          name: 'sidebar.right.pane.tab.title',
+          key: BROWSER_ID,
+        }, MemoryBrowserTitle))
         ctx.slots.inject('settings.section', () => ctx.slots.register({
           name: 'settings.section',
           id: 'longmemory',
           order: 40,
           label: () => '长期记忆',
+          inject: () => ({ openBrowser }),
         }, MemorySettings))
+        ctx.slots.inject('conversation.session.header.utilities', () => ctx.slots.register({
+          name: 'conversation.session.header.utilities',
+          id: BROWSER_ID,
+          order: 30,
+          label: () => '长期记忆',
+          inject: () => ({ open: openBrowser }),
+        }, MemoryHeaderButton))
       },
     }
   },

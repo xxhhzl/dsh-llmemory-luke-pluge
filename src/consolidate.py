@@ -32,20 +32,39 @@ index（序号）、table（experience/cognition）、new（新条目）、candi
 - supersede：新条目取代某条旧条目（旧条目过时、被更新）；
 - invalidate：新条目证明某条旧条目不再成立，且没有替代（必须给 reason）。
 
+【「重复/冲突」的判定标准】
+先问：新条目和候选旧条目，是在说**同一件事**吗（同一主体 + 同一断言）？
+- 同一主体同一断言，仅措辞不同（「项目用 pnpm」vs「包管理器是 pnpm」）→ 重复：保留信息更丰富的，通常 supersede 新条目并保留旧条目里新条目缺少的细节；
+- 同一主体，断言矛盾（「上限 200」vs「上限 400」）→ 冲突：新条目更新（通常 supersede 新条目）；若新条目没有依据只是另一种说法，选 new 并保持独立；
+- 不同主体、不同断言，只是用词相近 → 不是重复也不是冲突，选 new；
+- 候选为空，或无法确认 → new。
+
 【规则】
-1. 只在候选里明确重复或冲突时才选 supersede / invalidate，其余一律 new。
+1. 宁可 new 也不要错误合并：语义不同的条目保持独立，分别新增（错误的 supersede 会丢信息，错误的 new 只是多一条，前者更贵）。
 2. target_id 必须原样取自该条目的 candidates 里的 id，不编造。
-3. 语义不同但用词相近的条目保持独立，分别新增。
-4. reason 用一句话说明依据（≤60 字符），supersede / invalidate 必填。
+3. reason 用一句话说明依据（≤60 字符），supersede / invalidate 必填。
 
 【输出】只输出一个 JSON 对象，键与类型固定如下（无 markdown 代码块、无解释文字）：
 {"decisions":[{"index":0,"action":"new|supersede|invalidate","target_id":null,"reason":""}]}
 decisions 的条数与输入条数一致，index 与输入一一对应。
 
-【示例】输入：[{"index":0,"table":"cognition","new":{"content":"项目用 pnpm"},"candidates":[{"id":7,"content":"项目用 npm"}]}]
-输出：{"decisions":[{"index":0,"action":"supersede","target_id":7,"reason":"包管理器由 npm 改为 pnpm"}]}
+【示例一】（同一主体同一断言，措辞不同 → supersede）
+输入：[{"index":0,"table":"cognition","new":{"subject":"项目","content":"构建工具用 Vite"},"candidates":[{"id":7,"content":"项目用 Vite 做构建"}]}]
+输出：{"decisions":[{"index":0,"action":"supersede","target_id":7,"reason":"同一事实，新条目表述更完整"}]}
 
-【边界】候选为空时该条选 new；无法判断时选 new。"""
+【示例二】（同一主体，断言矛盾且新条目有依据 → supersede）
+输入：[{"index":0,"table":"cognition","new":{"subject":"摘要配置","content":"摘要上限 400 字符"},"candidates":[{"id":3,"content":"摘要上限 200 字符"}]}]
+输出：{"decisions":[{"index":0,"action":"supersede","target_id":3,"reason":"上限由 200 改为 400，新值取代旧值"}]}
+
+【示例三】（用词相近但语义不同 → new）
+输入：[{"index":0,"table":"cognition","new":{"subject":"检索","content":"范围过滤已下推到召回层"},"candidates":[{"id":9,"content":"过滤后的结果按相关性排序"}]}]
+输出：{"decisions":[{"index":0,"action":"new","target_id":null,"reason":""}]}
+说明：都提到「过滤」，但一条说的是过滤的位置（架构事实），一条说的是排序（另一件事），语义不同，保持独立。
+
+【示例四】（无候选 → new）
+输入：[{"index":0,"table":"experience","new":{"content":"导出前统一 strokeWidth"},"candidates":[]}]
+输出：{"decisions":[{"index":0,"action":"new","target_id":null,"reason":""}]}
+"""
 
 
 @dataclass(frozen=True)

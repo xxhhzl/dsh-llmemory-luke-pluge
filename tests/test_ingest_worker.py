@@ -123,6 +123,69 @@ class TestProcess(WorkerCase):
             self.assertEqual(db.count_events(S1), 1)      # 仍是同一个事件
             self.assertEqual(db.count_messages(S1), 4)
 
+    def test_resume_token_budget_ignores_tool_output_in_dialog_scope(self):
+        '''口径一致：dialog 范围下续写段的 open_event.tokens 不数 tool 输出。
+
+        构造：已绑定事件 = user + 巨大 tool 输出；续写一条 user。
+        若 open_event.tokens 误把 tool 输出算进去，128000 的预算会被 tool
+        输出顶破，续写消息会被 token 规则硬切成新事件；口径一致时应继续留在
+        原事件（FakeTransport 默认 CONTINUE，token 预算是唯一可能触发 SPLIT
+        的规则）。
+        '''
+        big_tool = "x" * 800000                       # ≈20 万 token，远超 128000
+        first = [
+            {"msg_id": "m_u", "seq": 0, "role": "user",
+             "content": "跑一下测试", "ts": "2026-11-02T10:00:00+08:00"},
+            {"msg_id": "m_t", "seq": 1, "role": "tool",
+             "content": big_tool, "ts": "2026-11-02T10:01:00+08:00"},
+        ]
+        worker = make_worker(self.q, self.db_path)
+        worker.process({
+            "job_id": "job_1", "session_id": S1, "agent_id": "a1",
+            "messages": first, "origin_project": None,
+            "envelope": {"type": "ingest.request", "session_id": S1,
+                         "agent_id": "a1", "job_id": "job_1"}})
+        worker.process({
+            "job_id": "job_2", "session_id": S1, "agent_id": "a1",
+            "messages": [{"msg_id": "m_u2", "seq": 2, "role": "user",
+                          "content": "结果呢", "ts": "2026-11-02T10:02:00+08:00"}],
+            "origin_project": None,
+            "envelope": {"type": "ingest.request", "session_id": S1,
+                         "agent_id": "a1", "job_id": "job_2"}})
+        with Database(self.db_path) as db:
+            self.assertEqual(db.count_events(S1), 1)   # 未被 tool 输出顶破预算
+
+    def test_resume_token_budget_counts_tool_output_in_all_scope(self):
+        '''all 范围：tool 输出计入预算，续写段被 token 规则硬切成新事件。'''
+        import config as _config
+        big_tool = "x" * 800000
+        _config.patch_config({"split": {"token_scope": "all"}})
+        try:
+            first = [
+                {"msg_id": "m_u", "seq": 0, "role": "user",
+                 "content": "跑一下测试", "ts": "2026-11-02T10:00:00+08:00"},
+                {"msg_id": "m_t", "seq": 1, "role": "tool",
+                 "content": big_tool, "ts": "2026-11-02T10:01:00+08:00"},
+            ]
+            worker = make_worker(self.q, self.db_path)
+            worker.process({
+                "job_id": "job_1", "session_id": S1, "agent_id": "a1",
+                "messages": first, "origin_project": None,
+                "envelope": {"type": "ingest.request", "session_id": S1,
+                             "agent_id": "a1", "job_id": "job_1"}})
+            worker.process({
+                "job_id": "job_2", "session_id": S1, "agent_id": "a1",
+                "messages": [{"msg_id": "m_u2", "seq": 2, "role": "user",
+                              "content": "结果呢",   # 不命中转折词，SPLIT 只能来自 token 预算
+                              "ts": "2026-11-02T10:02:00+08:00"}],
+                "origin_project": None,
+                "envelope": {"type": "ingest.request", "session_id": S1,
+                             "agent_id": "a1", "job_id": "job_2"}})
+            with Database(self.db_path) as db:
+                self.assertEqual(db.count_events(S1), 2)   # token 预算硬切
+        finally:
+            _config.patch_config({"split": {"token_scope": "dialog"}})
+
 
 class TestRequestHandler(WorkerCase):
     def test_receipt_then_completed(self):

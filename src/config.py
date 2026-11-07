@@ -98,6 +98,7 @@ DEFAULT_CONFIG = {
         "gap_minutes": 120,            # 软先验：间隔超过该值交模型判（不再直接切）
         "max_event_tokens": 128000,    # 主限制：单事件正文的 token 预算
         "max_messages": 1000,          # 紧急兜底：只在异常长事件时触发
+        "token_scope": "dialog",       # token 计数口径：dialog 只数 user/assistant；all 连工具输出一起数
     },
     "search": {
         "limit_max": 20,               # memory_search 的 limit 上限（运行时 clamp）
@@ -126,6 +127,7 @@ _LEAF_SPEC = {
     "split.gap_minutes": {"type": int, "min": 0, "max": 10080},
     "split.max_event_tokens": {"type": int, "min": 500, "max": 200000},
     "split.max_messages": {"type": int, "min": 1, "max": 5000},
+    "split.token_scope": {"type": str, "enum": {"dialog", "all"}},
     "search.limit_max": {"type": int, "min": 1, "max": 100},
     "search.min_score": {"type": float, "min": 0.0, "max": 1.0},
     "search.default_scope": {"type": str, "enum": {"project", "all"}},

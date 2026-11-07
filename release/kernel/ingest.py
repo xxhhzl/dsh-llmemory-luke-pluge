@@ -495,10 +495,15 @@ class IngestWorker:
             else:
                 event = db.get_event(anchor_event)
                 event_msgs = db.list_event_messages(anchor_event)
+                # token 口径必须与 segmenter._message_tokens 一致：
+                # dialog 只数 user/assistant，否则 tool 输出会让续写段预算虚高、提前硬切
+                scope = cfg.get("token_scope", "dialog")
                 open_event = {
                     "event_id": anchor_event,
                     "message_count": len(event_msgs),
-                    "tokens": sum(estimate_tokens(row.content) for row in event_msgs),
+                    "tokens": sum(
+                        estimate_tokens(row.content) for row in event_msgs
+                        if scope == "all" or row.role in ("user", "assistant")),
                     "title": event.title if event else "",
                     "summary": (event.summary or "") if event else "",
                 }
@@ -520,6 +525,7 @@ class IngestWorker:
                 max_event_tokens=int(cfg.get("max_event_tokens", 128000)),
                 max_messages_per_event=int(cfg.get("max_messages", 1000)),
                 use_autothink=jev_cfg.get("on_uncertain", "escalate") == "escalate",
+                token_scope=cfg.get("token_scope", "dialog"),
             ),
         ).run(messages, open_event=open_event, prev_message=prev_message)
 

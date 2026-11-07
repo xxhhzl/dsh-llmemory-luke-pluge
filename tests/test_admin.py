@@ -428,6 +428,12 @@ class TestSelf(AdminCase):
         self.assertEqual(second["type"], "notify")
         self.assertEqual(second["data"]["kind"], "core")
 
+    def test_core_preview_reflects_configured_self(self):
+        admin.self_set(self.db, {"kind": "identity", "content": "我是 A"})
+        preview = admin._OPS["core.preview"](self.db, {})
+        self.assertIn("<self_configured>", preview["text"])
+        self.assertIn("我是 A", preview["text"])
+
 
 if __name__ == "__main__":
     unittest.main()

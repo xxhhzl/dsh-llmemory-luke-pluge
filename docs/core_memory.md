@@ -21,6 +21,9 @@
 - 这与 Letta 的 `persona` / agent-managed blocks、MemGPT 的 core memory、
   Anthropic 的「最小高信号集合 + CLAUDE.md 前置于上下文、其余按需检索」一致。
 
+系统提示词段的 `order` 默认 **-2000**：排在 harness 身份（`-1000`）之前，即**整个系统提示词最前面**。
+代价是核心块一旦变化，会从第一个 token 起击穿 KV cache；因此版本门控（内容不变不更新）必须保留。
+
 ## 2. 标签约定（不同内容必须用专属标签）
 
 系统提示词段：

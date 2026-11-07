@@ -96,7 +96,7 @@ export function createShell(ctx, config = {}, {
   })
   // 核心记忆注入：设置的自我/核心规则 → 系统提示词段；自述 → 动态上下文
   const corePrompt = new CorePrompt(ctx, kernel, {
-    order: config.coreSectionOrder ?? 700,
+    order: config.coreSectionOrder ?? -2000,
     contextOrder: config.coreContextOrder ?? 850,
     timeoutMs: config.requestTimeoutMs ?? 15000,
     trace,

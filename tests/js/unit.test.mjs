@@ -437,7 +437,7 @@ test('核心记忆：注册 section/context，按版本更新文本', async () =
   const section = calls.find(item => item[0] === 'section')[1]
   const context = calls.find(item => item[0] === 'context')[1]
   assert.equal(section.name, CORE_SECTION)
-  assert.equal(section.order, 700)
+  assert.equal(section.order, -2000)
   assert.equal(section.interpolate, false)
   assert.equal(context.name, SELF_NOTES_CONTEXT)
   assert.equal(context.order, 850)

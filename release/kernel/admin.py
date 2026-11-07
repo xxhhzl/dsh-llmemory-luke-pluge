@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 
 import base
 import config
+import core
 import database
 import frame
 import json as _json
@@ -495,6 +496,7 @@ _OPS = {
     "self.list": self_list,
     "self.set": self_set,
     "self.disable": self_disable,
+    "core.preview": lambda db, data: core.compile_core(db),
 }
 
 

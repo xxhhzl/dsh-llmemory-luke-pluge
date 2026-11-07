@@ -17,7 +17,7 @@ export class CorePrompt {
    * @param {object} kernel  内核帧客户端
    */
   constructor(ctx, kernel, {
-    order = 700, contextOrder = 850, timeoutMs = 15000, trace = () => {},
+    order = -2000, contextOrder = 850, timeoutMs = 15000, trace = () => {},
   } = {}) {
     this.ctx = ctx
     this.kernel = kernel

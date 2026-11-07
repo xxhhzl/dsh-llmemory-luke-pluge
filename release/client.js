@@ -24,7 +24,8 @@ window.__ModuleLoader__.load({
       { id: 'experience', label: '经验' },
       { id: 'cognition', label: '认知' },
       { id: 'insight', label: '洞见' },
-      { id: 'self_memory', label: '自我认知' },
+      { id: 'self_configured', label: '自我设定' },
+      { id: 'self_notes', label: '模型自述' },
       { id: 'message', label: '消息' },
       { id: 'memory', label: '引用' },
       { id: 'digest', label: '工作记忆' },
@@ -36,7 +37,6 @@ window.__ModuleLoader__.load({
       experience: ['id', 'content', 'kind', 'importance', 'origin_project', 'status'],
       cognition: ['id', 'subject', 'content', 'kind', 'origin_project', 'status'],
       insight: ['id', 'content', 'scope', 'importance', 'confidence', 'status'],
-      self_memory: ['id', 'source', 'kind', 'content', 'revision', 'status'],
       message: ['_rowid', 'seq', 'role', 'session_id', 'message_id', 'content'],
       memory: ['_rowid', 'seq', 'session_id', 'message_id', 'event_id'],
       digest: ['session_id', 'revision', 'updated_at', 'content'],
@@ -358,6 +358,117 @@ window.__ModuleLoader__.load({
         h('pre', { style: S.pre }, lines.join('\n')))
     }
 
+    const SELF_KINDS = [
+      ['identity', '身份', '我是谁、我的定位'],
+      ['behavior', '行为准则', '我该怎么做（工作方式）'],
+      ['limitation', '能力边界', '我不能做什么、何时需要用户确认'],
+      ['goal', '目标', '我长期要达成什么'],
+    ]
+
+    /** 自我设定（configured → 系统提示词）/ 模型自述（agent → 动态上下文）。 */
+    function SelfSettings({ mode = 'configured' }) {
+      const [items, setItems] = React.useState([])
+      const [values, setValues] = React.useState({})
+      const [status, setStatus] = React.useState('')
+      const [error, setError] = React.useState('')
+      const [preview, setPreview] = React.useState(null)
+      const configured = mode === 'configured'
+
+      const load = React.useCallback(async () => {
+        try {
+          const result = await callApi({ op: 'self.list', source: mode })
+          const list = result.items ?? []
+          setItems(list)
+          const active = {}
+          for (const item of list) {
+            if (item.status === 'active' && active[item.kind] === undefined) {
+              active[item.kind] = item.content
+            }
+          }
+          setValues(active)
+          setError('')
+        } catch (e) {
+          setError(String(e?.message ?? e))
+        }
+      }, [mode])
+
+      React.useEffect(() => { void load() }, [load])
+
+      const save = async kind => {
+        setStatus('')
+        try {
+          await callApi({ op: 'self.set', kind, content: values[kind] ?? '' })
+          await load()
+          setStatus('已保存，下一轮生效')
+        } catch (e) {
+          setError(String(e?.message ?? e))
+        }
+      }
+
+      const disable = async id => {
+        if (!window.confirm(`停用 #${id}？停用后不再注入。`)) return
+        try {
+          await callApi({ op: 'self.disable', id })
+          await load()
+        } catch (e) {
+          setError(String(e?.message ?? e))
+        }
+      }
+
+      const showPreview = async () => {
+        try {
+          setPreview(await callApi({ op: 'core.preview' }))
+          setError('')
+        } catch (e) {
+          setError(String(e?.message ?? e))
+        }
+      }
+
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
+        h('div', { style: { ...S.cardLabel, maxWidth: '760px' } },
+          configured
+            ? '「设置的自我」保存后进入系统提示词 <self_configured>；同类只保留最新一条，旧条目留作历史、可停用。'
+            : '「模型自述」由模型通过 memory_self_write 写入，进入动态上下文 <self_notes>；你可以在这里停用。'),
+        configured && h('div', { style: { display: 'grid', gap: '10px' } },
+          ...SELF_KINDS.map(([kind, label, hint]) => h('div', { key: kind, style: S.field },
+            h('span', { style: S.label }, `${label}（${hint}）`),
+            h('input', {
+              style: S.input,
+              value: values[kind] ?? '',
+              placeholder: hint,
+              onChange: e => setValues(prev => ({ ...prev, [kind]: e.target.value })),
+            }),
+            h('button', { style: S.button, type: 'button', onClick: () => save(kind) },
+              `保存${label}`)))),
+        h('div', { style: S.bar },
+          h('button', { style: S.button, type: 'button', onClick: showPreview },
+            '预览注入文本'),
+          h('button', { style: S.button, type: 'button', onClick: load }, '刷新'),
+          status && h('span', { style: S.cardLabel }, status)),
+        error && h('div', { style: S.error }, error),
+        preview && h('div', null,
+          h('div', { style: S.cardLabel },
+            `系统提示词 ${preview.text?.length ?? 0} 字符 · 自述 ${preview.notes_text?.length ?? 0} 字符 · 版本 ${preview.version || '无'}`),
+          h('pre', { style: S.pre }, preview.text || '（系统提示词段为空）'),
+          h('pre', { style: S.pre }, preview.notes_text || '（自述为空）')),
+        h('div', { style: S.cardLabel }, '历史'),
+        h('table', { style: S.table },
+          h('thead', null, h('tr', null,
+            ...['id', 'kind', 'content', 'revision', 'status'].map(name =>
+              h('th', { key: name, style: S.th }, name)),
+            h('th', { key: '_ops', style: S.th }, '操作'))),
+          h('tbody', null, ...items.map(item => h('tr', { key: item.id },
+            ...['id', 'kind', 'content', 'revision', 'status'].map(name =>
+              h('td', { key: name, style: S.td },
+                h('span', { style: S.clip, title: String(item[name] ?? '') },
+                  clip(item[name])))),
+            h('td', { key: '_ops', style: S.td },
+              item.status === 'active' && h('button', {
+                style: { ...S.button, ...S.danger }, type: 'button',
+                onClick: () => disable(item.id),
+              }, '停用')))))))
+    }
+
     function MemorySettings() {
       const [tab, setTab] = React.useState('overview')
       const [schema, setSchema] = React.useState(null)
@@ -373,6 +484,7 @@ window.__ModuleLoader__.load({
 
       const tableSchema = name => schema?.tables?.find(item => item.name === name)
       const dataTab = tab !== 'overview' && tab !== 'logs'
+        && tab !== 'self_configured' && tab !== 'self_notes'
 
       return h('section', { style: S.wrap },
         h('div', { style: S.head }, h('h2', { style: S.title }, '长期记忆')),
@@ -385,6 +497,8 @@ window.__ModuleLoader__.load({
         error && h('div', { style: S.error }, `管理接口不可用：${error}`),
         tab === 'overview' && h(Overview),
         tab === 'logs' && h(Logs),
+        tab === 'self_configured' && h(SelfSettings, { mode: 'configured' }),
+        tab === 'self_notes' && h(SelfSettings, { mode: 'agent' }),
         dataTab && (tableSchema(tab)
           ? h(DataTable, { table: tab, schema: tableSchema(tab) })
           : h('div', { style: S.cardLabel }, '读取表结构…')))

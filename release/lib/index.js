@@ -42,7 +42,7 @@ export const Config = z.object({
     .description('外壳等内核应答的超时（毫秒）'),
   llmTimeoutMs: z.number().step(1).min(1000).default(120000)
     .description('单次模型调用超时（毫秒）'),
-  coreSectionOrder: z.number().step(1).default(700)
+  coreSectionOrder: z.number().step(1).default(-2000)
     .description('核心记忆在系统提示词中的段顺序（persona 之后、文件引用之前）'),
   coreContextOrder: z.number().step(1).default(850)
     .description('自述自我在动态上下文中的顺序'),

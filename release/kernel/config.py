@@ -127,7 +127,7 @@ DEFAULT_CONFIG = {
         "max_cognitions": 4,           # 入选核心块的全局认知上限
         "max_self_configured": 20,     # 设置的自我（进系统提示词）上限
         "max_self_notes": 10,          # 自己写的自我（进动态上下文）上限
-        "section_order": 700,          # 系统提示词段顺序（persona 之后）
+        "section_order": -2000,       # 系统提示词段顺序（最前，先于 harness 身份 -1000）
         "context_order": 850,          # 动态上下文顺序
     },
     "log": {"level": "info"},           # debug / info / warn / error

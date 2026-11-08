@@ -50,7 +50,8 @@ SUMMARY_SYSTEM_PROMPT = """【角色】你是长期记忆系统的「事件归�
 - technique：被验证有效的做法（含「为什么有效」——知其然也要知其所以然，才是可迁移的经验）；
 - pitfall：踩过的坑及规避方式（报错原因、错误假设、返工的教训）；
 - command：可复用的命令、配置或代码片段。
-不写：某次具体的输出内容、一次性结论、临时路径、只适用于本事件上下文的中间状态。
+不写：某次具体的输出内容、一次性结论、临时路径、只适用于本事件上下文的中间状态；
+      也不要写「记忆系统自身如何分类/归档/提取」的元讨论——那是系统设计，不是可复用做法。
 提取时问一句：换一个项目／换一天，这条还成立吗？不成立就不写。
 
 【经验的可迁移性】经验正文写成**换个项目也成立**的通用表述（摘要仍按上面的规则原样保留路径/命令）：
@@ -85,6 +86,13 @@ SUMMARY_SYSTEM_PROMPT = """【角色】你是长期记忆系统的「事件归�
 - confidence：直接观察到的原话或命令输出给 0.9 左右；从上下文推断的 ≤0.6；没有把握的不写。
 - cues：3–6 个检索用短词，取条目里的关键实体（工具名、文件名、概念），不要泛词。
 
+【已有记忆与动作】user 消息可能带 [已有记忆] 段：列出库里可能相关的条目（带 id）。
+- 新条目与其中某条重复或冲突时，用 action 指回它：supersede（新条目取代旧条目，如更新、更完整的说法）或 invalidate（旧条目不再成立，必须给 reason）；
+- **同一主体 + 同一断言，仅措辞不同也算重复**（如「上网查找」vs「互联网查找」），必须 supersede，不要 new；
+- target_id 必须原样取自 [已有记忆] 里的 id，不编造；
+- 没有 [已有记忆] 段时，每条 action 一律 new；
+- 只是话题相近、并非同一件事时，保持 new，不要硬合并。
+
 【输出】只输出一个 JSON 对象，键与类型固定如下（无 markdown 代码块、无解释文字）：
 {
   "title": "≤24 字符，动词开头",
@@ -92,15 +100,18 @@ SUMMARY_SYSTEM_PROMPT = """【角色】你是长期记忆系统的「事件归�
   "experiences": [
     {"context": "触发条件，≤120 字符", "content": "一句话做法，≤200 字符",
      "kind": "technique|pitfall|command", "scope": "global|project",
-     "importance": 1, "confidence": 0.8, "cues": ["检索线索"]}
+     "importance": 1, "confidence": 0.8, "cues": ["检索线索"],
+     "action": "new|supersede|invalidate", "target_id": null, "reason": ""}
   ],
   "cognitions": [
     {"subject": "主体，≤40 字符", "content": "一句话事实，≤200 字符",
      "kind": "fact|preference|constraint", "importance": 3,
-     "confidence": 0.8, "cues": ["检索线索"]}
+     "confidence": 0.8, "cues": ["检索线索"],
+     "action": "new|supersede|invalidate", "target_id": null, "reason": ""}
   ]
 }
 importance 取 1–5 的整数，confidence 取 0–1 的小数，cues 是 0–10 个短词。
+每条经验/认知可选带 `action`（默认 new）、`target_id`（action 非 new 时必填，取自 [已有记忆]）、`reason`（invalidate 必填）。
 
 【示例一：有可复用经验与稳定认知】
 输入：[正文]
@@ -124,6 +135,13 @@ user：这个插件的检索一直搜不到旧事件，你查下。
 assistant：查到原因：FTS 表在旧库结构里缺 origin_project 列，scope=project 的过滤发生在召回之后，60 条别项目条目把本项目 5 条全挤出 top-50。已修：范围过滤下推到召回层。
 输出：{"title":"导出 SVG 并修复检索范围过滤","summary":"把边框改为 1px 并导出 export.svg；随后定位检索漏召回的原因——FTS 表缺 origin_project 列导致范围过滤在召回后执行，范围外条目挤占 top-50——已把过滤下推到召回层修复。","experiences":[{"context":"FTS 检索带范围过滤时","content":"范围过滤必须下推到召回层（MATCH 查询里带条件），召回后再筛会让范围外条目挤占名额","kind":"pitfall","scope":"global","importance":4,"confidence":0.9,"cues":["FTS","召回","范围过滤"]}],"cognitions":[]}
 说明：「导出 export.svg 到桌面」是当次产物，不提取；「边框 1px」是当次参数，不提取；只有「召回层下推」这类可迁移的判断才是经验。
+
+【示例四：命中已有记忆 → supersede，不要 new】
+输入：[已有记忆]
+- cognition #28 [preference] 用户的信息检索偏好：遇到不了解的内容先上网查并核实来源真实性
+[正文]
+user：再说一次，不了解的内容都要去互联网查资料，并核实真实性，网上信息不一定对。
+输出：{"title":"重申检索与核实偏好","summary":"用户重申：不了解的内容先联网查资料并核实真实性，不盲信网上信息。","experiences":[],"cognitions":[{"subject":"用户的信息检索偏好","content":"不了解的内容先联网查资料并核实真实性，不盲信网上信息","kind":"preference","importance":5,"confidence":0.95,"cues":["联网检索","资料核实"],"action":"supersede","target_id":28,"reason":"同一偏好的更完整表述"}]}
 
 【边界】信息不足时，summary 只写已知事实、数组给 []；对某条内容没有把握时宁可不写它，也不要编造。"""
 
@@ -225,9 +243,30 @@ def _fit_transcript(lines: list, budget: int) -> tuple:
     return text, True, omitted
 
 
+def _render_existing(existing: list | None) -> str:
+    '''把「可能相关的已有记忆」渲染成 [已有记忆] 段（供调用 A 直接判重）。'''
+    if not existing:
+        return ""
+    lines = []
+    for item in existing:
+        kind = item.get("kind") or ""
+        sub = item.get("subkind") or ""
+        label = f"{kind} #{item.get('id')}"
+        if sub:
+            label += f" [{sub}]"
+        if item.get("scope"):
+            label += f" scope={item['scope']}"
+        content = str(item.get("content") or "")
+        if kind == "cognition" and item.get("subject"):
+            content = f"{item['subject']}：{content}"
+        lines.append(f"- {label} {content}")
+    return "[已有记忆]\n" + "\n".join(lines)
+
+
 def build_messages(meta: EventMeta, messages: list, *,
                    max_input_chars: int = DEFAULT_MAX_INPUT_CHARS,
-                   previous_summary: str = "") -> list:
+                   previous_summary: str = "",
+                   existing: list | None = None) -> list:
     '''把事件元信息 + 对话正文拼成 system + user 两条消息。'''
     lines = _render_lines(messages)
     transcript, truncated, _ = _fit_transcript(lines, max(1000, int(max_input_chars)))
@@ -238,6 +277,9 @@ def build_messages(meta: EventMeta, messages: list, *,
     parts = [header, scale]
     if previous_summary:
         parts.append(f"[已有摘要]\n{truncate(previous_summary, 200, 0)}")
+    block = _render_existing(existing)
+    if block:
+        parts.append(block)
     parts.append("[正文]")
     parts.append(transcript)
 
@@ -278,7 +320,8 @@ def _as_cues(value) -> tuple:
                  for item in value[:CUE_MAX] if str(item).strip())
 
 
-def _resolve_action(item: dict, allow_actions: bool) -> tuple:
+def _resolve_action(item: dict, allow_actions: bool,
+                    allowed_targets: set | None = None) -> tuple:
     '''返回 (action, target_id, reason)；非法动作按文档降级或丢弃。'''
     if not allow_actions:
         return "new", None, ""
@@ -292,21 +335,26 @@ def _resolve_action(item: dict, allow_actions: bool) -> tuple:
             return None, None, ""
         if not isinstance(target, int):
             return "new", None, ""
+        if allowed_targets is not None and target not in allowed_targets:
+            return "new", None, ""
         return action, target, reason
     if action == "supersede":
         if not isinstance(target, int):
+            return "new", None, ""
+        if allowed_targets is not None and target not in allowed_targets:
             return "new", None, ""
         return action, target, reason
     return "new", None, ""
 
 
-def _normalize_experience(item: dict, allow_actions: bool) -> dict | None:
+def _normalize_experience(item: dict, allow_actions: bool,
+                          allowed_targets: set | None = None) -> dict | None:
     content = str(item.get("content") or "").strip()
     if not content:
         return None
     kind = str(item.get("kind") or "technique").strip().lower()
     scope = str(item.get("scope") or "project").strip().lower()
-    action, target, reason = _resolve_action(item, allow_actions)
+    action, target, reason = _resolve_action(item, allow_actions, allowed_targets)
     if action is None:
         return None
     return {
@@ -324,13 +372,14 @@ def _normalize_experience(item: dict, allow_actions: bool) -> dict | None:
     }
 
 
-def _normalize_cognition(item: dict, allow_actions: bool) -> dict | None:
+def _normalize_cognition(item: dict, allow_actions: bool,
+                         allowed_targets: set | None = None) -> dict | None:
     subject = str(item.get("subject") or "").strip()[:SUBJECT_MAX]
     content = str(item.get("content") or "").strip()
     if not subject or not content:
         return None
     kind = str(item.get("kind") or "fact").strip().lower()
-    action, target, reason = _resolve_action(item, allow_actions)
+    action, target, reason = _resolve_action(item, allow_actions, allowed_targets)
     if action is None:
         return None
     return {
@@ -364,7 +413,15 @@ def _load_json(raw: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def parse_result(raw: str, *, allow_actions: bool = False) -> SummaryResult:
+def _targets_for(kind: str, allowed_targets):
+    '''allowed_targets 可以是 {kind: set(ids)}，也可以是单一集合（向后兼容）。'''
+    if isinstance(allowed_targets, dict):
+        return allowed_targets.get(kind)
+    return allowed_targets
+
+
+def parse_result(raw: str, *, allow_actions: bool = False,
+                 allowed_targets=None) -> SummaryResult:
     '''解析模型输出；摘要缺失即失败，条目非法只丢弃该条。'''
     data = _load_json(raw)
     if data is None:
@@ -385,7 +442,8 @@ def parse_result(raw: str, *, allow_actions: bool = False) -> SummaryResult:
         if not isinstance(item, dict):
             review = True
             continue
-        normalized = _normalize_experience(item, allow_actions)
+        normalized = _normalize_experience(
+            item, allow_actions, _targets_for("experience", allowed_targets))
         if normalized is None:
             review = True
             continue
@@ -398,7 +456,8 @@ def parse_result(raw: str, *, allow_actions: bool = False) -> SummaryResult:
         if not isinstance(item, dict):
             review = True
             continue
-        normalized = _normalize_cognition(item, allow_actions)
+        normalized = _normalize_cognition(
+            item, allow_actions, _targets_for("cognition", allowed_targets))
         if normalized is None:
             review = True
             continue
@@ -478,9 +537,13 @@ def _retryable(exc: Exception) -> bool:
 
 def extract(meta: EventMeta, messages: list, transport: SummaryTransport, *,
             max_input_chars: int = DEFAULT_MAX_INPUT_CHARS,
-            previous_summary: str = "") -> SummaryResult:
+            previous_summary: str = "",
+            existing: list | None = None) -> SummaryResult:
     '''
     调用 A：摘要 + 经验 + 认知；解析失败或瞬时错误重试一次，仍失败返回 ok=False。
+
+    :param existing: 可能相关的已有记忆（[{"kind","id","subkind","scope","subject","content"}]）；
+                     给出时允许模型用 action/target_id 直接判重（target 必须来自该列表）
 
     重试策略（2026-11-03 定稿）：
     - **只重试瞬时错误**（超时 / 模型不可用 1004 / 队列满）——参数与鉴权类重试没意义；
@@ -490,9 +553,16 @@ def extract(meta: EventMeta, messages: list, transport: SummaryTransport, *,
     '''
     import time
 
+    allowed_targets = None
+    if existing:
+        allowed_targets = {"experience": set(), "cognition": set()}
+        for item in existing:
+            bucket = allowed_targets.get(item.get("kind"))
+            if bucket is not None and item.get("id") is not None:
+                bucket.add(int(item["id"]))
     deadline = time.monotonic() + TOTAL_BUDGET_SECONDS
     payload = build_messages(meta, messages, max_input_chars=max_input_chars,
-                             previous_summary=previous_summary)
+                             previous_summary=previous_summary, existing=existing)
     hint_chars = max_input_chars
     last_error = ""
     for attempt in (1, 2):
@@ -509,9 +579,11 @@ def extract(meta: EventMeta, messages: list, transport: SummaryTransport, *,
                 break
             hint_chars = max(1000, hint_chars // 2)     # 降半输入再试
             payload = build_messages(meta, messages, max_input_chars=hint_chars,
-                                     previous_summary=previous_summary)
+                                     previous_summary=previous_summary,
+                                     existing=existing)
             continue
-        result = parse_result(raw)
+        result = parse_result(raw, allow_actions=bool(existing),
+                              allowed_targets=allowed_targets)
         if result.ok:
             return result
         last_error = result.error

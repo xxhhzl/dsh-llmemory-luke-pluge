@@ -123,6 +123,37 @@ class TestProcess(WorkerCase):
             self.assertEqual(db.count_events(S1), 1)      # 仍是同一个事件
             self.assertEqual(db.count_messages(S1), 4)
 
+    def test_resummarize_runs_consolidation(self):
+        '''补摘要不能跳过调用 B：否则同义条目只按「正文完全相同」去重。'''
+        worker = ingest.IngestWorker(
+            self.q,
+            db_factory=lambda: Database(self.db_path),
+            jev_factory=lambda: FakeTransport(),
+            summary_factory=lambda: FakeSummaryTransport([SUMMARY_JSON, SUMMARY_JSON]),
+            consolidate_factory=lambda: FakeSummaryTransport([DECISIONS_JSON]))
+        job = {"job_id": "job_1", "session_id": S1, "agent_id": "a1",
+               "messages": messages(), "origin_project": None,
+               "envelope": {"type": "ingest.request", "session_id": S1,
+                            "agent_id": "a1", "job_id": "job_1"}}
+        worker.process(job)
+        with Database(self.db_path) as db:
+            event_id = db.list_events(S1)[0].id
+
+        seen = {}
+        original = ingest.ingest_event
+
+        def spy(db_, **kwargs):
+            seen.update(kwargs)
+            return original(db_, **kwargs)
+
+        ingest.ingest_event = spy
+        try:
+            with Database(self.db_path) as db:
+                worker._resummarize(db, job, event_id, messages())
+        finally:
+            ingest.ingest_event = original
+        self.assertIsNotNone(seen.get("transport"), "补摘要必须传 consolidate transport")
+
     def test_resume_token_budget_ignores_tool_output_in_dialog_scope(self):
         '''口径一致：dialog 范围下续写段的 open_event.tokens 不数 tool 输出。
 

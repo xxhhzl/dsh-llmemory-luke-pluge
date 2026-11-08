@@ -61,6 +61,16 @@ class TestBuildMessages(unittest.TestCase):
         self.assertIn("[已有摘要]", payload[1]["content"])
         self.assertIn("上一版摘要", payload[1]["content"])
 
+    def test_existing_memories_block(self):
+        existing = [{"kind": "cognition", "id": 28, "subkind": "preference",
+                     "subject": "用户的信息检索偏好",
+                     "content": "遇到不了解的内容先上网查并核实"}]
+        user = build_messages(META, [msg("user", "x")], existing=existing)[1]["content"]
+        self.assertIn("[已有记忆]", user)
+        self.assertIn("cognition #28 [preference]", user)
+        self.assertIn("用户的信息检索偏好", user)
+        self.assertLess(user.index("[已有记忆]"), user.index("[正文]"))
+
 
 class TestParse(unittest.TestCase):
     def test_valid_payload(self):
@@ -172,6 +182,30 @@ class TestParse(unittest.TestCase):
         self.assertEqual(len(result.cognitions), 0)      # invalidate 缺 reason → 丢弃
         self.assertTrue(result.needs_review)
 
+    def test_action_target_must_come_from_existing(self):
+        raw = json.dumps({
+            "title": "t", "summary": "s",
+            "experiences": [{"content": "x", "action": "supersede", "target_id": 12}],
+            "cognitions": [{"subject": "用户", "content": "y", "action": "supersede",
+                            "target_id": 28}],
+        }, ensure_ascii=False)
+        result = parse_result(raw, allow_actions=True,
+                              allowed_targets={"experience": {12}, "cognition": {28}})
+        self.assertEqual(result.experiences[0]["action"], "supersede")
+        self.assertEqual(result.cognitions[0]["action"], "supersede")
+
+    def test_action_target_outside_existing_degrades_to_new(self):
+        raw = json.dumps({
+            "title": "t", "summary": "s",
+            "experiences": [{"content": "x", "action": "supersede", "target_id": 99}],
+            "cognitions": [{"subject": "用户", "content": "y", "action": "supersede",
+                            "target_id": 12}],   # 12 是经验 id，不能作为认知 target
+        }, ensure_ascii=False)
+        result = parse_result(raw, allow_actions=True,
+                              allowed_targets={"experience": {12}, "cognition": {28}})
+        self.assertEqual(result.experiences[0]["action"], "new")
+        self.assertEqual(result.cognitions[0]["action"], "new")
+
 
 class TestExtract(unittest.TestCase):
     def test_retry_once_then_success(self):
@@ -195,6 +229,20 @@ class TestExtract(unittest.TestCase):
         result = extract(META, [msg("user", "x")], transport)
         self.assertFalse(result.ok)
         self.assertIn("timeout", result.error)
+
+    def test_existing_memories_enable_actions(self):
+        raw = json.dumps({
+            "title": "t", "summary": "s",
+            "cognitions": [{"subject": "用户的信息检索偏好", "content": "新说法",
+                            "action": "supersede", "target_id": 28}],
+        }, ensure_ascii=False)
+        transport = FakeSummaryTransport([raw])
+        existing = [{"kind": "cognition", "id": 28, "subkind": "preference",
+                     "subject": "用户的信息检索偏好", "content": "旧说法"}]
+        result = extract(META, [msg("user", "x")], transport, existing=existing)
+        self.assertEqual(result.cognitions[0]["action"], "supersede")
+        self.assertEqual(result.cognitions[0]["target_id"], 28)
+        self.assertIn("[已有记忆]", transport.calls[0][1]["content"])
 
 
 class TestShellTransport(unittest.TestCase):

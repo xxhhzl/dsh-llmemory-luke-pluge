@@ -10,8 +10,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from database import Database
-from ingest import apply_summary, refresh_digest
+from database import Database, Experience
+from ingest import apply_summary, ingest_event, refresh_digest
 from summary import SummaryResult
 
 BASE_TMP = Path(__file__).resolve().parents[1] / ".tmp" / "test_ingest"
@@ -125,6 +125,41 @@ class TestRefreshDigest(IngestCase):
         self.assertLess(content.index(f"#{first.event.id}"), content.index(f"#{second.event.id}"))
         self.assertEqual(self.db.get_digest(S1).ref_event_ids,
                          (first.event.id, second.event.id))
+
+
+class TestIngestEventActions(IngestCase):
+    '''调用 A 自带 action 时，落库直接按它合并（无需调用 B）。'''
+
+    def test_summary_action_supersedes(self):
+        old = self.db.insert_experience(Experience(
+            content="旧说法", kind="technique", origin_session=S1,
+            source_event_id=1, created_at="2026-11-01T09:00:00+08:00"))
+        item = {"context": "", "content": "新说法", "kind": "technique",
+                "importance": 3, "confidence": 0.8, "cues": (),
+                "action": "supersede", "target_id": old, "reason": "更新"}
+        summary = SummaryResult(ok=True, title="t", summary="s",
+                                experiences=(item,), cognitions=())
+        result = ingest_event(self.db, session_id=S1, summary=summary, transport=None)
+        self.assertEqual(len(result.experience_ids), 1)
+        new_id = result.experience_ids[0]
+        self.assertNotEqual(new_id, old)
+        self.assertEqual(self.db.get_experience(old).status, "superseded")
+        self.assertEqual(self.db.get_experience(new_id).superseded_id, old)
+        self.assertEqual(self.db.get_experience(new_id).content, "新说法")
+
+    def test_summary_action_invalidate(self):
+        old = self.db.insert_experience(Experience(
+            content="过时做法", kind="technique", origin_session=S1,
+            source_event_id=1, created_at="2026-11-01T09:00:00+08:00"))
+        item = {"context": "", "content": "新做法", "kind": "technique",
+                "importance": 3, "confidence": 0.8, "cues": (),
+                "action": "invalidate", "target_id": old, "reason": "已废弃"}
+        summary = SummaryResult(ok=True, title="t", summary="s",
+                                experiences=(item,), cognitions=())
+        result = ingest_event(self.db, session_id=S1, summary=summary, transport=None)
+        self.assertEqual(result.invalidated, (old,))
+        self.assertEqual(self.db.get_experience(old).status, "invalid")
+        self.assertEqual(self.db.get_experience(old).invalid_reason, "已废弃")
 
 
 if __name__ == "__main__":

@@ -110,6 +110,60 @@ def _insert_cognition(db: database.Database, event_id: int, item: dict,
         origin_project=origin_project))
 
 
+def _existing_memories(db: database.Database, messages: list, *,
+                       per_kind: int = 5) -> list:
+    '''
+    取与本事件可能相关的旧记忆（经验/认知/洞见），供调用 A 直接判重。
+
+    与 mem0 的 context lookup、LangMem 的 `existing` 入参对齐：让提取模型
+    在写之前就看到旧条目，才能用 action/target_id 合并，而不是盲写后再补救。
+    '''
+    text = " ".join(str(m.get("content") or "") for m in messages
+                    if m.get("role") in ("user", "assistant"))
+    text = " ".join(text.split())
+    if not text:
+        return []
+    query = text[-600:]
+    try:
+        hits = db.search_fts(query, limit=40)
+    except Exception as exc:                  # 检索失败不影响提取主链路
+        base.log.warning("ingest.existing_lookup_failed", error=repr(exc))
+        return []
+
+    ordered: dict = {}
+    for hit in hits:
+        kind = hit.get("ref_kind")
+        if kind not in ("experience", "cognition", "insight"):
+            continue
+        row_id = int(hit["ref_id"])
+        bucket = ordered.setdefault(kind, [])
+        if row_id not in bucket:
+            bucket.append(row_id)
+
+    result = []
+    for kind, ids in ordered.items():
+        rows = db.get_many(kind, ids[:per_kind * 2])
+        kept = 0
+        for row_id in ids:
+            row = rows.get(row_id)
+            if row is None:
+                continue
+            item = {"kind": kind, "id": row_id, "content": row.content}
+            if kind == "experience":
+                item["subkind"] = getattr(row, "kind", "")
+                item["scope"] = getattr(row, "scope", None)
+            elif kind == "cognition":
+                item["subkind"] = getattr(row, "kind", "")
+                item["subject"] = getattr(row, "subject", "")
+            else:
+                item["scope"] = getattr(row, "scope", None)
+            result.append(item)
+            kept += 1
+            if kept >= per_kind:
+                break
+    return result
+
+
 def apply_summary(db: database.Database, *, session_id: str,
                   summary: SummaryResult,
                   event_id: int | None = None,
@@ -275,13 +329,28 @@ def ingest_event(db: database.Database, *, session_id: str,
     :param refresh: 是否立即重拼 digest；批处理时由 job 末尾统一刷
     '''
     decisions = {}
-    if transport is not None and summary.ok:
+    if summary.ok:
         items = [dict(item, table="experience") for item in summary.experiences] + \
                 [dict(item, table="cognition") for item in summary.cognitions]
-        if items:
+        # 调用 A 若带了 [已有记忆] 并直接给出合并动作，优先采用（target 已按表校验）
+        for index, item in enumerate(items):
+            action = item.get("action") or "new"
+            target = item.get("target_id")
+            if action in ("supersede", "invalidate") and isinstance(target, int):
+                decisions[index] = {"action": action, "target_id": target,
+                                    "reason": item.get("reason") or "",
+                                    "subject": None}
+        if transport is not None and items:
             import consolidate
-            decisions = consolidate.decide(
+            b_decisions = consolidate.decide(
                 db, items, transport, origin_project=origin_project).items
+            for index, decision in b_decisions.items():
+                if index in decisions:
+                    # A 的动作保留；B 只补主体归一
+                    if decision.get("subject"):
+                        decisions[index]["subject"] = decision["subject"]
+                else:
+                    decisions[index] = decision
     return apply_summary(db, session_id=session_id, summary=summary,
                          event_id=event_id, origin_project=origin_project,
                          related_events=related_events, digest_limit=digest_limit,
@@ -597,7 +666,8 @@ class IngestWorker:
                 meta = EventMeta(event_id=0, session_id=job["session_id"],
                                  message_count=len(msgs), first_at=msgs[0]["ts"],
                                  last_at=msgs[-1]["ts"], tokens=event.tokens)
-                summary = extract(meta, msgs, self._summary_factory())
+                summary = extract(meta, msgs, self._summary_factory(),
+                                  existing=_existing_memories(db, msgs))
                 ingest_event(db, session_id=job["session_id"], summary=summary,
                              transport=self._consolidate_factory(),
                              origin_project=job.get("origin_project"),
@@ -682,13 +752,14 @@ class IngestWorker:
                          tokens=sum(estimate_tokens(m.get("content", ""))
                                     for m in all_msgs))
         summary = extract(meta, all_msgs, self._summary_factory(),
-                          previous_summary=event.summary or "")
+                          previous_summary=event.summary or "",
+                          existing=_existing_memories(db, all_msgs))
         if not summary.ok:
             base.log.warning("ingest.resummarize_failed", event_id=event_id,
                              error=summary.error)
             return
         ingest_event(db, session_id=job["session_id"], summary=summary,
-                     transport=None, event_id=event_id,
+                     transport=self._consolidate_factory(), event_id=event_id,
                      origin_project=job.get("origin_project"),
                      message_ids=[m["msg_id"] for m in new_messages],
                      refresh=False)

@@ -48,7 +48,8 @@
 - technique：被验证有效的做法（含「为什么有效」——知其然也要知其所以然，才是可迁移的经验）；
 - pitfall：踩过的坑及规避方式（报错原因、错误假设、返工的教训）；
 - command：可复用的命令、配置或代码片段。
-不写：某次具体的输出内容、一次性结论、临时路径、只适用于本事件上下文的中间状态。
+不写：某次具体的输出内容、一次性结论、临时路径、只适用于本事件上下文的中间状态；
+      也不要写「记忆系统自身如何分类/归档/提取」的元讨论——那是系统设计，不是可复用做法。
 提取时问一句：换一个项目／换一天，这条还成立吗？不成立就不写。
 
 【经验的可迁移性】经验正文写成**换个项目也成立**的通用表述（摘要仍按上面的规则原样保留路径/命令）：
@@ -83,6 +84,13 @@
 - confidence：直接观察到的原话或命令输出给 0.9 左右；从上下文推断的 ≤0.6；没有把握的不写。
 - cues：3–6 个检索用短词，取条目里的关键实体（工具名、文件名、概念），不要泛词。
 
+【已有记忆与动作】user 消息可能带 [已有记忆] 段：列出库里可能相关的条目（带 id）。
+- 新条目与其中某条重复或冲突时，用 action 指回它：supersede（新条目取代旧条目，如更新、更完整的说法）或 invalidate（旧条目不再成立，必须给 reason）；
+- **同一主体 + 同一断言，仅措辞不同也算重复**（如「上网查找」vs「互联网查找」），必须 supersede，不要 new；
+- target_id 必须原样取自 [已有记忆] 里的 id，不编造；
+- 没有 [已有记忆] 段时，每条 action 一律 new；
+- 只是话题相近、并非同一件事时，保持 new，不要硬合并。
+
 【输出】只输出一个 JSON 对象，键与类型固定如下（无 markdown 代码块、无解释文字）：
 {
   "title": "≤24 字符，动词开头",
@@ -90,15 +98,18 @@
   "experiences": [
     {"context": "触发条件，≤120 字符", "content": "一句话做法，≤200 字符",
      "kind": "technique|pitfall|command", "scope": "global|project",
-     "importance": 1, "confidence": 0.8, "cues": ["检索线索"]}
+     "importance": 1, "confidence": 0.8, "cues": ["检索线索"],
+     "action": "new|supersede|invalidate", "target_id": null, "reason": ""}
   ],
   "cognitions": [
     {"subject": "主体，≤40 字符", "content": "一句话事实，≤200 字符",
      "kind": "fact|preference|constraint", "importance": 3,
-     "confidence": 0.8, "cues": ["检索线索"]}
+     "confidence": 0.8, "cues": ["检索线索"],
+     "action": "new|supersede|invalidate", "target_id": null, "reason": ""}
   ]
 }
 importance 取 1–5 的整数，confidence 取 0–1 的小数，cues 是 0–10 个短词。
+每条经验/认知可选带 `action`（默认 new）、`target_id`（action 非 new 时必填，取自 [已有记忆]）、`reason`（invalidate 必填）。
 
 【示例一：有可复用经验与稳定认知】
 输入：[正文]
@@ -122,6 +133,13 @@ user：这个插件的检索一直搜不到旧事件，你查下。
 assistant：查到原因：FTS 表在旧库结构里缺 origin_project 列，scope=project 的过滤发生在召回之后，60 条别项目条目把本项目 5 条全挤出 top-50。已修：范围过滤下推到召回层。
 输出：{"title":"导出 SVG 并修复检索范围过滤","summary":"把边框改为 1px 并导出 export.svg；随后定位检索漏召回的原因——FTS 表缺 origin_project 列导致范围过滤在召回后执行，范围外条目挤占 top-50——已把过滤下推到召回层修复。","experiences":[{"context":"FTS 检索带范围过滤时","content":"范围过滤必须下推到召回层（MATCH 查询里带条件），召回后再筛会让范围外条目挤占名额","kind":"pitfall","scope":"global","importance":4,"confidence":0.9,"cues":["FTS","召回","范围过滤"]}],"cognitions":[]}
 说明：「导出 export.svg 到桌面」是当次产物，不提取；「边框 1px」是当次参数，不提取；只有「召回层下推」这类可迁移的判断才是经验。
+
+【示例四：命中已有记忆 → supersede，不要 new】
+输入：[已有记忆]
+- cognition #28 [preference] 用户的信息检索偏好：遇到不了解的内容先上网查并核实来源真实性
+[正文]
+user：再说一次，不了解的内容都要去互联网查资料，并核实真实性，网上信息不一定对。
+输出：{"title":"重申检索与核实偏好","summary":"用户重申：不了解的内容先联网查资料并核实真实性，不盲信网上信息。","experiences":[],"cognitions":[{"subject":"用户的信息检索偏好","content":"不了解的内容先联网查资料并核实真实性，不盲信网上信息","kind":"preference","importance":5,"confidence":0.95,"cues":["联网检索","资料核实"],"action":"supersede","target_id":28,"reason":"同一偏好的更完整表述"}]}
 
 【边界】信息不足时，summary 只写已知事实、数组给 []；对某条内容没有把握时宁可不写它，也不要编造。
 ```

@@ -94,6 +94,7 @@ src/js/
 | 生命周期（重启策略、dispose 顺序、订阅去重） | `node tests/js/shell.test.mjs` | ✅ 7 条（假内核，不需要 Python） |
 | 外壳↔内核进程契约（启动/工具/ingest/坏字节/坏信封） | `python -m unittest tests.test_shell_contract` | ✅ 11 条（复刻外壳动作；沙箱里 Node 不能管道抓子进程输出） |
 | 向量索引 / embedding 代理 / RRF 融合 / 设置脱敏 | `python -m unittest tests.test_vec tests.test_admin` | ✅ 75 条（未装 sqlite-vec 时向量用例自动 skip） |
+| 工具描述（触发条件/边界）与提示词导出 | `python -m unittest tests.test_tools_contract tests.test_prompts` | ✅ 23 条 |
 | ANN 检索（与精确 KNN 排序一致、增量同步、降级） | `python -m unittest tests.test_ann` | ✅ 7 条（未装 usearch 时整组 skip） |
 | 维护任务（重跑摘要 / 归纳洞见 / 快照） | `python -m unittest tests.test_maintenance` | ✅ 8 条 |
 | 内核预热（numpy 线程导入死锁的规避） | `python -m unittest tests.test_main` | ✅ 3 条 |
@@ -101,7 +102,7 @@ src/js/
 | 打包一致性与语法 | `build_release.py --check` + `node --check` | ✅（含版本号一致性） |
 | `ctx.llm` / `ctx.tools` 两条桥 | 需在 Harness 内安装后验收 | ⏳ 见 release/README.md「验收」 |
 
-## 7. 本机安装记录（2026-11-03 安装 / 2026-11-08 更新到 0.3.2）
+## 7. 本机安装记录（2026-11-03 安装 / 2026-11-08 更新到 0.3.3）
 
 按 profile `desktop` 的既有约定安装（与 `@local/dsh-custom-mode` 的 `link:` 同型）：
 
@@ -127,7 +128,7 @@ Copy-Item release\README.md "$inst\README.md" -Force
 判断是不是硬链接：`fsutil hardlink list <安装目录>\kernel\config.py`，同时列出
 `release\kernel\config.py` 就是（改内容会同步，**新增/删除文件仍要手动处理**）。
 
-当前产物 **0.3.2**、45 个文件（`lib/` 14 个 JS + `kernel/` 23 个 py + 根 6 个 + `locale/` 2 个），
+当前产物 **0.3.3**、45 个文件（`lib/` 14 个 JS + `kernel/` 23 个 py + 根 6 个 + `locale/` 2 个），
 与 `release/` 哈希逐一相同。版本号改了之后，运行中的进程仍报旧值，**重启 Harness** 才会刷新。
 
 生效方式：**重启 Harness**（插件解析表在启动时构建；`ResolutionRouter` 对新增包也要求重启）。

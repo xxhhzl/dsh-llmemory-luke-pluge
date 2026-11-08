@@ -11,7 +11,7 @@
 ```json
 {
   "protocol_version": "1.0",
-  "plugin_version": "0.4.0",
+  "plugin_version": "0.4.1",
   "type": "ingest.request",
   "request_id": "c-103",
   "job_id": null,
@@ -72,7 +72,7 @@
 ```json
 {
   "protocol_version": "1.0",
-  "plugin_version": "0.4.0",
+  "plugin_version": "0.4.1",
   "type": "tools.schema",
   "request_id": "c-11",
   "job_id": null,

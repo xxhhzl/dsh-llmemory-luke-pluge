@@ -20,6 +20,205 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const h = React.createElement
 
+    /**
+     * 作用域样式表：内联样式做不了 :hover / :disabled / 粘性表头 / 深色模式，
+     * 这些只能靠一次注入的 <style>。变量都挂在 .lm-root 上，不污染宿主。
+     */
+    const STYLE_ID = 'dsh-longmemory-styles'
+    const STYLE_TEXT = `
+.lm-root {
+  --lm-surface: var(--dsw-alias-bg-primary, #fff);
+  --lm-surface-2: var(--dsw-alias-bg-secondary, #f6f7f9);
+  --lm-text: var(--dsw-alias-label-primary, #1a1a1a);
+  --lm-text-dim: var(--dsw-alias-label-tertiary, #6b7280);
+  --lm-border: var(--dsw-alias-border-l2, #d8dbe2);
+  --lm-border-soft: var(--dsw-alias-border-l1, #eceef2);
+  --lm-danger: var(--dsw-alias-state-error-primary, #c0392b);
+  --lm-accent: var(--dsw-alias-label-primary, #1a1a1a);
+  color: var(--lm-text);
+}
+@media (prefers-color-scheme: dark) {
+  .lm-root {
+    --lm-surface: #1b1e24;
+    --lm-surface-2: #23272e;
+    --lm-text: #e7e8ea;
+    --lm-text-dim: #9aa0a8;
+    --lm-border: #3a4048;
+    --lm-border-soft: #2b3037;
+    --lm-accent: #e7e8ea;
+  }
+}
+.lm-root * { box-sizing: border-box; }
+.lm-btn {
+  font: inherit; font-size: 13px; cursor: pointer; padding: 4px 10px;
+  border-radius: 6px; border: .5px solid var(--lm-border);
+  background: transparent; color: var(--lm-text);
+  transition: background-color .12s ease, border-color .12s ease, opacity .12s ease;
+}
+.lm-btn:hover:not(:disabled) { background: var(--lm-surface-2); }
+.lm-btn:active:not(:disabled) { transform: translateY(.5px); }
+.lm-btn:disabled { opacity: .45; cursor: not-allowed; }
+.lm-btn:focus-visible { outline: 2px solid var(--lm-accent); outline-offset: 1px; }
+.lm-btn--primary { background: var(--lm-accent); color: var(--lm-surface); border-color: var(--lm-accent); }
+.lm-btn--primary:hover:not(:disabled) { opacity: .88; }
+.lm-btn--danger { color: var(--lm-danger); border-color: var(--lm-danger); }
+.lm-btn--tab { border: 0; border-bottom: 2px solid transparent; border-radius: 0;
+  padding: 6px 2px 8px; color: var(--lm-text-dim); white-space: nowrap; }
+.lm-btn--tab:hover:not(:disabled) { background: transparent; color: var(--lm-text); }
+.lm-btn--tab[data-active="true"] { color: var(--lm-text); border-bottom-color: var(--lm-accent); }
+.lm-input, .lm-select, .lm-textarea {
+  font: inherit; font-size: 13px; padding: 5px 8px; min-width: 0;
+  border-radius: 6px; border: .5px solid var(--lm-border);
+  background: var(--lm-surface); color: var(--lm-text);
+}
+.lm-input::placeholder { color: var(--lm-text-dim); }
+.lm-input:focus, .lm-select:focus, .lm-textarea:focus {
+  outline: none; border-color: var(--lm-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--lm-accent) 18%, transparent);
+}
+.lm-tabs { display: flex; gap: 14px; overflow-x: auto; scrollbar-width: thin;
+  border-bottom: .5px solid var(--lm-border); }
+.lm-tabs::-webkit-scrollbar { height: 6px; }
+.lm-tabs::-webkit-scrollbar-thumb { background: var(--lm-border); border-radius: 3px; }
+.lm-scroll { overflow: auto; border: .5px solid var(--lm-border);
+  border-radius: 8px; background: var(--lm-surface); }
+.lm-scroll::-webkit-scrollbar { width: 10px; height: 10px; }
+.lm-scroll::-webkit-scrollbar-thumb {
+  background: var(--lm-border); border-radius: 5px;
+  border: 2px solid var(--lm-surface);
+}
+.lm-scroll::-webkit-scrollbar-track { background: transparent; }
+.lm-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 12px; }
+.lm-table th {
+  position: sticky; top: 0; z-index: 1; text-align: left; padding: 6px 8px;
+  background: var(--lm-surface-2); color: var(--lm-text-dim); font-weight: 500;
+  border-bottom: .5px solid var(--lm-border); white-space: nowrap;
+}
+.lm-table td { padding: 6px 8px; vertical-align: top;
+  border-bottom: .5px solid var(--lm-border-soft); }
+.lm-table tbody tr:hover { background: var(--lm-surface-2); }
+.lm-table tbody tr:last-child td { border-bottom: 0; }
+.lm-clip { display: inline-block; max-width: min(340px, 42vw);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  vertical-align: bottom; }
+.lm-empty { padding: 24px 12px; text-align: center; color: var(--lm-text-dim);
+  font-size: 12px; }
+.lm-rowbtn { width: 100%; text-align: left; display: block; border: 0;
+  border-radius: 6px; padding: 8px 10px; background: transparent;
+  color: var(--lm-text); cursor: pointer; }
+.lm-rowbtn:hover { background: var(--lm-surface-2); }
+.lm-rowbtn:focus-visible { outline: 2px solid var(--lm-accent); outline-offset: -2px; }
+.lm-rowbtn + .lm-rowbtn { border-top: .5px solid var(--lm-border-soft); }
+.lm-pager { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 12px; color: var(--lm-text-dim); }
+.lm-pager input[type="number"] { width: 56px; }
+.lm-modal { position: fixed; inset: 0; background: rgba(0, 0, 0, .42);
+  display: flex; align-items: center; justify-content: center; z-index: 50;
+  padding: 16px; }
+.lm-dialog { background: var(--lm-surface); color: var(--lm-text);
+  border: .5px solid var(--lm-border); border-radius: 10px;
+  width: min(680px, 94vw); max-height: 86vh; display: flex;
+  flex-direction: column; gap: 10px; padding: 16px; }
+.lm-dialog__body { overflow: auto; display: flex; flex-direction: column;
+  gap: 10px; min-height: 0; }
+.lm-dialog__foot { display: flex; gap: 8px; justify-content: flex-end;
+  border-top: .5px solid var(--lm-border-soft); padding-top: 10px; }
+.lm-pre { font-family: var(--dsw-font-mono, monospace); font-size: 11px;
+  line-height: 1.55; margin: 0; white-space: pre-wrap; word-break: break-word; }
+.lm-card { border: .5px solid var(--lm-border); border-radius: 8px; padding: 10px 12px;
+  background: var(--lm-surface); }
+.lm-label { font-size: 12px; color: var(--lm-text-dim); }
+.lm-error { color: var(--lm-danger); font-size: 13px; }
+.lm-mono { font-family: var(--dsw-font-mono, monospace); font-size: 12px;
+  word-break: break-all; color: var(--lm-text-dim); }
+`
+
+    /** 注入一次；非浏览器环境保护。 */
+    function ensureStyles() {
+      try {
+        if (typeof document === 'undefined' || !document?.head) return
+        if (document.getElementById(STYLE_ID)) return
+        const tag = document.createElement('style')
+        tag.id = STYLE_ID
+        tag.textContent = STYLE_TEXT
+        document.head.appendChild(tag)
+      } catch {
+        /* 非浏览器环境忽略 */
+      }
+    }
+    ensureStyles()
+
+    /** 统一按钮：semantic 变体 + 禁用态（内联样式做不到 :hover/:disabled）。 */
+    function Btn({ variant, active, children, ...rest }) {
+      const cls = ['lm-btn']
+      if (variant === 'primary') cls.push('lm-btn--primary')
+      if (variant === 'danger') cls.push('lm-btn--danger')
+      if (variant === 'tab') cls.push('lm-btn--tab')
+      return h('button', {
+        type: 'button',
+        ...rest,
+        className: cls.join(' '),
+        ...(variant === 'tab' ? { 'data-active': active ? 'true' : 'false' } : {}),
+      }, children)
+    }
+
+    /** 空态：表/列表没有数据时别留一片空白。 */
+    function Empty({ children }) {
+      return h('div', { className: 'lm-empty' }, children ?? '暂无数据')
+    }
+
+    /**
+     * 分页条：页码 + 每页条数 + 首/尾跳转。
+     * 列表滚动区独立，分页条始终可见（不随内容滚走）。
+     */
+    function Pager({ offset, limit, total, onChange, onLimitChange, loading }) {
+      const pages = Math.max(1, Math.ceil((Number(total) || 0) / Math.max(1, limit)))
+      const page = Math.min(pages, Math.floor(offset / Math.max(1, limit)) + 1)
+      const from = total === 0 ? 0 : offset + 1
+      const to = Math.min(offset + limit, total)
+      const jump = value => {
+        const next = Math.max(1, Math.min(pages, Number(value) || 1))
+        if (next !== page) onChange((next - 1) * limit)
+      }
+      return h('div', { className: 'lm-pager' },
+        h('span', null, `第 ${from}–${to} 条 / 共 ${total} 条`),
+        h('span', null,
+          Btn({ disabled: offset <= 0 || loading, onClick: () => onChange(0) }, '« 首页'),
+          ' ',
+          Btn({
+            disabled: offset <= 0 || loading,
+            onClick: () => onChange(Math.max(0, offset - limit)),
+          }, '‹ 上一页'),
+          ' ',
+          Btn({
+            disabled: offset + limit >= total || loading,
+            onClick: () => onChange(offset + limit),
+          }, '下一页 ›'),
+          ' ',
+          Btn({
+            disabled: offset + limit >= total || loading,
+            onClick: () => onChange(Math.max(0, (pages - 1) * limit)),
+          }, '末页 »')),
+        h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '4px' } },
+          '第',
+          h('input', {
+            className: 'lm-input', type: 'number', min: 1, max: pages,
+            defaultValue: page, key: `page-${page}`,
+            onKeyDown: e => { if (e.key === 'Enter') jump(e.currentTarget.value) },
+            onBlur: e => jump(e.currentTarget.value),
+            'aria-label': '跳转到页码',
+          }),
+          '/', pages, '页'),
+        h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: '4px' } },
+          '每页',
+          h('select', {
+            className: 'lm-select',
+            value: String(limit),
+            onChange: e => onLimitChange?.(Number(e.target.value)),
+            'aria-label': '每页条数',
+          }, ...[10, 20, 50, 100].map(n => h('option', { key: n, value: String(n) }, n)))))
+    }
+
     const TABS = [
       { id: 'overview', label: '概况' },
       { id: 'models', label: '模型' },
@@ -47,55 +246,25 @@ window.__ModuleLoader__.load({
 
     const S = {
       wrap: { display: 'flex', flexDirection: 'column', gap: '12px',
-              maxWidth: '1000px', color: 'var(--dsw-alias-label-primary)' },
+              maxWidth: '1000px', minWidth: 0 },
       head: { display: 'flex', alignItems: 'baseline', gap: '12px', flexWrap: 'wrap' },
       title: { margin: 0, fontSize: '18px', fontWeight: 600 },
-      tabs: { display: 'flex', gap: '14px', flexWrap: 'wrap',
-              borderBottom: '.5px solid var(--dsw-alias-border-l2)' },
-      tab: { font: 'inherit', fontSize: '13px', cursor: 'pointer', background: 'none',
-             border: 0, padding: '6px 1px 8px', color: 'var(--dsw-alias-label-tertiary)' },
-      tabActive: { color: 'var(--dsw-alias-label-primary)',
-                   borderBottom: '2px solid var(--dsw-alias-label-primary)' },
-      bar: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' },
+      bar: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap',
+             minWidth: 0 },
       barTrack: { height: '4px', borderRadius: '2px', overflow: 'hidden',
-                  background: 'var(--dsw-alias-border-l1)' },
-      barFill: { height: '100%', background: 'var(--dsw-alias-label-primary)' },
-      input: { font: 'inherit', fontSize: '13px', padding: '4px 8px', minWidth: '160px',
-               borderRadius: '6px', border: '.5px solid var(--dsw-alias-border-l2)',
-               background: 'transparent', color: 'inherit' },
-      button: { font: 'inherit', fontSize: '13px', cursor: 'pointer', padding: '4px 10px',
-                borderRadius: '6px', border: '.5px solid var(--dsw-alias-border-l2)',
-                background: 'transparent', color: 'inherit' },
-      danger: { color: 'var(--dsw-alias-state-error-primary, #c0392b)' },
-      table: { width: '100%', borderCollapse: 'collapse', fontSize: '12px' },
-      th: { textAlign: 'left', padding: '4px 6px',
-            borderBottom: '.5px solid var(--dsw-alias-border-l2)',
-            color: 'var(--dsw-alias-label-tertiary)', fontWeight: 500 },
-      td: { padding: '4px 6px', borderBottom: '.5px solid var(--dsw-alias-border-l1)',
-            verticalAlign: 'top' },
-      clip: { display: 'inline-block', maxWidth: '340px', overflow: 'hidden',
-              textOverflow: 'ellipsis', whiteSpace: 'nowrap', verticalAlign: 'bottom' },
+                  background: 'var(--lm-border-soft)' },
+      barFill: { height: '100%', background: 'var(--lm-accent)' },
+      input: { flex: '1 1 180px', minWidth: 0 },
+      clip: {},
       cards: { display: 'grid', gap: '10px',
                gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))' },
-      card: { border: '.5px solid var(--dsw-alias-border-l2)', borderRadius: '8px',
-              padding: '10px 12px' },
-      cardLabel: { fontSize: '12px', color: 'var(--dsw-alias-label-tertiary)' },
-      cardValue: { fontSize: '20px', fontWeight: 600 },
+      cardLabel: { fontSize: '12px', color: 'var(--lm-text-dim)' },
+      cardValue: { fontSize: '20px', fontWeight: 600, lineHeight: 1.2 },
       mono: { fontFamily: 'var(--dsw-font-mono, monospace)', fontSize: '12px',
-              wordBreak: 'break-all', color: 'var(--dsw-alias-label-secondary)' },
-      error: { color: 'var(--dsw-alias-state-error-primary, #c0392b)', fontSize: '13px' },
-      pre: { fontFamily: 'var(--dsw-font-mono, monospace)', fontSize: '11px',
-             lineHeight: 1.5, maxHeight: '420px', overflow: 'auto', margin: 0,
-             padding: '8px', border: '.5px solid var(--dsw-alias-border-l2)',
-             borderRadius: '8px', whiteSpace: 'pre-wrap', wordBreak: 'break-all' },
-      modal: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,.35)',
-               display: 'flex', alignItems: 'center', justifyContent: 'center',
-               zIndex: 50 },
-      dialog: { background: '#fff', color: '#111', borderRadius: '10px', padding: '16px',
-                width: 'min(680px, 92vw)', display: 'flex', flexDirection: 'column',
-                gap: '10px', maxHeight: '82vh', overflow: 'auto' },
-      field: { display: 'flex', flexDirection: 'column', gap: '2px' },
-      label: { fontSize: '12px', color: '#666' },
+              wordBreak: 'break-all', color: 'var(--lm-text-dim)' },
+      field: { display: 'flex', flexDirection: 'column', gap: '3px', minWidth: 0 },
+      label: { fontSize: '12px', color: 'var(--lm-text-dim)' },
+      scroll: { maxHeight: 'min(58vh, 520px)' },
     }
 
     async function callApi(payload) {
@@ -175,19 +344,17 @@ window.__ModuleLoader__.load({
       const pending = Number(state?.pending_events ?? 0)
       const resummarizeRunning = Boolean(state?.resummarize?.running)
       const induceRunning = Boolean(state?.induce?.running)
-      return h('div', { style: { ...S.card, display: 'flex', flexDirection: 'column', gap: '6px' } },
+      return h('div', { className: 'lm-card', style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
         h('div', { style: { display: 'flex', alignItems: 'baseline', gap: '8px' } },
           h('strong', { style: { fontSize: '13px' } }, '维护'),
           state && h('span', { style: S.cardLabel },
             `待复核事件 ${pending} · 洞见 ${state.insights ?? 0} 条`)),
         h('div', { style: S.bar },
-          h('button', {
-            style: S.button, type: 'button',
+          Btn({
             disabled: Boolean(busy) || resummarizeRunning || pending === 0,
             onClick: () => { void run('event.resummarize') },
           }, resummarizeRunning ? '重跑中…' : '重跑待复核事件摘要'),
-          h('button', {
-            style: S.button, type: 'button',
+          Btn({
             disabled: Boolean(busy) || induceRunning,
             onClick: () => { void run('insight.induce') },
           }, induceRunning ? '归纳中…' : '归纳洞见')),
@@ -198,7 +365,7 @@ window.__ModuleLoader__.load({
         h('div', { style: S.cardLabel },
           '重跑：把待复核事件的摘要补上（成功才落经验/认知）；'
           + '归纳：把同一主题的多条经验提炼成通用规则（两路聚类：线索 + 向量相似度）。'),
-        error && h('div', { style: S.error }, error))
+        error && h('div', { className: 'lm-error' }, error))
     }
 
     function Overview() {
@@ -216,14 +383,14 @@ window.__ModuleLoader__.load({
       const s = state.data
       return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '12px' } },
         h('div', { style: S.bar },
-          h('button', { style: S.button, type: 'button', onClick: load }, '刷新'),
+          Btn({ onClick: load }, '刷新'),
           state.status === 'loading' && h('span', { style: S.cardLabel }, '读取中…'),
           state.status === 'error'
-            && h('span', { style: S.error }, `内核不可用：${state.error}`)),
+            && h('span', { className: 'lm-error' }, `内核不可用：${state.error}`)),
         s && h('div', { style: S.cards },
           ...[['消息', s.messages], ['事件', s.events], ['经验', s.experiences],
               ['认知', s.cognitions]].map(([label, value]) =>
-            h('div', { key: label, style: S.card },
+            h('div', { key: label, className: 'lm-card' },
               h('div', { style: S.cardLabel }, label),
               h('div', { style: S.cardValue }, String(value ?? 0))))),
         s && h('div', null,
@@ -275,28 +442,34 @@ window.__ModuleLoader__.load({
         }
         onSave(payload)
       }
-      return h('div', { style: S.modal, role: 'dialog' },
-        h('div', { style: S.dialog },
+      React.useEffect(() => {
+        const onKey = e => { if (e.key === 'Escape') onCancel() }
+        window.addEventListener('keydown', onKey)
+        return () => window.removeEventListener('keydown', onKey)
+      }, [onCancel])
+      return h('div', {
+        className: 'lm-modal', role: 'dialog', 'aria-modal': 'true',
+        onClick: e => { if (e.target === e.currentTarget) onCancel() },
+      },
+        h('div', { className: 'lm-dialog' },
           h('h3', { style: { margin: 0, fontSize: '16px' } },
             `${mode === 'create' ? '新增' : '编辑'} ${table}`),
-          ...writable.map(name => h('label', { key: name, style: S.field },
-            h('span', { style: S.label },
-              name, required(name) ? ' *' : '',
-              columnOf(name).type ? `（${columnOf(name).type}）` : ''),
-            h('input', {
-              style: { ...S.input, color: '#111', background: '#fff', minWidth: '100%' },
-              value: values[name] ?? '',
-              placeholder: mode === 'create' ? '留空则用默认值' : '',
-              onChange: e => setValues(prev => ({ ...prev, [name]: e.target.value })),
-            }))),
-          missing.length > 0 && h('div', { style: S.error },
-            `必填：${missing.join('、')}`),
-          h('div', { style: { display: 'flex', gap: '8px', justifyContent: 'flex-end' } },
-            h('button', { style: { ...S.button, color: '#111' }, type: 'button',
-                          onClick: onCancel }, '取消'),
-            h('button', { style: { ...S.button, color: '#111' }, type: 'button',
-                          disabled: missing.length > 0,
-                          onClick: submit }, '保存'))))
+          h('div', { className: 'lm-dialog__body' },
+            ...writable.map(name => h('label', { key: name, style: S.field },
+              h('span', { style: S.label },
+                name, required(name) ? ' *' : '',
+                columnOf(name).type ? `（${columnOf(name).type}）` : ''),
+              h('input', {
+                className: 'lm-input',
+                value: values[name] ?? '',
+                placeholder: mode === 'create' ? '留空则用默认值' : '',
+                onChange: e => setValues(prev => ({ ...prev, [name]: e.target.value })),
+              }))),
+            missing.length > 0 && h('div', { className: 'lm-error' },
+              `必填：${missing.join('、')}`)),
+          h('div', { className: 'lm-dialog__foot' },
+            Btn({ onClick: onCancel }, '取消'),
+            Btn({ variant: 'primary', disabled: missing.length > 0, onClick: submit }, '保存'))))
     }
 
     function DataTable({ table, schema }) {
@@ -306,7 +479,8 @@ window.__ModuleLoader__.load({
       const [query, setQuery] = React.useState('')
       const [error, setError] = React.useState('')
       const [editing, setEditing] = React.useState(null)
-      const limit = 20
+      const [loading, setLoading] = React.useState(false)
+      const [limit, setLimit] = React.useState(20)
 
       const columns = schema?.columns ?? []
       const sample = rows[0] ?? {}
@@ -314,28 +488,35 @@ window.__ModuleLoader__.load({
         name === '_rowid' || rows.length === 0 || name in sample)
       const shown = preview.length ? preview : columns.slice(0, 5).map(c => c.name)
 
-      const load = React.useCallback(async (nextOffset, nextQuery) => {
+      const load = React.useCallback(async (nextOffset, nextQuery, nextLimit) => {
+        const size = nextLimit ?? limit
         setError('')
+        setLoading(true)
         try {
           const result = await callApi({
-            op: 'list', table, limit, offset: nextOffset, query: nextQuery,
+            op: 'list', table, limit: size, offset: nextOffset, query: nextQuery,
           })
           setRows(result.rows)
           setTotal(result.total)
           setOffset(nextOffset)
         } catch (e) {
           setError(String(e?.message ?? e))
+        } finally {
+          setLoading(false)
         }
-      }, [table])
+      }, [table, limit])
 
-      React.useEffect(() => { void load(0, '') }, [table]) // eslint-disable-line
+      React.useEffect(() => { void load(0, '', limit) }, [table]) // eslint-disable-line
 
       const remove = async row => {
         const key = locator(table, schema, row)
         if (!window.confirm(`删除 ${table} #${key}？该操作不可撤销。`)) return
         try {
           await callApi({ op: 'delete', table, id: key })
-          await load(offset, query)
+          // 删掉当前页最后一条时回退一页，避免停在空白页
+          const nextOffset = rows.length === 1 && offset > 0
+            ? Math.max(0, offset - limit) : offset
+          await load(nextOffset, query, limit)
         } catch (e) {
           setError(String(e?.message ?? e))
         }
@@ -363,44 +544,49 @@ window.__ModuleLoader__.load({
           }
           const mode = editing.mode
           setEditing(null)
-          await load(mode === 'create' ? 0 : offset, query)
+          await load(mode === 'create' ? 0 : offset, query, limit)
         } catch (e) {
           setError(String(e?.message ?? e))
         }
       }
 
-      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px' } },
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px', minWidth: 0 } },
         h('div', { style: S.bar },
-          h('input', { style: S.input, placeholder: '搜索…', value: query,
-                       onChange: e => setQuery(e.target.value),
-                       onKeyDown: e => { if (e.key === 'Enter') void load(0, query) } }),
-          h('button', { style: S.button, type: 'button', onClick: () => load(0, query) },
-            '搜索'),
-          h('button', { style: S.button, type: 'button',
-                        onClick: () => setEditing({ mode: 'create', values: {} }) },
+          h('input', {
+            className: 'lm-input', style: S.input, placeholder: '搜索…', value: query,
+            onChange: e => setQuery(e.target.value),
+            onKeyDown: e => { if (e.key === 'Enter') void load(0, query, limit) },
+          }),
+          Btn({ onClick: () => load(0, query, limit) }, '搜索'),
+          Btn({ onClick: () => { setQuery(''); void load(0, '', limit) } }, '清空'),
+          Btn({ variant: 'primary', onClick: () => setEditing({ mode: 'create', values: {} }) },
             '新增'),
           h('span', { style: S.cardLabel }, `共 ${total} 条`)),
-        error && h('div', { style: S.error }, error),
-        h('table', { style: S.table },
-          h('thead', null, h('tr', null,
-            ...shown.map(name => h('th', { key: name, style: S.th }, name)),
-            h('th', { key: '_ops', style: S.th }, '操作'))),
-          h('tbody', null, ...rows.map((row, index) => h('tr', { key: index },
-            ...shown.map(name => h('td', { key: name, style: S.td },
-              h('span', { style: S.clip, title: String(row[name] ?? '') },
-                clip(row[name])))),
-            h('td', { key: '_ops', style: S.td },
-              h('button', { style: S.button, type: 'button',
-                            onClick: () => { void openEdit(row) } }, '编辑'),
-              ' ',
-              h('button', { style: { ...S.button, ...S.danger }, type: 'button',
-                            onClick: () => remove(row) }, '删除')))))),
-        h('div', { style: S.bar },
-          h('button', { style: S.button, type: 'button', disabled: offset === 0,
-                        onClick: () => load(Math.max(0, offset - limit), query) }, '上一页'),
-          h('button', { style: S.button, type: 'button',
-                        disabled: offset + limit >= total,
-                        onClick: () => load(offset + limit, query) }, '下一页')),
+        error && h('div', { className: 'lm-error' }, error),
+        // 表格滚动区：表头粘性，内容只在这个框里滚，分页条永远可见
+        h('div', { className: 'lm-scroll', style: S.scroll },
+          h('table', { className: 'lm-table' },
+            h('thead', null, h('tr', null,
+              ...shown.map(name => h('th', { key: name }, name)),
+              h('th', { key: '_ops' }, '操作'))),
+            h('tbody', null,
+              rows.length === 0
+                ? h('tr', null, h('td', {
+                    colSpan: shown.length + 1,
+                  }, h(Empty, null, loading ? '读取中…' : (query ? '没有匹配的记录' : '还没有数据'))))
+                : rows.map((row, index) => h('tr', { key: row._rowid ?? index },
+                    ...shown.map(name => h('td', { key: name },
+                      h('span', { className: 'lm-clip', title: String(row[name] ?? '') },
+                        clip(row[name])))),
+                    h('td', { key: '_ops', style: { whiteSpace: 'nowrap' } },
+                      Btn({ onClick: () => { void openEdit(row) } }, '编辑'),
+                      ' ',
+                      Btn({ variant: 'danger', onClick: () => remove(row) }, '删除'))))))),
+        h(Pager, {
+          offset, limit, total, loading,
+          onChange: next => load(next, query, limit),
+          onLimitChange: next => { setLimit(next); load(0, query, next) },
+        }),
         editing && h(EditDialog, {
           table, schema, mode: editing.mode, initial: editing.values,
           onCancel: () => setEditing(null), onSave: save,
@@ -433,22 +619,26 @@ window.__ModuleLoader__.load({
         return () => clearInterval(timer)
       }, [auto, load])
 
-      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px' } },
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px', minWidth: 0 } },
         h('div', { style: S.bar },
           ...[['shell', 'shell.log'], ['kernel', 'kernel.stderr.log']].map(([id, label]) =>
-            h('button', {
-              key: id, type: 'button',
-              style: { ...S.button, ...(source === id ? { fontWeight: 600 } : {}) },
+            Btn({
+              key: id, variant: 'tab', active: source === id,
               onClick: () => setSource(id),
             }, label)),
-          h('button', { style: S.button, type: 'button', onClick: load }, '刷新'),
+          Btn({ onClick: load }, '刷新'),
           h('label', { style: { display: 'flex', gap: '4px', alignItems: 'center',
-                                fontSize: '12px' } },
+                                fontSize: '12px', color: 'var(--lm-text-dim)' } },
             h('input', { type: 'checkbox', checked: auto,
                          onChange: e => setAuto(e.target.checked) }),
-            '每 5 秒自动刷新')),
-        error && h('div', { style: S.error }, error),
-        h('pre', { style: S.pre }, lines.join('\n')))
+            '每 5 秒自动刷新'),
+          h('span', { style: S.cardLabel }, `${lines.length} 行`)),
+        error && h('div', { className: 'lm-error' }, error),
+        h('div', { className: 'lm-scroll', style: { ...S.scroll, maxHeight: 'min(62vh, 560px)' } },
+          h('pre', {
+            className: 'lm-pre',
+            style: { padding: '10px 12px' },
+          }, lines.join('\n') || '（日志为空）')))
     }
 
     const BROWSER_KIND = 'longmemory-browser'
@@ -466,12 +656,15 @@ window.__ModuleLoader__.load({
       const [offset, setOffset] = React.useState(0)
       const [detail, setDetail] = React.useState(null)
       const [error, setError] = React.useState('')
-      const limit = 20
+      const [loading, setLoading] = React.useState(false)
+      const [limit, setLimit] = React.useState(20)
 
-      const load = React.useCallback(async (nextOffset, nextQuery) => {
+      const load = React.useCallback(async (nextOffset, nextQuery, nextLimit) => {
+        const size = nextLimit ?? limit
+        setLoading(true)
         try {
           const result = await callApi({
-            op: 'list', table, limit, offset: nextOffset, query: nextQuery,
+            op: 'list', table, limit: size, offset: nextOffset, query: nextQuery,
           })
           setRows(result.rows)
           setTotal(result.total)
@@ -479,10 +672,19 @@ window.__ModuleLoader__.load({
           setError('')
         } catch (e) {
           setError(String(e?.message ?? e))
+        } finally {
+          setLoading(false)
         }
-      }, [table])
+      }, [table, limit])
 
-      React.useEffect(() => { void load(0, '') }, [load]) // eslint-disable-line
+      React.useEffect(() => { void load(0, '', limit) }, [table]) // eslint-disable-line
+
+      React.useEffect(() => {
+        if (!detail) return undefined
+        const onKey = e => { if (e.key === 'Escape') setDetail(null) }
+        window.addEventListener('keydown', onKey)
+        return () => window.removeEventListener('keydown', onKey)
+      }, [detail])
 
       const openDetail = async row => {
         try {
@@ -493,42 +695,60 @@ window.__ModuleLoader__.load({
         }
       }
 
-      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px',
-                                 padding: '8px' } },
-        h('div', { style: S.bar }, ...BROWSER_TABLES.map(([id, label]) =>
-          h('button', {
-            key: id, type: 'button',
-            style: { ...S.button, ...(table === id ? { fontWeight: 600 } : {}) },
-            onClick: () => setTable(id),
-          }, label))),
+      // 侧栏高度约束：列表区 flex:1 + overflow:auto，分页条固定在底部
+      return h('div', { className: 'lm-root',
+                        style: { display: 'flex', flexDirection: 'column', gap: '8px',
+                                 padding: '8px', height: '100%', minHeight: 0 } },
+        h('div', { style: { ...S.bar, flexWrap: 'nowrap', overflowX: 'auto' } },
+          ...BROWSER_TABLES.map(([id, label]) =>
+            Btn({
+              key: id, variant: 'tab', active: table === id,
+              onClick: () => setTable(id),
+            }, label))),
         h('div', { style: S.bar },
-          h('input', { style: S.input, placeholder: '搜索…', value: query,
-                       onChange: e => setQuery(e.target.value),
-                       onKeyDown: e => { if (e.key === 'Enter') void load(0, query) } }),
-          h('button', { style: S.button, type: 'button', onClick: () => load(0, query) },
-            '搜索'),
+          h('input', {
+            className: 'lm-input', style: S.input, placeholder: '搜索…', value: query,
+            onChange: e => setQuery(e.target.value),
+            onKeyDown: e => { if (e.key === 'Enter') void load(0, query, limit) },
+          }),
+          Btn({ onClick: () => load(0, query, limit) }, '搜索'),
           h('span', { style: S.cardLabel }, `共 ${total} 条`)),
-        error && h('div', { style: S.error }, error),
-        h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
-          ...rows.map(row => h('button', {
-            key: row.id, type: 'button',
-            style: { ...S.button, textAlign: 'left', display: 'block', width: '100%' },
-            onClick: () => openDetail(row),
-          }, h('div', { style: S.cardLabel }, `#${row.id} ${row.title ?? row.subject ?? row.kind ?? ''}`),
-             h('div', { style: { fontSize: '12px' } }, clip(row.summary ?? row.content, 120))))),
-        h('div', { style: S.bar },
-          h('button', { style: S.button, type: 'button', disabled: offset === 0,
-                        onClick: () => load(Math.max(0, offset - limit), query) }, '上一页'),
-          h('button', { style: S.button, type: 'button',
-                        disabled: offset + limit >= total,
-                        onClick: () => load(offset + limit, query) }, '下一页')),
-        detail && h('div', { style: S.modal, role: 'dialog' },
-          h('div', { style: S.dialog },
-            h('div', { style: S.bar },
+        error && h('div', { className: 'lm-error' }, error),
+        h('div', {
+          className: 'lm-scroll',
+          style: { flex: 1, minHeight: '160px', maxHeight: '100%',
+                   display: 'flex', flexDirection: 'column' },
+        },
+          rows.length === 0
+            ? h(Empty, null, loading ? '读取中…' : (query ? '没有匹配的记录' : '还没有数据'))
+            : rows.map(row => h('button', {
+                key: row.id, type: 'button', className: 'lm-rowbtn',
+                onClick: () => openDetail(row),
+              },
+                h('div', { style: S.cardLabel },
+                  `#${row.id} ${row.title ?? row.subject ?? row.kind ?? ''}`),
+                h('div', { style: { fontSize: '12px', marginTop: '2px',
+                                    display: '-webkit-box', WebkitLineClamp: 2,
+                                    WebkitBoxOrient: 'vertical', overflow: 'hidden' } },
+                  clip(row.summary ?? row.content, 160))))),
+        h(Pager, {
+          offset, limit, total, loading,
+          onChange: next => load(next, query, limit),
+          onLimitChange: next => { setLimit(next); load(0, query, next) },
+        }),
+        detail && h('div', {
+          className: 'lm-modal', role: 'dialog', 'aria-modal': 'true',
+          onClick: e => { if (e.target === e.currentTarget) setDetail(null) },
+        },
+          h('div', { className: 'lm-dialog' },
+            h('div', { style: { ...S.bar, justifyContent: 'space-between' } },
               h('strong', null, `${table} #${detail.id ?? ''}`),
-              h('button', { style: { ...S.button, marginLeft: 'auto' }, type: 'button',
-                            onClick: () => setDetail(null) }, '关闭')),
-            h('pre', { style: S.pre }, JSON.stringify(detail, null, 2)))))
+              Btn({ onClick: () => setDetail(null) }, '关闭')),
+            h('div', { className: 'lm-dialog__body' },
+              h('pre', { className: 'lm-pre', style: { padding: '8px 10px',
+                                                       background: 'var(--lm-surface-2)',
+                                                       borderRadius: '6px' } },
+                JSON.stringify(detail, null, 2))))))
     }
 
     function MemoryBrowserTitle() {
@@ -536,10 +756,7 @@ window.__ModuleLoader__.load({
     }
 
     function MemoryHeaderButton({ open } = {}) {
-      return h('button', {
-        style: S.button, type: 'button', title: '打开长期记忆',
-        onClick: () => open?.(),
-      }, '记忆')
+      return Btn({ title: '打开长期记忆', onClick: () => open?.() }, '记忆')
     }
 
     const SELF_KINDS = [
@@ -605,7 +822,8 @@ window.__ModuleLoader__.load({
         }
       }
 
-      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
+      return h('div', { className: 'lm-root',
+                        style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
         h('div', { style: { ...S.cardLabel, maxWidth: '760px' } },
           configured
             ? '「设置的自我」保存后进入系统提示词 <self_configured>；同类只保留最新一条，旧条目留作历史、可停用。'
@@ -614,40 +832,45 @@ window.__ModuleLoader__.load({
           ...SELF_KINDS.map(([kind, label, hint]) => h('div', { key: kind, style: S.field },
             h('span', { style: S.label }, `${label}（${hint}）`),
             h('input', {
-              style: S.input,
+              className: 'lm-input', style: S.input,
               value: values[kind] ?? '',
               placeholder: hint,
               onChange: e => setValues(prev => ({ ...prev, [kind]: e.target.value })),
             }),
-            h('button', { style: S.button, type: 'button', onClick: () => save(kind) },
-              `保存${label}`)))),
+            Btn({ onClick: () => save(kind) }, `保存${label}`)))),
         h('div', { style: S.bar },
-          h('button', { style: S.button, type: 'button', onClick: showPreview },
-            '预览注入文本'),
-          h('button', { style: S.button, type: 'button', onClick: load }, '刷新'),
+          Btn({ onClick: showPreview }, '预览注入文本'),
+          Btn({ onClick: load }, '刷新'),
           status && h('span', { style: S.cardLabel }, status)),
-        error && h('div', { style: S.error }, error),
-        preview && h('div', null,
+        error && h('div', { className: 'lm-error' }, error),
+        preview && h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
           h('div', { style: S.cardLabel },
             `系统提示词 ${preview.text?.length ?? 0} 字符 · 自述 ${preview.notes_text?.length ?? 0} 字符 · 版本 ${preview.version || '无'}`),
-          h('pre', { style: S.pre }, preview.text || '（系统提示词段为空）'),
-          h('pre', { style: S.pre }, preview.notes_text || '（自述为空）')),
+          h('div', { className: 'lm-scroll', style: { maxHeight: '240px' } },
+            h('pre', { className: 'lm-pre', style: { padding: '10px 12px' } },
+              preview.text || '（系统提示词段为空）')),
+          h('div', { className: 'lm-scroll', style: { maxHeight: '180px' } },
+            h('pre', { className: 'lm-pre', style: { padding: '10px 12px' } },
+              preview.notes_text || '（自述为空）'))),
         h('div', { style: S.cardLabel }, '历史'),
-        h('table', { style: S.table },
-          h('thead', null, h('tr', null,
-            ...['id', 'kind', 'content', 'revision', 'status'].map(name =>
-              h('th', { key: name, style: S.th }, name)),
-            h('th', { key: '_ops', style: S.th }, '操作'))),
-          h('tbody', null, ...items.map(item => h('tr', { key: item.id },
-            ...['id', 'kind', 'content', 'revision', 'status'].map(name =>
-              h('td', { key: name, style: S.td },
-                h('span', { style: S.clip, title: String(item[name] ?? '') },
-                  clip(item[name])))),
-            h('td', { key: '_ops', style: S.td },
-              item.status === 'active' && h('button', {
-                style: { ...S.button, ...S.danger }, type: 'button',
-                onClick: () => disable(item.id),
-              }, '停用')))))))
+        h('div', { className: 'lm-scroll', style: { ...S.scroll, maxHeight: '320px' } },
+          h('table', { className: 'lm-table' },
+            h('thead', null, h('tr', null,
+              ...['id', 'kind', 'content', 'revision', 'status'].map(name =>
+                h('th', { key: name }, name)),
+              h('th', { key: '_ops' }, '操作'))),
+            h('tbody', null,
+              items.length === 0
+                ? h('tr', null, h('td', { colSpan: 6 }, h(Empty)))
+                : items.map(item => h('tr', { key: item.id },
+                  ...['id', 'kind', 'content', 'revision', 'status'].map(name =>
+                    h('td', { key: name },
+                      h('span', { className: 'lm-clip', title: String(item[name] ?? '') },
+                        clip(item[name])))),
+                  h('td', { key: '_ops' },
+                    item.status === 'active' && Btn({
+                      variant: 'danger', onClick: () => disable(item.id),
+                    }, '停用'))))))))
     }
 
     /** 三槽默认值：与 src/js/model-config.js 保持一致（内核没存过设置时用这套）。 */
@@ -885,7 +1108,7 @@ window.__ModuleLoader__.load({
               h('div', { style: { ...S.barFill, width: `${pct}%` } })))
         }
         if (rebuild.phase === 'error') {
-          return h('div', { style: S.error },
+          return h('div', { className: 'lm-error' },
             `重建失败：${rebuild.error || '未知错误'}`
             + (rebuild.total ? `（已完成 ${rebuild.done}/${rebuild.total}）` : ''))
         }
@@ -901,7 +1124,8 @@ window.__ModuleLoader__.load({
       },
         h('span', { style: S.label }, label),
         h('input', {
-          style: options.narrow ? { ...S.input, minWidth: '90px' } : S.input,
+          className: 'lm-input',
+          style: options.narrow ? { width: '100%', minWidth: 0 } : { width: '100%' },
           type: options.type || 'text',
           value: settings[key][name] ?? '',
           placeholder: options.placeholder || '',
@@ -916,7 +1140,8 @@ window.__ModuleLoader__.load({
       const llmCard = ([key, title, hint]) => {
         const custom = settings[key].mode === 'custom'
         return h('div', {
-          key, style: { ...S.card, display: 'flex', flexDirection: 'column', gap: '8px' },
+          key, className: 'lm-card',
+          style: { display: 'flex', flexDirection: 'column', gap: '8px' },
         },
           h('div', { style: { display: 'flex', alignItems: 'baseline', gap: '8px' } },
             h('strong', { style: { fontSize: '13px' } }, title),
@@ -925,7 +1150,8 @@ window.__ModuleLoader__.load({
           h('label', { key: `${key}.mode`, style: S.field },
             h('span', { style: S.label }, '调用通道'),
             h('select', {
-              style: S.input,
+              className: 'lm-select',
+              style: { width: '100%' },
               value: settings[key].mode || 'host',
               onChange: e => update(key, 'mode', e.target.value),
             },
@@ -941,8 +1167,8 @@ window.__ModuleLoader__.load({
                 field(key, 'model', '模型名', { placeholder: 'deepseek-v4.1-flash' })),
           field(key, 'timeoutMs', '超时（毫秒）', { narrow: true }),
           h('div', { style: S.bar },
-            h('button', {
-              style: S.button, type: 'button', disabled: Boolean(busy),
+            Btn({
+              variant: 'primary', disabled: Boolean(busy),
               onClick: () => { void saveAndTest(key) },
             }, busy === MODEL_KIND[key] ? '测试中…' : '保存并测试')))
       }
@@ -951,7 +1177,8 @@ window.__ModuleLoader__.load({
         const key = 'embedding'
         const counts = vec?.counts || {}
         return h('div', {
-          key, style: { ...S.card, display: 'flex', flexDirection: 'column', gap: '8px' },
+          key, className: 'lm-card',
+          style: { display: 'flex', flexDirection: 'column', gap: '8px' },
         },
           h('div', { style: { display: 'flex', alignItems: 'baseline', gap: '8px' } },
             h('strong', { style: { fontSize: '13px' } }, 'Embedding'),
@@ -961,7 +1188,8 @@ window.__ModuleLoader__.load({
           h('label', { key: `${key}.flavor`, style: S.field },
             h('span', { style: S.label }, '接口协议'),
             h('select', {
-              style: S.input,
+              className: 'lm-select',
+              style: { width: '100%' },
               value: settings[key].flavor || 'openai',
               onChange: e => update(key, 'flavor', e.target.value),
             },
@@ -984,26 +1212,25 @@ window.__ModuleLoader__.load({
               : '向量索引状态读取中…'),
           reindexStatus(),
           h('div', { style: S.bar },
-            h('button', {
-              style: S.button, type: 'button', disabled: Boolean(busy),
+            Btn({
+              variant: 'primary', disabled: Boolean(busy),
               onClick: () => { void saveAndTest(key) },
             }, busy === 'embedding' ? '测试中…' : '保存并测试'),
-            h('button', {
-              style: S.button, type: 'button', disabled: reindexing,
+            Btn({
+              disabled: reindexing,
               onClick: () => { void reindex() },
             }, reindexing ? '重建中…' : '重建向量索引')))
       }
 
-      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px', minWidth: 0 } },
         h('div', { style: { display: 'grid', gap: '12px',
-                            gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))' } },
+                            gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))' } },
           ...MODEL_CARDS.map(llmCard),
           embeddingCard()),
         h('div', { style: S.bar },
-          h('button', { style: S.button, type: 'button', onClick: () => { void load() } },
-            '重新读取'),
+          Btn({ onClick: () => { void load() } }, '重新读取'),
           status && h('span', { style: S.cardLabel }, status)),
-        error && h('div', { style: S.error }, error),
+        error && h('div', { className: 'lm-error' }, error),
         h('div', { style: { ...S.cardLabel, maxWidth: '760px' } },
           '设置存在本地记忆库 app_setting 表；API Key 只在本机进程间使用，'
           + '页面上永远显示为掩码，留空或提交掩码都表示保持原值。'))
@@ -1026,18 +1253,16 @@ window.__ModuleLoader__.load({
       const dataTab = tab !== 'overview' && tab !== 'logs' && tab !== 'models'
         && tab !== 'self_configured' && tab !== 'self_notes'
 
-      return h('section', { style: S.wrap },
+      return h('section', { className: 'lm-root', style: S.wrap },
         h('div', { style: S.head },
           h('h2', { style: S.title }, '长期记忆'),
-          h('button', { style: S.button, type: 'button',
-                        onClick: () => openBrowser?.() }, '在右侧栏打开')),
-        h('div', { style: S.tabs }, ...TABS.map(item =>
-          h('button', {
-            key: item.id, type: 'button',
-            style: { ...S.tab, ...(tab === item.id ? S.tabActive : {}) },
+          Btn({ onClick: () => openBrowser?.() }, '在右侧栏打开')),
+        h('div', { className: 'lm-tabs' }, ...TABS.map(item =>
+          Btn({
+            key: item.id, variant: 'tab', active: tab === item.id,
             onClick: () => setTab(item.id),
           }, item.label))),
-        error && h('div', { style: S.error }, `管理接口不可用：${error}`),
+        error && h('div', { className: 'lm-error' }, `管理接口不可用：${error}`),
         tab === 'overview' && h(Overview),
         tab === 'models' && h(ModelSettings),
         tab === 'logs' && h(Logs),

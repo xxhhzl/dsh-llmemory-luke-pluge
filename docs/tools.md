@@ -32,12 +32,18 @@
 
 ```
 FTS5 trigram 召回 top-50（<3 字符退回 LIKE，按标题命中优先排序）
+  + sqlite-vec KNN top-50（外壳把 query 向量化后随调用带 query_vector；可选）
+  → RRF(k=60) 融合两路名次
   → 联想扩展（同 subject / 同 cues，最多 20 条）
   → 按 kind 分组归一化（事件用 cnt，l3 用 use_count）
   → final = 0.6·rel + 0.4·Strength
   → 同事件簇 ≤2 条；留 10% 探索位给 use_count=0 的条目
   → 返回后对命中条目 +1 使用计数
 ```
+
+> `query_vector` 不是模型可见参数：它由外壳（`tools-bridge`）在调用前用
+> embedding 端点算好，放在 `tools.calls` 的调用项上，内核只读取、不调网络。
+> embedding 不可用时该字段缺省，检索自动退化为纯词法。
 
 **输入**
 

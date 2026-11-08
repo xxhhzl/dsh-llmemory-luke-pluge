@@ -8,12 +8,19 @@
 ① 召回：FTS5 trigram 取 top-50（<3 字符退回 LIKE）
          范围过滤（scope=project）在**召回前**用 memory_fts 的 origin_project 列完成，
          避免范围外条目占满 top-k
+         + 向量通道：外壳把查询文本向量化后随工具调用带下来（query_vector），
+         走 sqlite-vec KNN 取 top-50（同样先按 origin_project 过滤）
          + 联想扩展：同 subject / 同 cues 的 l3 以 0.5 分进候选（总量上限 20 条）
-② 融合：单路时 rel = 1/(1+rank)；多路（v2 向量）时 RRF(k=60)
+② 融合：多路 RRF(k=60)，rel = Σ 1/(60+rank)；单路时自然退化为 1/(60+rank)
 ③ 精排：final = α·rel_norm + (1-α)·Strength      α = 0.6
 ④ 选择：同事件簇最多 2 条；留 10% 探索位给 use_count=0 的条目
 ⑤ 计数：只对最终返回的条目 use_count+1、刷新 last_used_at
 ```
+
+向量通道是**可选**的：embedding 端点没配 / 不可用 / 没装 sqlite-vec 时
+`query_vector` 为空，检索完全退化成 v1 的纯词法路径，接口行为不变。
+查询向量由**外壳**算（`src/js/tools-bridge.js` 调 `embedTexts`），内核只在
+`tools.calls` 里接收，避免主循环阻塞在 HTTP 上。
 
 两条实现约束（2026-11-03 修）：
 
@@ -86,13 +93,20 @@ AND (:scope = 'all' OR origin_project IS NULL OR origin_project = :current_proje
 
 | 版本 | 召回 | 说明 |
 |---|---|---|
-| v1（当前） | FTS + 元数据联想 | 无新依赖，143 事件规模足够 |
-| v2 | 加向量通道（外壳代理 embedding） | FTS/向量各 top-50，RRF 融合后再进精排 |
+| v1 | FTS + 元数据联想 | 无新依赖 |
+| v2（当前） | FTS + sqlite-vec KNN + 元数据联想，RRF 融合 | 依赖 `sqlite-vec` 与 embedding 端点；任一缺失自动退回 v1 |
+
+实测（bge-m3 本地 Ollama，1024 维）：词面零重叠的查询（`borderWidth` vs
+「边框粗细保持一致」）只能靠向量通道召回；`vec.reindex` 重建后
+`vec.status` 显示各表条数，检索结果里两路都命中的条目 RRF 分更高。
 
 ## 6. 已知限制
 
 - FTS5 `trigram` 要求查询 ≥3 字符，短查询走 `LIKE` 全表扫描（当前数据量下可接受）；
   短查询的 `%`/`_` 已转义，并按「标题命中优先、正文更短优先」排序，
   否则 top-k 会退化成表的插入顺序；
+- 向量检索目前是**暴力 KNN**（sqlite-vec `vec0`，无 ANN 索引）：万级条目以内可接受，
+  再往上需要换 ANN（HNSW/IVF）或分片；
+- 查询向量由外壳现算（约 30ms 热态、首次加载模型 3s+），冷启动首次检索会明显变慢；
 - `related_events` 目前没有写入方，联想扩展先用「同 subject / 同 cues」替代；
 - 探索位是确定性选取（按分数取冷条目），不做随机扰动，便于测试复现。

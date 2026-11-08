@@ -19,14 +19,16 @@
 ```
 src/js/
 ├── index.js        插件 entry（name / inject / Config / apply）+ createShell
-├── client.js       浏览器侧：设置 → 「长期记忆」页（settings.section）
+├── client.js       浏览器侧：设置 → 「长期记忆」页（settings.section）+ 右侧栏浏览器
 ├── kernel.js       spawn Python、按行收发、request_id 配对、stderr 落盘
 ├── frames.js       信封构造/解析（protocol_version 1.0）
-├── llm-bridge.js   llm.request → prepareCall + BlockAssembler → llm.result
-├── tools-bridge.js tools.schema → defineTool 注册；调用回灌 tools.calls
+├── model-config.js 三槽模型设置：默认值、合并、直连 OpenAI 兼容端点 / embedding
+├── llm-bridge.js   llm.request → prepareCall（或自定义端点）→ llm.result
+├── tools-bridge.js tools.schema → defineTool 注册；调用回灌 tools.calls（含 query_vector）
 ├── ingest-bridge.js session/event → 按会话去抖 → ingest.request
+├── core-prompt.js  核心记忆 → 系统提示词段（-2000）/ 自述 → 动态上下文（850）
 ├── commands.js     斜杠命令 /memory（立即切分当前会话）
-└── stats-route.js  /longmemory/{stats,api,logs}（设置页数据 + 管理 API，仅回环）
+└── stats-route.js  /longmemory/{stats,api,test,logs}（设置页数据 + 管理 API，仅回环）
 ```
 
 ### 用户可见入口
@@ -34,9 +36,11 @@ src/js/
 | 入口 | 实现 | 说明 |
 |---|---|---|
 | `/memory` 斜杠命令 | `ctx.commands.register` | 立即 flush 去抖缓冲并切分；命令结果就地回显，不进入模型消息 |
-| 设置 → 长期记忆 | `settings.section` 槽位（`id: longmemory`） | 8 个标签：概况 + 事件/经验/认知/消息/引用/工作记忆（通用表格增删查改）+ 日志 |
-| `GET /longmemory/stats` | `webServer` 前缀路由 | 概况数据；内核不可用时回 503 |
-| `POST /longmemory/api` | 同上 | 管理 API：`tables / list / get / insert / update / delete` |
+| 设置 → 长期记忆 | `settings.section` 槽位（`id: longmemory`） | 概况 + **模型**（三槽配置/连通性测试）+ 事件/经验/认知/洞见/自我设定/模型自述/消息/引用/工作记忆（通用表格增删查改）+ 日志 |
+| 右侧栏「长期记忆」 | `sidebarRightTabs` + 槽位 | 事件/经验/认知/洞见的只读搜索浏览（分页 + 详情） |
+| `GET /longmemory/stats` | `webServer` 前缀路由 | 概况数据（含脱敏后的三槽模型配置）；内核不可用时回 503 |
+| `POST /longmemory/api` | 同上 | 管理 API：`tables / list / get / insert / update / delete / settings.* / vec.* / self.* / core.preview` |
+| `POST /longmemory/test` | 同上 | 模型连通性测试：`{kind: jev|extract|embedding}`，回模型名/维度/耗时 |
 | `GET /longmemory/logs` | 同上 | `shell.log` / `kernel.stderr.log` 尾部（≤1000 行） |
 
 ### 管理界面（增删查改）
@@ -54,17 +58,20 @@ src/js/
 
 1. spawn 内核 → 轮询 `health` 直到就绪；
 2. `config.set` 注入 `store.db_path`（如果配置了 `dbPath`）；
-3. 拉 `tools.schema`，逐个 `ctx.tools.register(defineTool(...))`；
-4. `bridge.attach()` 订阅 `session/event`。
+3. `settings.raw` 读三槽模型设置（失败退回「继承宿主」默认值）；
+4. 拉 `tools.schema`，逐个 `ctx.tools.register(defineTool(...))`；
+5. `bridge.attach()` 订阅 `session/event`，并开始应答 `embed.request`。
 
 ## 3. 帧转换要点
 
 | 方向 | 帧 | 转换 |
 |---|---|---|
 | 宿主 → 内核 | `ingest.request` | `session/event` 的 `user/message` / `assistant/message` / `tool/result` → `{msg_id, seq, role, content, ts}`；`seq` 用事件序号，按会话增量（`cursor.last_seq`） |
-| 内核 → 宿主 | `llm.request` | system 文本拼成 `system`，user 文本转 `createUserMessage`；流式 chunk 用 `BlockAssembler` 收成文本 |
-| 内核 → 宿主 | `tools.schema` | JSON Schema → 工具 DSL：`anyOf[非 null]` 取首个分支、`enum` 透传、`required` 展开 |
-| 宿主 → 内核 | `tools.calls` | 工具 `execute` 发一次调用，`{ok:false}` 转成带 `code` 的异常 |
+| 内核 → 宿主 | `llm.request` | 按 `purpose` 选槽（`jev` → JEV 槽，其余 → 提取槽）；`mode=custom` 直连端点，否则 system 文本拼成 `system`、user 文本转 `createUserMessage`，流式 chunk 用 `BlockAssembler` 收成文本 |
+| 内核 → 宿主 | `embed.request` | `{request_id, input[]}` → `embedTexts`（openai `/v1/embeddings` 或 ollama `/api/embed`）→ `embed.result{vectors}`；失败回 `error.message`，内核只降级不重试 |
+| 内核 → 宿主 | `settings.raw` | 未脱敏的三槽设置（`app_setting` 表）；只走帧通道，不经 HTTP |
+| 宿主 → 内核 | `tools.calls` | 工具 `execute` 发一次调用；`memory_search` 会先用 embedding 端点算好 `query_vector` 一并带上 |
+| 内核 → 宿主 | `tools.schema` | JSON Schema → 工具 DSL：`anyOf[非 null]` 取首个分支、`enum` 透传、`required` 展开；`{ok:false}` 转成带 `code` 的异常 |
 
 ## 4. 错误与生命周期
 
@@ -83,10 +90,12 @@ src/js/
 
 | 项 | 方式 | 结果 |
 |---|---|---|
-| 帧构造/解析、内容块提取、路由准入、投递回滚 | `node tests/js/unit.test.mjs` | ✅ 21 条 |
+| 帧构造/解析、内容块提取、路由准入、投递回滚、三槽配置、embedding 调用 | `node tests/js/unit.test.mjs` | ✅ 29 条 |
 | 生命周期（重启策略、dispose 顺序、订阅去重） | `node tests/js/shell.test.mjs` | ✅ 7 条（假内核，不需要 Python） |
 | 外壳↔内核进程契约（启动/工具/ingest/坏字节/坏信封） | `python -m unittest tests.test_shell_contract` | ✅ 11 条（复刻外壳动作；沙箱里 Node 不能管道抓子进程输出） |
-| 打包一致性与语法 | `build_release.py --check` + `node --check` | ✅ |
+| 向量索引 / embedding 代理 / RRF 融合 / 设置脱敏 | `python -m unittest tests.test_vec tests.test_admin` | ✅ 59 条（未装 sqlite-vec 时向量用例自动 skip） |
+| 真实链路（kernel → embed.request → Ollama → vec0 → 检索） | `tests/run_vec_e2e.py`（模拟外壳） | ✅ 实测 bge-m3 1024 维，词面零重叠也能召回 |
+| 打包一致性与语法 | `build_release.py --check` + `node --check` | ✅（含版本号一致性） |
 | `ctx.llm` / `ctx.tools` 两条桥 | 需在 Harness 内安装后验收 | ⏳ 见 release/README.md「验收」 |
 
 ## 7. 本机安装记录（2026-11-03 安装 / 2026-11-04 更新到 0.2.0）
@@ -104,11 +113,18 @@ src/js/
 
 ```powershell
 python scripts/build_release.py            # 装配 release/
-python scripts/build_release.py --check    # 逐字节核对
-Copy-Item release/* "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\@local\dsh-longmemory" -Recurse -Force
+python scripts/build_release.py --check    # 逐字节核对（含版本号一致性）
+# 安装目录与 release/ 是**硬链接农场**：已有文件的改动会跟着同步，
+# 但新增文件不会自动出现，必须显式建链接（或复制）：
+$inst = "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\@local\dsh-longmemory"
+New-Item -ItemType HardLink -Path "$inst\lib\model-config.js" -Target "$PWD\release\lib\model-config.js"
+Copy-Item release\README.md "$inst\README.md" -Force
 ```
 
-当前产物 **0.2.0**、51 个文件（`lib/` 12 个 JS + `kernel/` 22 个 py + 根 6 个 + locale/icon），
+判断是不是硬链接：`fsutil hardlink list <安装目录>\kernel\config.py`，同时列出
+`release\kernel\config.py` 就是（改内容会同步，**新增/删除文件仍要手动处理**）。
+
+当前产物 **0.3.0**、43 个文件（`lib/` 14 个 JS + `kernel/` 21 个 py + 根 6 个 + `locale/` 2 个），
 与 `release/` 哈希逐一相同。版本号改了之后，运行中的进程仍报旧值，**重启 Harness** 才会刷新。
 
 生效方式：**重启 Harness**（插件解析表在启动时构建；`ResolutionRouter` 对新增包也要求重启）。
@@ -123,8 +139,8 @@ Remove-Item "$prof\node_modules\@local\dsh-longmemory" -Recurse -Force
 
 已知注意点：
 
-- 当前产物 51 个文件（`lib/` 12 个 JS、`kernel/` 22 个 py、根 6 个 + locale/icon）；同步方式：
-  `python scripts/build_release.py && Copy-Item release/* <profile>/node_modules/@local/dsh-longmemory -Recurse -Force`；
+- 当前产物 43 个文件（`lib/` 14 个 JS、`kernel/` 21 个 py、根 6 个 + `locale/` 2 个）；
+  同步方式见上面的「更新流程」（硬链接农场：改内容自动同步，新增文件要手动链接）；
 - 沙箱里 **Python 子进程不能写 profile 目录**（PowerShell 可以），所以安装走 PowerShell；
 - Node 在 Harness 外解析不到 `@deepseek-ai/dsh-tools|dsh-llm` 属正常：这两个是宿主提供的包，
   由 Harness 的解析表按 installation scope 解析（`@nanmicoder/dsh-agent-teams` 同理）。

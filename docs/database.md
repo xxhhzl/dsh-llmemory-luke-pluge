@@ -265,6 +265,51 @@ CREATE VIRTUAL TABLE memory_fts USING fts5(
 - 范围列写事件自身的归属（`event.origin_project`），不是本次 job 的项目——
   全局事件被某个项目续写后仍应全局可见。
 
+## 向量索引（sqlite-vec）
+
+```sql
+CREATE VIRTUAL TABLE vec_experience USING vec0(
+  ref_id          INTEGER PRIMARY KEY,   -- 对应 experience.id
+  origin_project  TEXT,                  -- 范围列：KNN 里做元数据过滤
+  embedding       FLOAT[1024]            -- 维度取 config.embedding.dim
+);
+-- vec_cognition / vec_insight 同构
+```
+
+- 扩展缺失（`sqlite_vec` 未装、加载失败、`enable_load_extension` 被禁）时**只降级**：
+  `_vec_enabled=False`，读写都变成空操作，检索退回纯 FTS，主库照常工作。
+- 写入走 `embed.index_rows`：整批文本打成 `embed.request` 帧交给外壳，外壳调
+  OpenAI 兼容 `/v1/embeddings`（或 Ollama `/api/embed`）后按 `request_id` 回
+  `embed.result`；**内核不持有端点与 key**。失败只记 `embed.vec_index_failed`。
+- 向量写入发生在事件落库**之后**（`ingest._index_event`），不进摘要事务：
+  embedding 端点慢或挂掉，不能连累记忆落库。
+- 维度变了（换 embedding 模型）时，打开库会 `DROP` 掉旧维度的向量表并重建，
+  需要 `vec.reindex` 回填；`vec.status` 会显示维度与各表条数。
+- 失效 / 被取代的 l3 在同一事务里删掉向量（`_vec_remove`），否则会继续占
+  KNN 的 top-k 名额；记忆行本身仍然保留。
+- 检索：`retrieval._candidates` 把 FTS 名次与向量名次用 RRF（k=60）融合，
+  `rel = 1/(60+rank)`，两路都命中的条目自然更靠前；`scope=project` 时
+  KNN 过滤 `origin_project = 本项目` 再并入 `origin_project = ''`（通用条目）。
+
+## 插件设置（app_setting）
+
+```sql
+CREATE TABLE app_setting (
+  key        TEXT PRIMARY KEY,     -- model.jev / model.extract / embedding
+  value      TEXT NOT NULL,        -- JSON 对象
+  updated_at TEXT NOT NULL
+);
+```
+
+- 三槽模型配置存这里（`mode` / `provider` / `model` / `baseUrl` / `apiKey` / `dim` …），
+  与记忆库同库同文件：备份记忆库就带上了配置。
+- 读给页面时 `apiKey` 一律脱敏成 `…` + 尾 4 位；`settings.set` 收到掩码值或空串
+  视为「保持原 key」，避免把掩码当新 key 存进去。
+- 未脱敏的 `settings.raw` 只走内核 ↔ 外壳的帧通道（`src/embed.py` 同款机制），
+  不经 HTTP。
+- 改设置后内核推 `notify{kind:"settings"}`，外壳重新 `settings.raw` 刷新缓存，
+  下一轮模型调用即生效（维度变更需重建向量索引）。
+
 ## 写入链路（ingest）
 
 `src/ingest.py` 把一次摘要结果写进库，顺序固定：
@@ -315,7 +360,10 @@ cognition.superseded_id     ──N:1──▶  cognition.id
 
 memory_fts(ref_kind, ref_id, origin_project, session_id)
                               ──▶  event / experience / cognition（多态索引 + 范围列）
+vec_experience(ref_id) / vec_cognition(ref_id) / vec_insight(ref_id)
+                              ──▶  同表主键（向量索引，可随时重建）
 digest.ref_event_ids          ──▶  JSON 数组（缓存拼装来源）
+app_setting(key, value)       ──▶  插件配置（与记忆数据同库，不含记忆内容）
 ```
 
 - 删除消息时需在同一事务内删除对应记忆行，否则产生悬空引用。

@@ -1,7 +1,8 @@
 # dsh-longmemory（Harness 插件包）
 
 把 DSH 长期记忆内核接进 Harness：会话消息增量投递内核切分事件、蒸馏经验与认知，
-并向模型暴露 `memory_search` / `memory_get` / `memory_recent` 三把工具。
+并向模型暴露 `memory_search` / `memory_get` / `memory_recent` / `memory_report` /
+`memory_self_write` 五把工具。
 
 ## 目录
 
@@ -14,9 +15,13 @@ release/
 │   ├── index.js        # 插件 entry：配置、装配、生命周期
 │   ├── kernel.js       # Python 内核进程 + 帧收发
 │   ├── frames.js       # 协议信封
-│   ├── llm-bridge.js   # 内核 llm.request → ctx.llm
-│   ├── tools-bridge.js # 内核 tools.schema → ctx.tools
-│   └── ingest-bridge.js# session/event → ingest.request
+│   ├── model-config.js # 三槽模型设置：默认值 / 合并 / 直连端点 / embedding
+│   ├── llm-bridge.js   # 内核 llm.request → 宿主模型或自定义端点
+│   ├── tools-bridge.js # 内核 tools.schema → ctx.tools（查询向量化后带 query_vector）
+│   ├── ingest-bridge.js# session/event → ingest.request
+│   ├── core-prompt.js  # 核心记忆 → 系统提示词段 / 自述 → 动态上下文
+│   ├── commands.js     # /memory 斜杠命令
+│   └── stats-route.js  # /longmemory/{stats,api,test,logs}
 ├── kernel/             # Python 内核（由 src/*.py 构建）
 ├── locale/{en,zh}.json # meta.title / meta.description
 └── icon.svg
@@ -28,6 +33,16 @@ release/
 - `pythonPath` 指向该环境；Windows 上通常写成 `python` 或解释器绝对路径。
 - 模型路由：`provider` / `model` 必填（如 `deepseek-official` / `deepseek-v4-flash`）。
   内核不持有 provider/model/key，所有模型调用经 `ctx.llm`。
+  这两个值只是**三槽配置的默认值**，装好后可以在「设置 → 长期记忆 → 模型」里逐槽改。
+- 向量检索（可选）：内核所在 Python 环境装 `sqlite-vec`（`pip install sqlite-vec`）。
+  没装也能用，检索自动退回纯 FTS；装了但没配 embedding 端点同样只降级。
+- Embedding 端点（可选）：OpenAI 兼容（`/v1/embeddings`）或 Ollama 原生
+  （`/api/embed`）。本地 Ollama 示例：
+
+  ```powershell
+  ollama pull bge-m3
+  # 默认值已指向 http://127.0.0.1:11434/v1 · bge-m3 · 1024 维
+  ```
 
 ## 安装
 
@@ -63,7 +78,7 @@ python scripts/build_release.py          # 有差异时重新生成 lib/ 与 ker
 | `pythonPath` | `python` | Python 解释器 |
 | `kernelDir` | 包内 `kernel/` | 含 `main.py` 的内核目录 |
 | `dbPath` | 包内 `.data/memory.db`（绝对路径） | 记忆库路径；启动时既通过环境变量、也用 `config.set` 注入 |
-| `provider` / `model` | 空 | 模型路由；为空时内核收到 1004，按降级策略处理 |
+| `provider` / `model` | 空 | 三槽配置的默认值（`model.jev` / `model.extract`）；为空时内核收到 1004，按降级策略处理 |
 | `maxTokens` | 适配器默认 | 单次输出上限 |
 | `agentId` | `dsh-longmemory` | 写入信封的 agent 标识 |
 | `ingestDebounceMs` | 2500 | 会话事件去抖窗口 |
@@ -73,8 +88,33 @@ python scripts/build_release.py          # 有差异时重新生成 lib/ 与 ker
 | `coreContextOrder` | 850 | 自述自我在动态上下文中的顺序 |
 
 内核侧 `core.*`（`max_chars` / `max_insights` / `max_experiences` / `max_cognitions` /
-`max_self_configured` / `max_self_notes` / `enabled`）可用 `config.set` 热更新；
+`max_self_configured` / `max_self_notes` / `enabled`）与 `embedding.dim` 可用 `config.set` 热更新；
 注入结构与标签见源码仓库的 `docs/core_memory.md`。
+
+### 三槽模型（设置页 · 模型）
+
+三处模型调用分别可配，存在记忆库的 `app_setting` 表（与记忆同库，本地明文保存 key）：
+
+| 槽 | 管什么 | 默认 |
+|---|---|---|
+| `model.jev` | 事件切分：判断一条消息是新事件 / 延续 / 重开旧事件 | 继承宿主 `ctx.llm` |
+| `model.extract` | 事件摘要、经验、认知，以及合并、洞见、模型自述等文本调用 | 继承宿主 `ctx.llm` |
+| `embedding` | 检索向量化（写入索引 + 查询向量） | OpenAI 兼容 `http://127.0.0.1:11434/v1` · `bge-m3` · 1024 维 |
+
+每个文本槽有两种通道：
+
+- **宿主模型**：走 Harness 的 `ctx.llm`（填 `provider` + `model`），凭据由宿主管理；
+- **自定义端点**：填 `baseUrl` + `model` + `apiKey`，外壳直接请求 OpenAI 兼容
+  `/chat/completions`（`temperature=0`，非流式）。
+
+按钮说明：
+
+- **保存并测试**：先写库（内核推 `notify{kind:"settings"}` 让外壳立刻换新配置），
+  再调 `POST /longmemory/test`，返回模型名/维度/耗时；
+- **重建向量索引**：后台把现有经验/认知/洞见重新 embed 一遍（默认每批 16 条）。
+  换 embedding 模型或维度后必须点一次；进度显示在卡片上。
+- 页面上的 API Key 永远是掩码（`…` + 尾 4 位）：留空或原样回传都表示**保持原 key**，
+  想换新 key 直接粘贴新的。
 
 ## 使用
 
@@ -84,11 +124,12 @@ python scripts/build_release.py          # 有差异时重新生成 lib/ 与 ker
 | 工具 | 模型自行调用 `memory_search` / `memory_get` / `memory_recent`；也可以直接说「查一下之前关于 X 的结论」 |
 | 命令 | 输入框发 `/memory`：立即切分当前会话（跳过去抖），结果就地回显 |
 | 设置页 · 概况 | 统计、库路径、最近事件 |
+| 设置页 · 模型 | JEV / 提取 / Embedding 三槽配置，保存即测试；向量索引状态与重建 |
 | 设置页 · 数据 | 事件 / 经验 / 认知 / 洞见 / 消息 / 引用 / 工作记忆：搜索、分页、**新增、编辑、删除** |
 | 设置页 · 自我 | 「自我设定」（进系统提示词）四类输入 + 「模型自述」（进动态上下文），可预览注入文本 |
 | 右侧栏 · 长期记忆 | 会话 header 的「记忆」按钮或设置页「在右侧栏打开」：按事件/经验/认知/洞见浏览、搜索、看详情 |
 | 设置页 · 日志 | `shell.log` 与 `kernel.stderr.log` 尾部，可自动刷新 |
-| 管理接口 | `POST /longmemory/api`（仅回环）+ `GET /longmemory/logs` |
+| 管理接口 | `POST /longmemory/api`（仅回环）+ `GET /longmemory/logs` + `POST /longmemory/test` |
 | 状态接口 | `GET /longmemory/stats[?session_id=...]`，只读 JSON |
 
 ## 数据流
@@ -96,24 +137,31 @@ python scripts/build_release.py          # 有差异时重新生成 lib/ 与 ker
 ```
 session/event ──ingest-bridge──▶ ingest.request ─▶ 内核：入库 → 切分 → 摘要 → 裁决 → 落库
                                                    │
-内核 tools.schema ──tools-bridge──▶ ctx.tools.register(defineTool × 3)
-内核 llm.request  ──llm-bridge────▶ ctx.llm.prepareCall/stream ─▶ llm.result
+                                                   └─▶ embed.request ─▶ 外壳 embedding 端点
+                                                        └─ embed.result ─▶ 写 vec0 表
+内核 tools.schema ──tools-bridge──▶ ctx.tools.register(defineTool × 5)
+内核 llm.request  ──llm-bridge────▶ 宿主 ctx.llm / 自定义端点 ─▶ llm.result
 ```
 
 ## 验收
 
 安装后：
 
-1. `cordis_inspect_query` 确认插件行已 `applied`，且出现三把 `memory_*` 工具。
-2. 让模型调用一次 `memory_search`，确认返回 `{items, count, scope, limit}`（空库时 `count: 0`）。
-3. 发几轮对话，等待去抖窗口后确认库里出现事件（`memory_recent` 能查到区间内事件）。
-4. 插件详情里确认标题/描述来自 `locale/*.json`，图标为包内 `icon.svg`。
+1. `cordis_inspect_query` 确认插件行已 `applied`，且出现五把 `memory_*` 工具。
+2. 设置 → 长期记忆 → **模型**：三张卡片的默认值与 `cordis.patch.yml` 一致；
+   点「保存并测试」应回 `Embedding OK：1024 维 · 2 条…` / `文本模型 OK：<模型> → OK`。
+3. 概况页内核版本应为 **0.3.0**（版本没变说明还在跑旧进程，重启 Harness）。
+4. 让模型调用一次 `memory_search`，确认返回 `{items, count, scope, limit}`（空库时 `count: 0`）。
+5. 发几轮对话，等待去抖窗口后确认库里出现事件（`memory_recent` 能查到区间内事件）；
+   模型页的向量索引条数应随新条目增长。
+6. 插件详情里确认标题/描述来自 `locale/*.json`，图标为包内 `icon.svg`。
 
 离线可先验证外壳与内核的进程契约（不需要 Harness）：
 
 ```powershell
 python -m unittest tests.test_shell_contract   # health / schema / 调用 / ingest 帧序
-node tests/js/unit.test.mjs                    # 帧与内容提取
+python -m unittest tests.test_vec              # 向量索引 / embedding 代理 / RRF
+node tests/js/unit.test.mjs                    # 帧、内容提取、三槽配置与 embed 调用
 ```
 
 > 沙箱里 Node 不能用管道捕捉子进程输出（`spawn EPERM`），因此内核往返测试放在
@@ -123,5 +171,8 @@ node tests/js/unit.test.mjs                    # 帧与内容提取
 ## 已知限制
 
 - 只支持单轮模型调用（内核的 jev / summary 都是 system + 单条 user）。
+- 向量检索是暴力 KNN（sqlite-vec `vec0`，无 ANN 索引）：万级条目以内够用；
+  换 embedding 模型或维度后向量表会重建，必须点一次「重建向量索引」。
+- 查询向量由外壳现算：本地 Ollama 热态约 30ms，首次加载模型 3s 左右。
 - 会话事件按 `event.seq` 增量投递；同一会话修改历史不会回填（内核只追加）。
 - 工具注册发生在启动握手之后；握手失败时插件仍存在但不提供工具（日志会给出原因）。

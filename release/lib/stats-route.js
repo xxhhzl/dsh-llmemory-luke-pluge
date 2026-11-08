@@ -157,6 +157,7 @@ function sendJson(res, status, payload) {
 
 export function registerLongmemoryRoutes(ctx, {
   kernel, agentId = '', timeoutMs = 15_000, trace = () => {}, getSettings = null,
+  testLlm = null,
 } = {}) {
   // 服务名是 `webServer`（cordis Service 名，大小写敏感）；`webserver` 仅为容错
   const server = optionalService(ctx, 'webServer') ?? optionalService(ctx, 'webserver')
@@ -223,12 +224,26 @@ export function registerLongmemoryRoutes(ctx, {
             const vectors = await embedTexts(profile, ['ping', '测试'])
             sendJson(res, 200, { ok: true, dim: vectors[0]?.length || 0,
                                  count: vectors.length, ms: Date.now() - started })
-          } else {
+            return
+          }
+          if (profile.mode === 'custom' && profile.baseUrl) {
             const result = await chatCompletion(profile, { system: '', user: '只回复 OK' })
             sendJson(res, 200, { ok: true, model: result.model,
                                  sample: String(result.content || '').slice(0, 80),
                                  ms: Date.now() - started })
+            return
           }
+          // 宿主模型只能在外壳里测（ctx.llm 不在这条路由手上）
+          if (typeof testLlm !== 'function') {
+            throw new Error('宿主模型需要在外壳内测试：检查插件是否已重载')
+          }
+          const result = await testLlm(profile)
+          if (result?.error) {
+            throw new Error(result.error.message || '宿主模型调用失败')
+          }
+          sendJson(res, 200, { ok: true, model: result?.model || profile.model || '',
+                               sample: String(result?.content || '').slice(0, 80),
+                               ms: Date.now() - started })
           return
         }
 

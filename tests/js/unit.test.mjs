@@ -356,10 +356,10 @@ test('内核起不来：不抛、进程置空、请求快速失败', async () =>
 
 /* ---------------- 路由的错误分支 ---------------- */
 
-function makeRoute(kernel) {
+function makeRoute(kernel, extra = {}) {
   let route
   const ctx = { webServer: { register: (r) => { route = r; return () => {} } } }
-  registerLongmemoryRoutes(ctx, { kernel, trace: () => {} })
+  registerLongmemoryRoutes(ctx, { kernel, trace: () => {}, ...extra })
   return route
 }
 
@@ -413,6 +413,45 @@ test('路由错误分支：405 / 404 / 503 / 400', async () => {
   })
   assert.equal(badJson.status, 400, '坏 JSON 是客户端错误，不是内核不可用')
   assert.equal(badJson.body.error, 'bad_request')
+})
+
+test('模型测试路由：宿主槽借外壳的 ctx.llm，自定义端点直连', async () => {
+  const settings = { 'model.jev': { mode: 'host', provider: 'p', model: 'm' } }
+  const route = makeRoute({ request: async () => ({}) }, {
+    getSettings: () => settings,
+    testLlm: async profile => {
+      assert.equal(profile.mode, 'host')
+      return { content: 'OK', model: 'host-model' }
+    },
+  })
+  const headers = { host: '127.0.0.1:1', 'content-type': 'application/json' }
+  const host = await invoke(route, {
+    method: 'POST', url: '/longmemory/test', body: '{"kind":"jev"}', headers,
+  })
+  assert.equal(host.status, 200)
+  assert.equal(host.body.ok, true)
+  assert.equal(host.body.sample, 'OK')
+  assert.equal(host.body.model, 'host-model')
+  assert.equal(typeof host.body.ms, 'number')
+
+  settings['model.jev'] = { mode: 'custom', baseUrl: 'http://h/v1', model: 'c1' }
+  const original = globalThis.fetch
+  globalThis.fetch = async () => ({
+    ok: true,
+    text: async () => JSON.stringify({
+      model: 'c1', choices: [{ message: { content: 'OK' } }],
+    }),
+  })
+  try {
+    const custom = await invoke(route, {
+      method: 'POST', url: '/longmemory/test', body: '{"kind":"jev"}', headers,
+    })
+    assert.equal(custom.status, 200)
+    assert.equal(custom.body.ok, true)
+    assert.equal(custom.body.model, 'c1')
+  } finally {
+    globalThis.fetch = original
+  }
 })
 
 test('核心记忆：注册 section/context，按版本更新文本', async () => {

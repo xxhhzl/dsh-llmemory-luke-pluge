@@ -245,6 +245,22 @@ export function createShell(ctx, config = {}, {
       ['routes:/longmemory/*', () => registerLongmemoryRoutes(ctx, {
         kernel, agentId, timeoutMs: config.requestTimeoutMs ?? 15000, trace,
         getSettings: () => modelSettings,
+        // 宿主模型只能在外壳里测：借 llm-bridge 走同一条 ctx.llm 通道
+        testLlm: async profile => {
+          const host = await getHost()
+          return host.handleLlmRequest(ctx, {
+            data: {
+              request_id: 'settings-test',
+              purpose: 'longmemory',
+              messages: [{ role: 'user', content: '只回复 OK' }],
+            },
+          }, {
+            provider: config.provider,
+            model: config.model,
+            maxTokens: config.maxTokens,
+            requestTimeoutMs: config.llmTimeoutMs ?? 120000,
+          }, { 'model.extract': profile })
+        },
       })],
     ]) {
       try {

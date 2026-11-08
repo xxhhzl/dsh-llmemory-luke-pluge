@@ -90,7 +90,7 @@ src/js/
 
 | 项 | 方式 | 结果 |
 |---|---|---|
-| 帧构造/解析、内容块提取、路由准入、投递回滚、三槽配置、embedding 调用 | `node tests/js/unit.test.mjs` | ✅ 29 条 |
+| 帧构造/解析、内容块提取、路由准入、投递回滚、三槽配置、embedding 调用 | `node tests/js/unit.test.mjs` | ✅ 30 条 |
 | 生命周期（重启策略、dispose 顺序、订阅去重） | `node tests/js/shell.test.mjs` | ✅ 7 条（假内核，不需要 Python） |
 | 外壳↔内核进程契约（启动/工具/ingest/坏字节/坏信封） | `python -m unittest tests.test_shell_contract` | ✅ 11 条（复刻外壳动作；沙箱里 Node 不能管道抓子进程输出） |
 | 向量索引 / embedding 代理 / RRF 融合 / 设置脱敏 | `python -m unittest tests.test_vec tests.test_admin` | ✅ 59 条（未装 sqlite-vec 时向量用例自动 skip） |

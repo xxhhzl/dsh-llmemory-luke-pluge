@@ -223,5 +223,31 @@ class TestSelfWrite(ContractCase):
             config.patch_config({"core": {"max_self_notes": 10}})
 
 
+class TestToolDescriptions(ContractCase):
+    '''工具描述是引导调用的主要手段：触发条件与工具边界必须写在描述里。'''
+
+    def schema(self):
+        q = base.message_queue()
+        tools.get_tools_schema(self.envelope(), q)
+        return {item["name"]: item for item in json.loads(q.recv())["data"]}
+
+    def test_search_description_states_when_to_use(self):
+        description = self.schema()["memory_search"]["description"]
+        self.assertIn("何时用", description)
+        self.assertIn("何时不用", description)
+        self.assertIn("之前", description, "要写出用户会用的指代词")
+        self.assertIn("grep", description, "要说明什么时候不该用它")
+
+    def test_search_description_states_tool_boundaries(self):
+        description = self.schema()["memory_search"]["description"]
+        self.assertIn("memory_get", description)
+        self.assertIn("memory_recent", description)
+
+    def test_get_and_recent_have_their_own_trigger(self):
+        schema = self.schema()
+        self.assertIn("先搜再读", schema["memory_get"]["description"])
+        self.assertIn("何时用", schema["memory_recent"]["description"])
+
+
 if __name__ == "__main__":
     unittest.main()

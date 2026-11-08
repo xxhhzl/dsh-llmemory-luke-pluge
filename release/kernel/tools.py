@@ -134,7 +134,12 @@ class memory_search_args(BaseModel):
 @tool(memory_search_args)
 def memory_search(query, limit=5, kind=None, scope=None, min_score=None,
                   *, session_id=None, origin_project=None, query_vector=None):
-    '''在长期记忆里找线索：返回事件摘要、经验、认知、洞见（按相关性 × 记忆强度排序）。先用它定位拿 id，再用 memory_get 读正文；问「刚才那段时间」用 memory_recent。'''
+    '''在长期记忆里找线索（事件摘要 / 经验 / 认知 / 洞见，按相关性 × 记忆强度排序）。
+
+何时用：用户提到「之前 / 上次 / 我们讨论过 / 你说过 / 偏好 / 约定」，或这次任务要沿用既有决定、项目约定、踩过的坑时；不确定记忆里有没有，也值得先查一次。
+何时不用：只是定位当前代码或文件用 grep / read；本次对话里已经给出的信息不必再查。
+用法：先用它拿到 id 与摘要，再用 memory_get 读正文；按时间回放（「那段时间」）用 memory_recent。
+读结果：score 是相关性 × 记忆强度的融合分，meta.use_count 是使用热度；记忆是「当时记下的」，与当前事实冲突时以当前为准。'''
     search_cfg = _search_defaults()
     effective_limit = max(1, min(int(limit), int(search_cfg.get("limit_max", 20))))
     effective_scope = scope or search_cfg.get("default_scope", "all")
@@ -168,7 +173,9 @@ class memory_get_args(BaseModel):
 
 @tool(memory_get_args)
 def memory_get(id, kind="event"):
-    '''按 id 读一条完整记忆：event 返回事件行 + 全部正文消息；经验/认知/洞见返回整行。'''
+    '''按 id 读一条完整记忆：event 返回事件行 + 全部正文消息；经验/认知/洞见返回整行。
+
+id 来自 memory_search 的 items[].id（先搜再读，不要猜 id）；看原文、核对细节时用它。'''
     db = _db()          # 共享连接，勿关闭
     out = retrieval.get(db, kind, int(id))
     if not out:
@@ -190,7 +197,9 @@ class memory_recent_args(BaseModel):
 @tool(memory_recent_args)
 def memory_recent(from_at, to_at, session_id=None, limit=10,
                   *, origin_project=None):
-    '''按时间区间回放：那段时间发生了什么（事件摘要）+ 沉淀了什么（经验/认知）。'''
+    '''按时间区间回放：那段时间发生了什么（事件摘要）+ 沉淀了什么（经验/认知）。
+
+何时用：用户问「昨天 / 上周 / 那段时间」做过什么，或要给某个时间段做回顾；需要按主题找而不是按时间找时用 memory_search。'''
     db = _db()          # 共享连接，勿关闭
     hits = retrieval.recent(db, session_id or "", from_at=from_at,
                             to_at=to_at, limit=limit,

@@ -39,7 +39,7 @@ src/js/
 | 设置 → 长期记忆 | `settings.section` 槽位（`id: longmemory`） | 概况 + **模型**（三槽配置/连通性测试）+ 事件/经验/认知/洞见/自我设定/模型自述/消息/引用/工作记忆（通用表格增删查改）+ 日志 |
 | 右侧栏「长期记忆」 | `sidebarRightTabs` + 槽位 | 事件/经验/认知/洞见的只读搜索浏览（分页 + 详情） |
 | `GET /longmemory/stats` | `webServer` 前缀路由 | 概况数据（含脱敏后的三槽模型配置）；内核不可用时回 503 |
-| `POST /longmemory/api` | 同上 | 管理 API：`tables / list / get / insert / update / delete / settings.* / vec.* / self.* / core.preview` |
+| `POST /longmemory/api` | 同上 | 管理 API：`tables / list / get / insert / update / delete / settings.* / vec.* / self.* / maintenance.status / event.resummarize / insight.induce / core.preview` |
 | `POST /longmemory/test` | 同上 | 模型连通性测试：`{kind: jev|extract|embedding}`，回模型名/维度/耗时 |
 | `GET /longmemory/logs` | 同上 | `shell.log` / `kernel.stderr.log` 尾部（≤1000 行） |
 
@@ -93,12 +93,15 @@ src/js/
 | 帧构造/解析、内容块提取、路由准入、投递回滚、三槽配置、embedding 调用 | `node tests/js/unit.test.mjs` | ✅ 31 条 |
 | 生命周期（重启策略、dispose 顺序、订阅去重） | `node tests/js/shell.test.mjs` | ✅ 7 条（假内核，不需要 Python） |
 | 外壳↔内核进程契约（启动/工具/ingest/坏字节/坏信封） | `python -m unittest tests.test_shell_contract` | ✅ 11 条（复刻外壳动作；沙箱里 Node 不能管道抓子进程输出） |
-| 向量索引 / embedding 代理 / RRF 融合 / 设置脱敏 | `python -m unittest tests.test_vec tests.test_admin` | ✅ 68 条（未装 sqlite-vec 时向量用例自动 skip） |
-| 真实链路（kernel → embed.request → Ollama → vec0 → 检索） | `tests/run_vec_e2e.py`（模拟外壳） | ✅ 实测 bge-m3 1024 维，词面零重叠也能召回 |
+| 向量索引 / embedding 代理 / RRF 融合 / 设置脱敏 | `python -m unittest tests.test_vec tests.test_admin` | ✅ 75 条（未装 sqlite-vec 时向量用例自动 skip） |
+| ANN 检索（与精确 KNN 排序一致、增量同步、降级） | `python -m unittest tests.test_ann` | ✅ 7 条（未装 usearch 时整组 skip） |
+| 维护任务（重跑摘要 / 归纳洞见 / 快照） | `python -m unittest tests.test_maintenance` | ✅ 8 条 |
+| 内核预热（numpy 线程导入死锁的规避） | `python -m unittest tests.test_main` | ✅ 3 条 |
+| 真实链路（kernel → embed.request → Ollama → vec0/ANN → 检索） | `tests/run_vec_e2e.py`、`.tmp/e2e_maint.py` | ✅ 实测 bge-m3 1024 维；维护任务与洞见检索同样跑通 |
 | 打包一致性与语法 | `build_release.py --check` + `node --check` | ✅（含版本号一致性） |
 | `ctx.llm` / `ctx.tools` 两条桥 | 需在 Harness 内安装后验收 | ⏳ 见 release/README.md「验收」 |
 
-## 7. 本机安装记录（2026-11-03 安装 / 2026-11-08 更新到 0.3.1）
+## 7. 本机安装记录（2026-11-03 安装 / 2026-11-08 更新到 0.3.2）
 
 按 profile `desktop` 的既有约定安装（与 `@local/dsh-custom-mode` 的 `link:` 同型）：
 
@@ -124,7 +127,7 @@ Copy-Item release\README.md "$inst\README.md" -Force
 判断是不是硬链接：`fsutil hardlink list <安装目录>\kernel\config.py`，同时列出
 `release\kernel\config.py` 就是（改内容会同步，**新增/删除文件仍要手动处理**）。
 
-当前产物 **0.3.1**、43 个文件（`lib/` 14 个 JS + `kernel/` 21 个 py + 根 6 个 + `locale/` 2 个），
+当前产物 **0.3.2**、45 个文件（`lib/` 14 个 JS + `kernel/` 23 个 py + 根 6 个 + `locale/` 2 个），
 与 `release/` 哈希逐一相同。版本号改了之后，运行中的进程仍报旧值，**重启 Harness** 才会刷新。
 
 生效方式：**重启 Harness**（插件解析表在启动时构建；`ResolutionRouter` 对新增包也要求重启）。
@@ -139,7 +142,7 @@ Remove-Item "$prof\node_modules\@local\dsh-longmemory" -Recurse -Force
 
 已知注意点：
 
-- 当前产物 43 个文件（`lib/` 14 个 JS、`kernel/` 21 个 py、根 6 个 + `locale/` 2 个）；
+- 当前产物 45 个文件（`lib/` 14 个 JS、`kernel/` 23 个 py、根 6 个 + `locale/` 2 个）；
   同步方式见上面的「更新流程」（硬链接农场：改内容自动同步，新增文件要手动链接）；
 - 沙箱里 **Python 子进程不能写 profile 目录**（PowerShell 可以），所以安装走 PowerShell；
 - Node 在 Harness 外解析不到 `@deepseek-ai/dsh-tools|dsh-llm` 属正常：这两个是宿主提供的包，
@@ -150,3 +153,7 @@ Remove-Item "$prof\node_modules\@local\dsh-longmemory" -Recurse -Force
   的 `peerDependencies` 同样列出这些宿主包。
 - 入口模块层写一行启动痕迹到 `~/.dsh/dsh-longmemory/shell.log`：有 `module loaded`
   说明模块解析通过，后续失败才可能是运行期问题。
+- **内核启动必须先预热 numpy**（`main.warm_imports`）：Windows 下若主线程正阻塞在
+  `for line in sys.stdin`，工作线程首次 `import numpy` 会永久卡住（实测 ingest
+  永远不出 `ingest.completed`，也不报错）。`warm_imports` 在主线程先加载
+  numpy / sqlite_vec / usearch / insight / ann，工作线程只拿缓存。

@@ -9,7 +9,7 @@
          范围过滤（scope=project）在**召回前**用 memory_fts 的 origin_project 列完成，
          避免范围外条目占满 top-k
          + 向量通道：外壳把查询文本向量化后随工具调用带下来（query_vector），
-         走 sqlite-vec KNN 取 top-50（同样先按 origin_project 过滤）
+         走 ANN（usearch/HNSW）取 top-k；不可用时退回 sqlite-vec 精确 KNN
          + 联想扩展：同 subject / 同 cues 的 l3 以 0.5 分进候选（总量上限 20 条）
 ② 融合：多路 RRF(k=60)，rel = Σ 1/(60+rank)；单路时自然退化为 1/(60+rank)
 ③ 精排：final = α·rel_norm + (1-α)·Strength      α = 0.6
@@ -21,6 +21,25 @@
 `query_vector` 为空，检索完全退化成 v1 的纯词法路径，接口行为不变。
 查询向量由**外壳**算（`src/js/tools-bridge.js` 调 `embedTexts`），内核只在
 `tools.calls` 里接收，避免主循环阻塞在 HTTP 上。
+
+### 1.1 ANN 加速层（usearch / HNSW）
+
+`vec0` 是**事实源**，ANN 是**进程内缓存**（`src/ann.py`）：
+
+- 首次检索按 kind 全量装载 `vec_*` 表（当前 43 条经验 <10ms；万级条目 1s 量级），
+  之后按 `Database.take_vec_changes()` 的差量（新增/覆盖/删除）增量同步；
+- 不落盘：进程重启后从 `vec0` 重建，避免索引与库不一致；
+- 缓存按**数据库实例**隔离（`WeakKeyDictionary`），多个库同时打开不会串；
+- 项目过滤用「过量取数 + Python 过滤」：先取 `k*8`，不够就翻倍，
+  直到够 k 条或取完整个索引（HNSW 没有原生过滤，本项目「本项目 + 通用」
+  集合很小，这样最稳）；
+- `usearch`/`numpy` 缺失、维度不符、检索异常 → 自动退回 `vec_search` 精确 KNN，
+  只在日志留 `db.ann_search_failed`；
+- 入库与查询都做**单位化**（`Database._vec_unit`）：`vec0` 的 L2 与 usearch 的
+  cos 只有在向量等长时排序才一致，否则两条路径会给出不同名次。
+
+实测（43 经验 / 55 认知，bge-m3 1024 维）：ANN 与精确 KNN 的 top-k 顺序逐条一致；
+项目过滤结果一致；覆盖写与删除后下一次检索即生效。
 
 两条实现约束（2026-11-03 修）：
 
@@ -89,24 +108,25 @@ AND (:scope = 'all' OR origin_project IS NULL OR origin_project = :current_proje
 - 时间比较走 SQLite `datetime()`，`+08:00` 与 `+00:00` 混存不会错 8 小时；
 - 参数非法（无法解析 / from > to）返回 `-32602`，不再是 `-32603` 内部错误。
 
-## 5. v1 / v2
+## 5. v1 / v2 / v3
 
 | 版本 | 召回 | 说明 |
 |---|---|---|
 | v1 | FTS + 元数据联想 | 无新依赖 |
-| v2（当前） | FTS + sqlite-vec KNN + 元数据联想，RRF 融合 | 依赖 `sqlite-vec` 与 embedding 端点；任一缺失自动退回 v1 |
+| v2 | FTS + sqlite-vec 精确 KNN + 元数据联想，RRF 融合 | 依赖 `sqlite-vec` 与 embedding 端点 |
+| v3（当前） | 同 v2，向量通道走 usearch/HNSW（ANN），`vec0` 保留为事实源与降级路径 | 额外依赖 `usearch` + `numpy`；任一层缺失自动降级，接口不变 |
 
 实测（bge-m3 本地 Ollama，1024 维）：词面零重叠的查询（`borderWidth` vs
 「边框粗细保持一致」）只能靠向量通道召回；`vec.reindex` 重建后
-`vec.status` 显示各表条数，检索结果里两路都命中的条目 RRF 分更高。
+`vec.status` 显示各表条数与 ANN 后端，检索结果里两路都命中的条目 RRF 分更高。
 
 ## 6. 已知限制
 
 - FTS5 `trigram` 要求查询 ≥3 字符，短查询走 `LIKE` 全表扫描（当前数据量下可接受）；
   短查询的 `%`/`_` 已转义，并按「标题命中优先、正文更短优先」排序，
   否则 top-k 会退化成表的插入顺序；
-- 向量检索目前是**暴力 KNN**（sqlite-vec `vec0`，无 ANN 索引）：万级条目以内可接受，
-  再往上需要换 ANN（HNSW/IVF）或分片；
+- ANN 索引是**进程内缓存**：重启后首次检索要全量装载（万级约 1s），
+  换来的是不需要维护索引与库的同步；条目量再上一个量级时应改成落盘 + 版本校验；
 - 查询向量由外壳现算（约 30ms 热态、首次加载模型 3s+），冷启动首次检索会明显变慢；
 - `related_events` 目前没有写入方，联想扩展先用「同 subject / 同 cues」替代；
 - 探索位是确定性选取（按分数取冷条目），不做随机扰动，便于测试复现。

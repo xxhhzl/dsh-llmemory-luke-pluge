@@ -294,7 +294,16 @@ CREATE VIRTUAL TABLE vec_experience USING vec0(
   KNN 的 top-k 名额；记忆行本身仍然保留。
 - 检索：`retrieval._candidates` 把 FTS 名次与向量名次用 RRF（k=60）融合，
   `rel = 1/(60+rank)`，两路都命中的条目自然更靠前；`scope=project` 时
-  KNN 过滤 `origin_project = 本项目` 再并入 `origin_project = ''`（通用条目）。
+  过滤 `origin_project = 本项目` 再并入 `origin_project = ''`（通用条目）。
+- 检索入口是 `Database.search_vectors`：优先 **ANN**（`src/ann.py`，usearch/HNSW
+  进程内缓存），不可用或异常时退回 `vec_search` 的精确 KNN；两条路径都只用名次，
+  不做绝对距离阈值判断。
+- **向量单位化**：`vec_upsert` 与查询都经 `_vec_unit` 归一化。`vec0` 的 L2 距离与
+  usearch 的 cosine 距离只有在向量等长时排序才一致；不归一化会出现
+  「ANN 与精确 KNN 结论不同」的假 bug。
+- ANN 增量同步：`vec_upsert` / `_vec_remove` 往 `_vec_changes[kind]` 记 id，
+  ANN 下次检索时 `take_vec_changes()` 取走差量（覆盖写先摘旧向量再加新的），
+  首次使用按 kind 全量装载 `vec_*`。缓存按数据库实例隔离，不落盘。
 
 ## 插件设置（app_setting）
 

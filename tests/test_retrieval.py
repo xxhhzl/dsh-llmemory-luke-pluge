@@ -161,7 +161,40 @@ class TestGet(RetrievalCase):
         out = retrieval.get(self.db, "event", event)
         self.assertEqual(out["event"]["id"], event)
         self.assertEqual(out["messages"][0]["content"], "改边框")
+        self.assertFalse(out["truncated"])
+        self.assertIsNone(out["next_msg_offset"])
+        self.assertEqual(out["total_chars"], 3)
         self.assertEqual(self.db.get_event(event).cnt, 1)     # 再认也算使用
+
+    def test_event_body_pages_without_loss_or_duplication(self):
+        event = self.add_event("长事件", "摘要")
+        from database import Memory, Message
+        for index, content in enumerate(("12345", "abcde", "最后一条")):
+            msg_id = f"page_{index}"
+            self.db.insert_message(Message(
+                session_id=S1, message_id=msg_id, owner="a", seq=index,
+                role="user", content=content, occur_at=iso(), created_at=iso()))
+            self.db.insert_memory(Memory(
+                session_id=S1, message_id=msg_id, owner="a", seq=index,
+                occur_at=iso(), created_at=iso()))
+            self.db.bind_event(S1, msg_id, event)
+
+        first = retrieval.get(self.db, "event", event, max_chars=10)
+        self.assertEqual([m["content"] for m in first["messages"]],
+                         ["12345", "abcde"])
+        self.assertTrue(first["truncated"])
+        self.assertEqual(first["next_msg_offset"], 2)
+        self.assertEqual(first["total_chars"], 14)
+
+        second = retrieval.get(self.db, "event", event, max_chars=1,
+                               msg_offset=first["next_msg_offset"])
+        self.assertEqual([m["content"] for m in second["messages"]], ["最后一条"])
+        self.assertFalse(second["truncated"])
+        self.assertIsNone(second["next_msg_offset"])
+
+        full = retrieval.get(self.db, "event", event, max_chars=0)
+        self.assertEqual(len(full["messages"]), 3)
+        self.assertFalse(full["truncated"])
 
 
 class TestTools(RetrievalCase):

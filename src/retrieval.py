@@ -191,12 +191,15 @@ def _candidates(db: database.Database, query: str, origin_project: str | None,
     '''
     wanted = set(kinds)
     fts_rank: dict = {}
+    excerpts: dict = {}
     hits = [item for item in db.search_fts(
                 query, limit=RECALL_LIMIT, origin_project=origin_project,
                 restrict_project=(scope == "project"))
             if item["ref_kind"] in wanted]
     for rank, item in enumerate(hits):
         fts_rank.setdefault((item["ref_kind"], int(item["ref_id"])), rank)
+        if item.get("excerpt"):
+            excerpts[(item["ref_kind"], int(item["ref_id"]))] = item["excerpt"]
 
     vec_rank: dict = {}
     if query_vector and getattr(db, "_vec_enabled", False):
@@ -228,7 +231,8 @@ def _candidates(db: database.Database, query: str, origin_project: str | None,
             if (kind, row_id) in vec_rank:
                 score += 1.0 / (60 + vec_rank[(kind, row_id)])
             found[(kind, row_id)] = {"row": row, "rel": score or 0.001,
-                                     "assoc": 1.0}
+                                     "assoc": 1.0,
+                                     "excerpt": excerpts.get((kind, row_id))}
 
     associated = 0
     for (kind, _row_id), entry in list(found.items()):
@@ -315,7 +319,8 @@ def _score(found: dict, weights: dict, origin_project: str | None) -> list:
                     + 0.05 * entry["assoc"])
         strength *= _reliability(record, kind)      # 待复核 / 低可信条目降权
         total = weights["alpha"] * rel_norm[key] + (1 - weights["alpha"]) * strength
-        scored.append((total, kind, row_id, record, entry["assoc"]))
+        scored.append((total, kind, row_id, record, entry["assoc"],
+                       entry.get("excerpt")))
     scored.sort(key=lambda item: (-item[0], item[1], item[2]))
     return scored
 
@@ -397,10 +402,14 @@ def search(db: database.Database, query: str, *, origin_project: str | None = No
     selected = _select(scored, limit, weights)
 
     hits = []
-    for total, kind, row_id, record, assoc in selected:
+    for total, kind, row_id, record, assoc, excerpt in selected:
+        meta = _meta(record, kind, {"assoc": assoc})
+        if excerpt:
+            # FTS 命中片段：确认「有没有聊到 X」通常不必再读全文。
+            # 仅向量/联想召回的条目不伪造摘录。
+            meta["excerpt"] = excerpt
         hits.append(Hit(kind=kind, id=row_id, title=_title(record, kind),
-                        text=_text(record, kind), score=total,
-                        meta=_meta(record, kind, {"assoc": assoc})))
+                        text=_text(record, kind), score=total, meta=meta))
     if touch:
         _touch(db, hits)
     return hits
@@ -422,8 +431,8 @@ def _touch(db: database.Database, hits: list) -> None:
         db.touch_insights(insights)
 
 
-def recent(db: database.Database, session_id: str, *, from_at: str, to_at: str,
-           limit: int = 20, origin_project: str | None = None,
+def recent(db: database.Database, session_id: str | None, *, from_at: str,
+           to_at: str, limit: int = 20, origin_project: str | None = None,
            touch: bool = False) -> list:
     '''
     按时间区间取事件摘要与 l3，供 memory_recent 使用。
@@ -435,6 +444,8 @@ def recent(db: database.Database, session_id: str, *, from_at: str, to_at: str,
     - 两者**独立配额**：事件占 limit − l3 配额，l3 最多 3 条。
       旧实现混排后按固定分排序再截断，事件恒 1.0 > l3 恒 0.5，事件一多 l3 就全灭。
 
+    :param session_id: None 表示**跨会话**回放（「我之前让你做什么」这种
+                       问题不该被会话边界挡住）；传值则只看该会话。
     :raise ValueError: 时间无法解析或 from > to（由 tools 层转 -32602）
     '''
     start, end = _parse(from_at), _parse(to_at)
@@ -457,7 +468,8 @@ def recent(db: database.Database, session_id: str, *, from_at: str, to_at: str,
         hits.append(Hit(kind="event", id=span.event.id, title=span.event.title,
                         text=span.event.summary or "", score=1.0,
                         meta={"span": {"from": span.first_at, "to": span.last_at},
-                              "session_id": session_id,
+                              # 跨会话回放时用事件自身的归属会话，不是传入的过滤值
+                              "session_id": span.event.session_id,
                               "use_count": int(span.event.cnt or 0)}))
 
     for kind, rows in (
@@ -475,18 +487,47 @@ def recent(db: database.Database, session_id: str, *, from_at: str, to_at: str,
     return hits[:limit]
 
 
-def get(db: database.Database, kind: str, item_id: int, *, touch: bool = True) -> dict:
-    '''再认：按 id 直取。event 返回事件 + 正文消息，l3 返回整行。'''
+def get(db: database.Database, kind: str, item_id: int, *, touch: bool = True,
+        max_chars: int = 8000, msg_offset: int = 0) -> dict:
+    '''
+    再认：按 id 直取。event 返回事件 + 正文消息，l3 返回整行。
+
+    事件正文默认最多 8000 字符，按消息顺序整页返回；用 next_msg_offset
+    续读，不丢、不重。max_chars=0 保留旧的「全部正文」行为。
+    '''
     if kind == "event":
         event = db.get_event(item_id)
         if event is None:
             return {}
-        messages = [{"msg_id": row.message_id, "seq": row.seq, "role": row.role,
-                     "content": row.content, "occur_at": row.occur_at}
-                    for row in db.list_event_messages(item_id)]
+        rows = db.list_event_messages(item_id)
+        total_chars = sum(len(row.content or "") for row in rows)
+        offset = max(0, min(int(msg_offset), len(rows)))
+        budget = max(0, int(max_chars))
+        messages = []
+        used_chars = 0
+        next_offset = offset
+        for index in range(offset, len(rows)):
+            row = rows[index]
+            content = row.content or ""
+            # 即使首条超长也至少返回一条；下一条从 next_offset 继续。
+            # 字符预算按完整消息计算，避免同一消息在分页里重复/漏字。
+            if messages and budget and used_chars + len(content) > budget:
+                break
+            messages.append({"msg_id": row.message_id, "seq": row.seq,
+                             "role": row.role, "content": content,
+                             "occur_at": row.occur_at})
+            used_chars += len(content)
+            next_offset = index + 1
+            if budget and used_chars >= budget:
+                break
         if touch:
             db.bump_events([item_id])
-        return {"kind": "event", "event": event.to_dict(), "messages": messages}
+        truncated = next_offset < len(rows)
+        return {"kind": "event", "event": event.to_dict(),
+                "messages": messages, "msg_offset": offset,
+                "next_msg_offset": next_offset if truncated else None,
+                "truncated": truncated, "total_chars": total_chars,
+                "returned_chars": used_chars, "max_chars": budget}
     if kind in ("experience", "cognition"):
         row = _fetch(db, kind, item_id)
         if row is None:

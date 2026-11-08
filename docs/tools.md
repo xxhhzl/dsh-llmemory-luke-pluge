@@ -86,13 +86,15 @@ FTS5 trigram 召回 top-50（<3 字符退回 LIKE，按标题命中优先排序�
 | `items[].meta.use_count` | integer | 使用次数（事件为 `cnt`） |
 | `items[].meta.session_id` | string | 仅事件：来源会话 |
 | `items[].meta.assoc` | number | 1 = 直接命中，0.5 = 联想扩展 |
+| `items[].meta.excerpt` | string | 仅 FTS 命中时有：命中词前后约 80 字符的摘录；「有没有聊到 X」可先看它，无需读全文 |
+| `next_action_hint` | string | 下一步建议：无结果时引导跨会话时间回放；有事件时引导按需 `memory_get`；l3 结果已含完整正文 |
 | `count` / `scope` / `limit` | — | 返回条数 / 实际生效范围 / 实际生效 limit |
 
 ---
 
 ## 2. `memory_get`
 
-**作用**：按 id 取一条记忆——`event` 返回事件与全部正文消息，l3 返回整行；找不到返回 `1003`。
+**作用**：按 id 取一条记忆——`event` 返回事件与正文消息，l3 返回整行；找不到返回 `1003`。回答需要具体名称、命令、数字或 URL 时，应读原文而不是只复述搜索摘要。
 
 **输入**
 
@@ -100,6 +102,8 @@ FTS5 trigram 召回 top-50（<3 字符退回 LIKE，按标题命中优先排序�
 |---|---|---|---|---|
 | `id` | integer | 是 | — | 条目主键（事件或 l3） |
 | `kind` | enum(`event`,`experience`,`cognition`,`insight`) | 否 | `event` | 取哪类对象 |
+| `max_chars` | integer | 否 | 8000 | 事件正文单次字符预算（0–100000）；`0` = 一次返回全部。截断时续读即可，不必调大 |
+| `msg_offset` | integer | 否 | 0 | 正文消息起点；续读时原样传上一页的 `next_msg_offset` |
 
 **返回**
 
@@ -107,7 +111,11 @@ FTS5 trigram 召回 top-50（<3 字符退回 LIKE，按标题命中优先排序�
 |---|---|---|
 | `kind` | enum | 回显类型 |
 | `event` | object | 仅事件：事件行（`id`/`title`/`summary`/`cnt`/`origin_project`/`summarized_at`/`needs_review`…） |
-| `messages[]` | object[] | 仅事件：按 `seq` 升序的正文消息（`msg_id`/`role`/`content`/`occur_at`） |
+| `messages[]` | object[] | 仅事件：按 `seq` 升序的正文消息（`msg_id`/`seq`/`role`/`content`/`occur_at`），整消息入页、不截半条 |
+| `truncated` | boolean | 仅事件：后面是否还有未返回的正文 |
+| `next_msg_offset` | integer \| null | 仅事件：下一页起点；`truncated=false` 时为 `null` |
+| `msg_offset` / `max_chars` | integer | 本页起点与字符预算 |
+| `total_chars` / `returned_chars` | integer | 事件全部正文字符数 / 本页字符数，便于评估要读几页 |
 | `item` | object | 仅 l3：整行（`content`/`kind`/`confidence`/`importance`/`origin_session`/`origin_project`/`source_event_id`/`status`/`valid_to`/`use_count`/`last_used_at`/`created_at`） |
 
 再认也计一次使用：事件 `cnt+1`、l3 `use_count+1` 并刷新 `last_used_at`。
@@ -122,6 +130,7 @@ FTS5 trigram 召回 top-50（<3 字符退回 LIKE，按标题命中优先排序�
 
 - **事件**：发生区间（关联消息 `occur_at` 的 min/max）与查询区间相交即返回，按结束时间倒序；
 - **经验 / 认知**：按**入库时间** `created_at` 落在区间内返回——是「那段时间沉淀了什么」，不是「事情发生在何时」；补录的历史条目会显示为入库那天，这是刻意接受的语义；
+- **跨会话**：`session_id` **省略 = 跨会话回放全部事件**——「我之前/下午让你做什么」这类时间线问题不该被会话边界挡住；只有明确要限定某会话时才传。跨会话时 `items[].meta.session_id` 是事件自身的归属会话；
 - **独立配额**：`l3_quota = min(3, limit)`，事件占 `limit - l3_quota`；
 - 时间比较走 `datetime()`，`+08:00` 与 `+00:00` 混存不会错 8 小时；
 - 参数非法（无法解析 / `from_at > to_at`）→ `-32602`。
@@ -132,7 +141,7 @@ FTS5 trigram 召回 top-50（<3 字符退回 LIKE，按标题命中优先排序�
 |---|---|---|---|---|
 | `from_at` | string | 是 | — | 区间起点（含） |
 | `to_at` | string | 是 | — | 区间终点（含） |
-| `session_id` | string \| null | 否 | 信封里的当前会话 | 限定会话 |
+| `session_id` | string \| null | 否 | **None = 跨会话回放全部事件**（默认；不再自动回填信封里的当前会话） | 限定会话；只在明确要看某会话时传 |
 | `limit` | integer | 否 | 10 | 1–50 |
 
 **返回**：`items[]`（`kind` / `id` / `title` / `text` / `score` / `meta.span|created_at|use_count`）+ `count`。
@@ -179,8 +188,11 @@ FTS5 trigram 召回 top-50（<3 字符退回 LIKE，按标题命中优先排序�
 | `tools.schema` 的 `parameters` 内包含 `required` / `additionalProperties` | ✅（`test_tool_definition_shape`） |
 | 执行时校验，非法枚举回 -32602 | ✅（`test_illegal_scope_rejected` 等） |
 | `limit` 运行时按配置收敛并回显 | ✅（`test_limit_clamped_to_config`） |
-| 信封上下文注入且不覆盖显式参数 | ✅（`test_session_id_falls_back_to_envelope`） |
+| 信封上下文注入且不覆盖显式参数 | ✅（`test_session_id_falls_back_to_envelope`；`memory_recent` 例外——其缺省即跨会话，见 §3） |
 | 找不到目标返回 1003 | ✅（`test_memory_get_missing_returns_1003`） |
+| `memory_get` 分页不丢不重 | ✅（`test_event_body_pages_without_loss_or_duplication`） |
+| 跨会话回放不继承信封会话 | ✅（`test_default_does_not_inherit_envelope_session`） |
+| 空结果带下一步建议 | ✅（`test_empty_result_points_to_recent`） |
 
 ---
 
@@ -189,12 +201,13 @@ FTS5 trigram 召回 top-50（<3 字符退回 LIKE，按标题命中优先排序�
 | 项 | 说明 |
 |---|---|
 | `memory_note` | 显式写入经验/认知（`content` / `kind` / `importance` / `related_event_ids`），带相似内容合并。落点与去重口径未定 |
-| `memory_get` 的 `start`/`end` 窗口 | 按码点取正文窗口，当前一次返回完整 `content` |
 | `memory_search` 的 `kinds` 数组 | 当前只支持单值 `kind` |
 | `memory_search` 的 `since` / `until` | 时间过滤，当前由 `memory_recent` 承担 |
 | `memory_recent` 的 `from` / `to` 可选与 `min_overlap_seconds` | 当前起止必填 |
-| 返回体的 `counts` / `total` / `truncated` | 当前只回 `count` |
 | 字符串 id（`e12` / `n_7`） | 当前一律整数主键 |
+
+> 已落地并从 Backlog 移入正文：`memory_get` 的 `max_chars` / `msg_offset` 分页续读，
+> 以及 `memory_search` 结果的 `meta.excerpt` 与 `next_action_hint`。
 
 ---
 

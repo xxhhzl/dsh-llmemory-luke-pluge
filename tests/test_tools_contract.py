@@ -108,6 +108,60 @@ class TestNotFound(ContractCase):
         self.assertEqual(out["error"]["code"], 1003)
 
 
+class TestCrossSessionRecent(ContractCase):
+    def test_default_does_not_inherit_envelope_session(self):
+        from database import Memory, Message
+        event = self.db.create_event("another_session", "查 B 站插件")
+        self.db.insert_message(Message(
+            session_id="another_session", message_id="cross_1", owner="a", seq=1,
+            role="user", content="查插件", occur_at="2026-11-03T02:00:00+00:00",
+            created_at="2026-11-03T02:00:00+00:00"))
+        self.db.insert_memory(Memory(
+            session_id="another_session", message_id="cross_1", owner="a", seq=1,
+            occur_at="2026-11-03T02:00:00+00:00",
+            created_at="2026-11-03T02:00:00+00:00"))
+        self.db.bind_event("another_session", "cross_1", event.id)
+        args = {"from_at": "2026-11-03T01:00:00+00:00",
+                "to_at": "2026-11-03T03:00:00+00:00"}
+        out = self.call([{"call_id": "c1", "name": "memory_recent",
+                          "arguments": args}])[0]
+        self.assertTrue(out["ok"])
+        self.assertEqual([item["id"] for item in out["data"]["items"]], [event.id])
+        self.assertEqual(out["data"]["items"][0]["meta"]["session_id"],
+                         "another_session")
+
+        # 显式传当前会话才限定范围，另一个会话的事件应被排除。
+        args["session_id"] = S1
+        scoped = self.call([{"call_id": "c2", "name": "memory_recent",
+                             "arguments": args}])[0]
+        self.assertEqual(scoped["data"]["count"], 0)
+
+
+class TestSearchHintsAndExcerpt(ContractCase):
+    def test_empty_result_points_to_recent(self):
+        out = self.call([{"call_id": "c1", "name": "memory_search",
+                          "arguments": {"query": "绝无此条记忆"}}])[0]
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["data"]["count"], 0)
+        self.assertIn("memory_recent", out["data"]["next_action_hint"])
+        self.assertIn("跨会话", out["data"]["next_action_hint"])
+
+    def test_hit_excerpt_and_drilldown_hint(self):
+        self.add_cognition("用户偏好 PowerShell 命令，并核实网上资料真实性")
+        out = self.call([{"call_id": "c1", "name": "memory_search",
+                          "arguments": {"query": "PowerShell"}}])[0]
+        self.assertEqual(out["data"]["count"], 1)
+        item = out["data"]["items"][0]
+        self.assertIn("PowerShell", item["meta"]["excerpt"])
+        self.assertIn("source_event_id", out["data"]["next_action_hint"])
+
+    def test_excerpt_clips_around_hit(self):
+        self.add_cognition("前缀内容" * 30 + " PowerShell " + "后缀内容" * 30)
+        out = self.call([{"call_id": "c1", "name": "memory_search",
+                          "arguments": {"query": "PowerShell"}}])[0]
+        self.assertIn("…", out["data"]["items"][0]["meta"]["excerpt"])
+
+
 class TestScopePassthrough(ContractCase):
     """范围是数据属性：信封里的 origin_project 决定项目的可见集。"""
 

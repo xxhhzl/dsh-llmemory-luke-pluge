@@ -10,6 +10,8 @@
          避免范围外条目占满 top-k
          + 向量通道：外壳把查询文本向量化后随工具调用带下来（query_vector），
          走 ANN（usearch/HNSW）取 top-k；不可用时退回 sqlite-vec 精确 KNN
+         + HyDE（外壳侧）：词法+向量都零命中时，外壳用提取槽模型生成假想回答、
+         重算向量后重试一次（call_id 带 -h）；命中才采用——内核零改动
          + 联想扩展：同 subject / 同 cues 的 l3 以 0.5 分进候选（总量上限 20 条）
 ② 融合：多路 RRF(k=60)，rel = Σ 1/(60+rank)；单路时自然退化为 1/(60+rank)
 ③ 精排：final = α·rel_norm + (1-α)·Strength      α = 0.6
@@ -92,9 +94,9 @@ AND (:scope = 'all' OR origin_project IS NULL OR origin_project = :current_proje
 
 | 工具 | 行为 |
 |---|---|
-| `memory_search(query, limit, kind?, scope?)` | 上面的检索，返回 `{items, count}` |
-| `memory_get(id, kind)` | 再认：event 返回事件 + 全部消息；l3 返回整行；计一次使用 |
-| `memory_recent(session_id, from_at, to_at, limit)` | 时间区间：事件按区间相交，l3 按 `created_at`（入库时间）；两类**独立配额**，l3 最多 3 条 |
+| `memory_search(query, limit, kind?, scope?)` | 上面的检索，返回 `{items, count}`；FTS 命中的条目带 `meta.excerpt`，返回体带 `next_action_hint` |
+| `memory_get(id, kind, max_chars?, msg_offset?)` | 再认：event 返回事件 + 正文（默认 8000 字符分页，`next_msg_offset` 续读）；l3 返回整行；计一次使用 |
+| `memory_recent(session_id?, from_at, to_at, limit)` | 时间区间：事件按区间相交，l3 按 `created_at`（入库时间）；两类**独立配额**，l3 最多 3 条；**session_id 省略 = 跨会话回放**（0.4.0 起） |
 
 返回条目：`{kind, id, title, text, score, meta{importance, confidence, origin_project, use_count, ...}}`。
 
@@ -108,13 +110,14 @@ AND (:scope = 'all' OR origin_project IS NULL OR origin_project = :current_proje
 - 时间比较走 SQLite `datetime()`，`+08:00` 与 `+00:00` 混存不会错 8 小时；
 - 参数非法（无法解析 / from > to）返回 `-32602`，不再是 `-32603` 内部错误。
 
-## 5. v1 / v2 / v3
+## 5. v1 / v2 / v3 / v4
 
 | 版本 | 召回 | 说明 |
 |---|---|---|
 | v1 | FTS + 元数据联想 | 无新依赖 |
 | v2 | FTS + sqlite-vec 精确 KNN + 元数据联想，RRF 融合 | 依赖 `sqlite-vec` 与 embedding 端点 |
-| v3（当前） | 同 v2，向量通道走 usearch/HNSW（ANN），`vec0` 保留为事实源与降级路径 | 额外依赖 `usearch` + `numpy`；任一层缺失自动降级，接口不变 |
+| v3 | 同 v2，向量通道走 usearch/HNSW（ANN），`vec0` 保留为事实源与降级路径 | 额外依赖 `usearch` + `numpy`；任一层缺失自动降级，接口不变 |
+| v4（当前） | 同 v3 + 零命中 HyDE 重试（外壳侧假想文档向量）+ 摘要第二句保留具体产出值 | HyDE 只在零命中且向量通道可用时触发，正常命中不多花模型调用 |
 
 实测（bge-m3 本地 Ollama，1024 维）：词面零重叠的查询（`borderWidth` vs
 「边框粗细保持一致」）只能靠向量通道召回；`vec.reindex` 重建后

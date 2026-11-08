@@ -79,6 +79,22 @@ class TestRecentEvents(RecentCase):
                                 to_at="2026-11-03T03:00:00+00:00")
         self.assertEqual(len(hits), 1)
 
+    def test_cross_session_replay_and_explicit_filter(self):
+        first = add_event(self.db, "上午会话", "查插件",
+                          ["2026-11-03T10:00:00+08:00"], session=S1)
+        second = add_event(self.db, "下午会话", "审查记忆插件",
+                           ["2026-11-03T10:05:00+08:00"], session="s_recent_2")
+        window = {"from_at": "2026-11-03T09:00:00+08:00",
+                  "to_at": "2026-11-03T11:00:00+08:00"}
+
+        across = retrieval.recent(self.db, None, **window)
+        self.assertEqual([hit.id for hit in across], [second, first])
+        self.assertEqual([hit.meta["session_id"] for hit in across],
+                         ["s_recent_2", S1])
+
+        only_second = retrieval.recent(self.db, "s_recent_2", **window)
+        self.assertEqual([hit.id for hit in only_second], [second])
+
 
 class TestRecentL3(RecentCase):
     def test_l3_inside_window_returned(self):

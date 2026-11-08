@@ -148,8 +148,16 @@ window.__ModuleLoader__.load({
     }
     ensureStyles()
 
-    /** 统一按钮：semantic 变体 + 禁用态（内联样式做不到 :hover/:disabled）。 */
-    function Btn({ variant, active, children, ...rest }) {
+    /**
+     * 统一按钮。
+     *
+     * 注意调用姿势：本文件的组件是**直接当函数调用**的（`Btn({...}, '文字')`）。
+     * React 只会在渲染时传一个 props 对象，所以文字可能在第 2 个参数里，
+     * 也可能在 props.children 里——两种都要收，否则按钮会渲染成空心胶囊。
+     */
+    function Btn(props = {}, ...inlineChildren) {
+      const { variant, active, children: propChildren, ...rest } = props
+      const content = inlineChildren.length ? inlineChildren : propChildren
       const cls = ['lm-btn']
       if (variant === 'primary') cls.push('lm-btn--primary')
       if (variant === 'danger') cls.push('lm-btn--danger')
@@ -159,7 +167,7 @@ window.__ModuleLoader__.load({
         ...rest,
         className: cls.join(' '),
         ...(variant === 'tab' ? { 'data-active': active ? 'true' : 'false' } : {}),
-      }, children)
+      }, content)
     }
 
     /** 空态：表/列表没有数据时别留一片空白。 */

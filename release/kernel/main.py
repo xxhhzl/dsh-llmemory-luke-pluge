@@ -68,6 +68,28 @@ def drain(q: base.message_queue):
     sys.stdout.flush()
 
 
+def warm_imports() -> list:
+    '''
+    在主线程预热重依赖（C 扩展）。
+
+    实测（Windows + numpy 2.5.x，venv 与系统 Python 都能复现）：当主线程正
+    阻塞在 `for line in sys.stdin` 上时，**工作线程首次 import numpy 会死锁**。
+    内核的 ingest / 维护线程会经由 `sqlite_vec`、`insight`、`ann` 间接导入
+    numpy 与 usearch，所以在起线程之前先在这里加载一遍：之后工作线程拿到的
+    只是已缓存的模块，不再触发导入。
+
+    :return: 预热失败的模块名（缺依赖属正常，调用方只记日志）
+    '''
+    failed = []
+    for name in ("numpy", "sqlite_vec", "usearch.index", "insight", "ann"):
+        try:
+            __import__(name)
+        except Exception as exc:              # 缺包/平台不支持都不该拦启动
+            failed.append(name)
+            base.log.debug("warm_import_skipped", module=name, error=repr(exc))
+    return failed
+
+
 def main():
     # errors='replace'：外壳或第三方写进来的半个多字节字符不能让整个内核退出。
     # 逐帧解析仍会拒绝坏 JSON，只是不再因为一个字节打死进程。
@@ -79,6 +101,7 @@ def main():
 
     # 日志：stderr + store.db_path 同目录的 longmemory.log；stdout 只走协议帧
     base.setup_logging()
+    warm_imports()
 
     # 预处理
     message_q: base.message_queue = base.message_queue(

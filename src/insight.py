@@ -10,6 +10,8 @@
 
 流程：
 1. `clusters()`：按主线索（cues[0]）分组，只保留 ≥ min_support 条的组；
+   `semantic_clusters()`：按向量余弦相似度分组（线索不同、说的是同一件事也能成组），
+   `all_clusters()` 合并两路——实测首线索极度分散，光靠 cue 攒不出可归纳的簇；
 2. `build_messages()`：把一组经验压成一次请求；
 3. `parse_insights()`：校验证据 id 必须来自输入、至少 2 条支撑、规则非空；
 4. `induce()`：调用模型 → 解析 → 写 insight 表 + FTS。
@@ -24,7 +26,13 @@ import database
 
 MAX_CLUSTER_ROWS = 8          # 一次归纳最多喂多少条经验
 MAX_CONTENT = 200
+SEMANTIC_THRESHOLD = 0.65     # 余弦相似度阈值（实测 0.65 能把同主题经验分到一组）
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.S)
+
+try:                          # 语义聚类依赖 numpy；缺了只跳过这一路
+    import numpy as _np
+except Exception:             # pragma: no cover - 环境相关
+    _np = None
 
 INDUCTION_SYSTEM_PROMPT = """【角色】你是长期记忆的「经验归纳器」：把多条具体经验提炼成更通用、可迁移的规则。
 
@@ -163,38 +171,117 @@ def parse_insights(raw: str, rows: list) -> list:
     return result
 
 
-def induce(db: database.Database, transport, *, min_support: int = 3,
-           max_clusters: int = 5, commit: bool = True) -> list:
+def semantic_clusters(db: database.Database, *, min_support: int = 3,
+                      limit: int = 10,
+                      threshold: float = SEMANTIC_THRESHOLD) -> list:
     '''
-    跑一轮归纳：每个足够大的线索簇一次模型调用。
+    按经验向量的余弦相似度聚类：线索不同但说的是同一件事的经验也能归到一组。
+
+    为什么需要第二路：`cues[0]` 是模型随手写的第一个线索词，实测 37 条经验
+    分散在 35 个不同首线索上（≥3 条的组为 0），光靠 cue 永远攒不出可归纳的簇；
+    而向量相似度能稳定找出「OLLAMA_MODELS 相关」「模型槽拆分」这类主题组。
+    '''
+    if _np is None:
+        return []
+    rows = {row.id: row for row in db.list_experiences(limit=500)
+            if getattr(row, "status", "active") == "active"}
+    blobs = db.list_vec_blobs("experience")
+    ids = [ref_id for ref_id in sorted(blobs) if ref_id in rows]
+    if len(ids) < max(2, int(min_support)):
+        return []
+    matrix = _np.asarray([_np.frombuffer(blobs[ref_id], dtype=_np.float32)
+                          for ref_id in ids], dtype=_np.float32)
+    norms = _np.linalg.norm(matrix, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    matrix = matrix / norms
+
+    assigned: set = set()
+    groups = []
+    for index, seed in enumerate(ids):
+        if seed in assigned:
+            continue
+        similarity = matrix @ matrix[index]
+        members = [ref_id for position, ref_id in enumerate(ids)
+                   if ref_id not in assigned
+                   and float(similarity[position]) >= float(threshold)]
+        if len(members) < max(2, int(min_support)):
+            continue
+        order = {ref_id: position for position, ref_id in enumerate(ids)}
+        members.sort(key=lambda ref_id: -float(similarity[order[ref_id]]))
+        groups.append((f"语义:{seed}", [rows[ref_id] for ref_id in members]))
+        assigned.update(members)
+        if len(groups) >= int(limit):
+            break
+    return groups
+
+
+def all_clusters(db: database.Database, *, min_support: int = 3,
+                 limit: int = 10,
+                 threshold: float = SEMANTIC_THRESHOLD) -> list:
+    '''两路聚类合并：先 cue 簇，再补语义簇（集合重复的跳过）。'''
+    groups = clusters(db, min_support=min_support, limit=limit)
+    seen = [frozenset(row.id for row in rows) for _, rows in groups]
+    for label, rows in semantic_clusters(db, min_support=min_support,
+                                         limit=limit, threshold=threshold):
+        key = frozenset(row.id for row in rows)
+        if any(key <= existing for existing in seen):
+            continue
+        seen.append(key)
+        groups.append((label, rows))
+    groups.sort(key=lambda item: (-len(item[1]), item[0]))
+    return groups[:max(1, int(limit))]
+
+
+def induce(db: database.Database, transport, *, min_support: int = 3,
+           max_clusters: int = 5, commit: bool = True,
+           threshold: float = SEMANTIC_THRESHOLD, groups: list | None = None,
+           progress=None) -> list:
+    '''
+    跑一轮归纳：每个足够大的簇一次模型调用。
 
     :param transport: 与 summary.SummaryTransport 兼容（`complete(messages)`）
     :param commit: False 时只返回归纳结果、不落库（用于演练/对比）
+    :param groups: 预先算好的簇（维护任务要靠它先知道 total 再报进度）
+    :param progress: 每处理完一个簇回调 `progress(done, total, item)`
     :return: [{"cluster": cue, "insights": [...], "ids": [...] 或 "error": ...}]
     '''
+    if groups is None:
+        groups = all_clusters(db, min_support=min_support,
+                              limit=max_clusters, threshold=threshold)
+    total = len(groups)
+    # 已有洞见正文：多个簇常收出同一句话，重复写会让库和检索结果都很脏
+    existing = {row.content for row in db.list_insights(limit=500)
+                if getattr(row, "status", "active") == "active"}
     report = []
-    for cue, rows in clusters(db, min_support=min_support, limit=max_clusters):
-        payload = build_messages(rows)
+    for position, (cue, rows) in enumerate(groups, start=1):
+        shown = rows[:MAX_CLUSTER_ROWS]      # 证据只能来自真正喂给模型的条目
+        payload = build_messages(shown)
         try:
             raw = transport.complete(payload)
         except Exception as exc:         # 单簇失败不影响其余簇
-            report.append({"cluster": cue, "error": str(exc), "insights": []})
+            item = {"cluster": cue, "error": str(exc), "insights": [], "ids": []}
+            report.append(item)
+            if progress is not None:
+                progress(position, total, item)
             continue
-        insights = parse_insights(raw, rows)
+        insights = parse_insights(raw, shown)
         ids = []
         if commit:
             for item in insights:
+                if item["content"] in existing:      # 已归纳过，跳过
+                    continue
                 insight = database.Insight(
                     content=item["content"], scope=item["scope"],
                     confidence=item["confidence"], importance=4,
-                    origin_session=rows[0].origin_session,
+                    origin_session=shown[0].origin_session,
                     origin_project=None,          # 洞见默认全局可见，scope 表达适用性
                     source_experience_ids=item["source_ids"],
                     cues=item["cues"], created_at=base.get_cur_time())
                 new_id = db.insert_insight(insight)
+                existing.add(item["content"])
                 db.index_fts("insight", new_id, "", insight.content,
                              origin_project=None,
-                             session_id=rows[0].origin_session)
+                             session_id=shown[0].origin_session)
                 ids.append(new_id)
                 try:                    # 向量索引：失败不影响洞见落库
                     import embed
@@ -203,5 +290,8 @@ def induce(db: database.Database, transport, *, min_support: int = 3,
                         embed.index_rows(db, [("insight", row)])
                 except Exception:
                     pass
-        report.append({"cluster": cue, "insights": insights, "ids": ids})
+        entry = {"cluster": cue, "insights": insights, "ids": ids}
+        report.append(entry)
+        if progress is not None:
+            progress(position, total, entry)
     return report

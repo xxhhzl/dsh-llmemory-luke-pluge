@@ -115,6 +115,92 @@ window.__ModuleLoader__.load({
       return text.length > max ? `${text.slice(0, max)}…` : text
     }
 
+    /** 维护任务（重跑摘要 / 归纳洞见）：后台线程，轮询 maintenance.status 看进度。 */
+    function Maintenance() {
+      const [state, setState] = React.useState(null)
+      const [busy, setBusy] = React.useState('')
+      const [error, setError] = React.useState('')
+
+      const load = React.useCallback(async () => {
+        try {
+          setState(await callApi({ op: 'maintenance.status' }))
+          setError('')
+        } catch (e) {
+          setError(String(e?.message ?? e))
+        }
+      }, [])
+
+      React.useEffect(() => { void load() }, [load])
+
+      const running = Boolean(state?.resummarize?.running || state?.induce?.running)
+      React.useEffect(() => {
+        if (!running) return undefined
+        const timer = setInterval(() => { void load() }, 1500)
+        return () => clearInterval(timer)
+      }, [running, load])
+
+      const run = async op => {
+        setBusy(op)
+        setError('')
+        try {
+          await callApi({ op })
+          await load()
+        } catch (e) {
+          setError(String(e?.message ?? e))
+        } finally {
+          setBusy('')
+        }
+      }
+
+      const seconds = ms => `${(Number(ms || 0) / 1000).toFixed(1)}s`
+
+      /** 一个任务的进度/结果文案（没跑过就不显示结果行）。 */
+      const snapshotText = (snap, kind) => {
+        if (!snap) return null
+        if (snap.running) {
+          return kind === 'resummarize'
+            ? `重跑中 ${snap.done}/${snap.total} · 成功 ${snap.ok} / 失败 ${snap.failed}`
+            : `归纳中 ${snap.done}/${snap.total} 簇 · 新增 ${snap.created} 条`
+        }
+        if (snap.error) return `失败：${snap.error}`
+        if (!snap.finished_at) return null
+        if (kind === 'resummarize') {
+          return `上次重跑：成功 ${snap.ok} / 失败 ${snap.failed}`
+            + ` · ${seconds(snap.elapsed_ms)}${snap.note ? ` · ${snap.note}` : ''}`
+        }
+        return `上次归纳：新增 ${snap.created} 条洞见（${snap.clusters} 簇）`
+          + ` · ${seconds(snap.elapsed_ms)}${snap.note ? ` · ${snap.note}` : ''}`
+      }
+
+      const pending = Number(state?.pending_events ?? 0)
+      const resummarizeRunning = Boolean(state?.resummarize?.running)
+      const induceRunning = Boolean(state?.induce?.running)
+      return h('div', { style: { ...S.card, display: 'flex', flexDirection: 'column', gap: '6px' } },
+        h('div', { style: { display: 'flex', alignItems: 'baseline', gap: '8px' } },
+          h('strong', { style: { fontSize: '13px' } }, '维护'),
+          state && h('span', { style: S.cardLabel },
+            `待复核事件 ${pending} · 洞见 ${state.insights ?? 0} 条`)),
+        h('div', { style: S.bar },
+          h('button', {
+            style: S.button, type: 'button',
+            disabled: Boolean(busy) || resummarizeRunning || pending === 0,
+            onClick: () => { void run('event.resummarize') },
+          }, resummarizeRunning ? '重跑中…' : '重跑待复核事件摘要'),
+          h('button', {
+            style: S.button, type: 'button',
+            disabled: Boolean(busy) || induceRunning,
+            onClick: () => { void run('insight.induce') },
+          }, induceRunning ? '归纳中…' : '归纳洞见')),
+        [snapshotText(state?.resummarize, 'resummarize'),
+         snapshotText(state?.induce, 'induce')]
+          .filter(Boolean)
+          .map((text, index) => h('div', { key: index, style: S.cardLabel }, text)),
+        h('div', { style: S.cardLabel },
+          '重跑：把待复核事件的摘要补上（成功才落经验/认知）；'
+          + '归纳：把同一主题的多条经验提炼成通用规则（两路聚类：线索 + 向量相似度）。'),
+        error && h('div', { style: S.error }, error))
+    }
+
     function Overview() {
       const [state, setState] = React.useState({ status: 'loading', data: null, error: '' })
       const load = React.useCallback(async () => {
@@ -152,7 +238,8 @@ window.__ModuleLoader__.load({
           h('div', { style: S.mono },
             s.latest_event
               ? `${s.latest_event.title}${s.latest_event.needs_review ? '（待复核）' : ''}`
-              : '（暂无）')))
+              : '（暂无）')),
+        h(Maintenance))
     }
 
     /** 定位键：message/memory 用 rowid，其余按表自身主键（digest 是 session_id）。 */
@@ -583,6 +670,15 @@ window.__ModuleLoader__.load({
 
     const MODEL_KIND = { 'model.jev': 'jev', 'model.extract': 'extract', embedding: 'embedding' }
 
+    /** ANN 状态文案：首次检索前索引还没装载，别让「0 条」看起来像坏了。 */
+    function annLabel(vec) {
+      const ann = vec?.ann
+      if (!ann?.available) return '精确 KNN（未装 usearch）'
+      const loaded = Object.values(ann.indexed || {})
+        .reduce((sum, value) => sum + Number(value || 0), 0)
+      return `ANN ${ann.backend}（${loaded ? `${loaded} 条已装载` : '首次检索时装载'}）`
+    }
+
     async function postJson(url, payload) {
       const response = await fetch(url, {
         method: 'POST',
@@ -882,7 +978,8 @@ window.__ModuleLoader__.load({
           h('div', { style: S.cardLabel },
             vec
               ? `向量索引：${vec.enabled ? '可用' : '不可用（缺 sqlite-vec）'} · ${vec.dim || 0} 维 · `
-                + `经验 ${counts.experience ?? 0} / 认知 ${counts.cognition ?? 0} / `
+                + annLabel(vec)
+                + ` · 经验 ${counts.experience ?? 0} / 认知 ${counts.cognition ?? 0} / `
                 + `洞见 ${counts.insight ?? 0}`
               : '向量索引状态读取中…'),
           reindexStatus(),

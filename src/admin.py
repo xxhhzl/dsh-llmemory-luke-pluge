@@ -20,6 +20,7 @@ import config
 import core
 import database
 import frame
+import maintenance
 import json as _json
 
 MAX_LIMIT = 200
@@ -520,7 +521,9 @@ _REINDEX_LOCK = threading.Lock()
 
 
 def vec_status(db, data: dict) -> dict:
-    return {**db.vec_status(), "reindex": dict(_REINDEX)}
+    import ann
+    return {**db.vec_status(), "reindex": dict(_REINDEX),
+            "ann": ann.get_store().status(db)}
 
 
 def vec_reindex(db, data: dict) -> dict:
@@ -603,6 +606,54 @@ def describe(db) -> dict:
     return {"tables": tables, "db_path": str(db.path)}
 
 
+# ---- 维护任务（重跑摘要 / 归纳洞见）----
+
+def _shell_transport(purpose: str):
+    '''模型调用一律走外壳代理：内核只发 llm.request，不持有凭据。'''
+    import summary
+    return summary.ShellSummaryTransport(purpose=purpose)
+
+
+def _summary_transport():
+    return _shell_transport("summary")
+
+
+def _consolidate_transport():
+    return _shell_transport("consolidate")
+
+
+def _insight_transport():
+    return _shell_transport("insight")
+
+
+def event_resummarize(db, data: dict) -> dict:
+    '''重跑事件摘要：`{id}` 单条，`{ids: [...]}` 多条，缺省=全部待复核。'''
+    ids = data.get("ids")
+    if ids is None and data.get("id") is not None:
+        ids = [data["id"]]
+    if ids is not None and not isinstance(ids, list):
+        raise AdminError("ids 必须是数组")
+    return maintenance.resummarize(
+        db, event_ids=ids, transport_factory=_summary_transport,
+        consolidate_factory=_consolidate_transport)
+
+
+def insight_induce(db, data: dict) -> dict:
+    '''跑一轮洞见归纳（后台）。'''
+    try:
+        min_support = max(2, int(data.get("min_support") or 3))
+        max_clusters = max(1, int(data.get("max_clusters") or 5))
+    except (TypeError, ValueError):
+        raise AdminError("min_support / max_clusters 必须是整数") from None
+    return maintenance.induce_insights(
+        db, transport_factory=_insight_transport, min_support=min_support,
+        max_clusters=max_clusters, threshold=data.get("threshold"))
+
+
+def maintenance_status(db, data: dict) -> dict:
+    return maintenance.status(db)
+
+
 _OPS = {
     "tables": lambda db, data: describe(db),
     "list": lambda db, data: list_rows(db, table=data.get("table", ""),
@@ -626,6 +677,9 @@ _OPS = {
     "settings.set": settings_set,
     "vec.status": vec_status,
     "vec.reindex": vec_reindex,
+    "maintenance.status": maintenance_status,
+    "event.resummarize": event_resummarize,
+    "insight.induce": insight_induce,
     "core.preview": lambda db, data: core.compile_core(db),
 }
 

@@ -500,6 +500,9 @@ class TestSettings(AdminCase):
                     "finished_at", "elapsed_ms"):
             self.assertIn(key, status["reindex"], f"reindex 快照缺 {key}")
         self.assertFalse(status["reindex"]["running"])
+        self.assertIn("ann", status, "要告诉界面走 ANN 还是精确 KNN")
+        for key in ("available", "backend", "indexed"):
+            self.assertIn(key, status["ann"])
 
     def test_reindex_marks_started_and_returns_snapshot(self):
         self.addCleanup(admin._REINDEX.update, dict(admin._REINDEX))
@@ -617,6 +620,48 @@ class TestSettings(AdminCase):
         self.assertEqual(state["error"], "", "全部写成功时不该报错")
         self.assertEqual((state["done"], state["total"]), (3, 3))
         self.assertEqual(self.db.vec_status()["counts"]["experience"], 3)
+
+
+class TestMaintenanceOps(AdminCase):
+    '''维护入口：op 参数解析与转发（真正的任务逻辑在 tests/test_maintenance.py）。'''
+
+    def test_ops_registered(self):
+        for op in ("maintenance.status", "event.resummarize", "insight.induce"):
+            self.assertIn(op, admin._OPS)
+
+    def test_status_delegates(self):
+        state = admin.maintenance_status(self.db, {})
+        for key in ("resummarize", "induce", "pending_events", "insights"):
+            self.assertIn(key, state)
+
+    def test_resummarize_single_id(self):
+        with mock.patch.object(admin.maintenance, "resummarize") as call:
+            call.return_value = {"started": True}
+            admin.event_resummarize(self.db, {"id": 7})
+        args = call.call_args
+        self.assertEqual(args.kwargs["event_ids"], [7])
+        self.assertTrue(callable(args.kwargs["transport_factory"]))
+
+    def test_resummarize_all_when_no_id(self):
+        with mock.patch.object(admin.maintenance, "resummarize") as call:
+            call.return_value = {"started": True}
+            admin.event_resummarize(self.db, {})
+        self.assertIsNone(call.call_args.kwargs["event_ids"])
+
+    def test_resummarize_rejects_bad_ids(self):
+        with self.assertRaises(admin.AdminError):
+            admin.event_resummarize(self.db, {"ids": "1,2"})
+
+    def test_induce_forwards_options(self):
+        with mock.patch.object(admin.maintenance, "induce_insights") as call:
+            call.return_value = {"started": True}
+            admin.insight_induce(self.db, {"min_support": 4, "max_clusters": 2})
+        kwargs = call.call_args.kwargs
+        self.assertEqual((kwargs["min_support"], kwargs["max_clusters"]), (4, 2))
+
+    def test_induce_rejects_bad_numbers(self):
+        with self.assertRaises(admin.AdminError):
+            admin.insight_induce(self.db, {"min_support": "three"})
 
 
 if __name__ == "__main__":

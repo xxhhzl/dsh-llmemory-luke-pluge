@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -534,6 +535,7 @@ class Database:
         # 而 FTS5 的 DROP/CREATE 会用到临时存储（表现为 unable to open database file）
         self._conn.execute("PRAGMA temp_store = MEMORY")
         self._vec_enabled = self._load_vec()
+        self._vec_changes: dict[str, set] = {kind: set() for kind in _VEC_TABLES}
         self.init_schema()
         if self._vec_enabled:
             self._init_vec_tables()
@@ -582,18 +584,35 @@ class Database:
         import sqlite_vec
         return sqlite_vec.serialize_float32([float(x) for x in vector])
 
+    @staticmethod
+    def _vec_unit(vector) -> list:
+        '''
+        归一化到单位长度。
+
+        向量检索用余弦相似度：`vec0` 的 L2 距离与 usearch 的 cos 距离只有在
+        **向量等长（单位向量）** 时才排序一致。入库与查询都归一化，
+        两条路径（ANN / 精确）的名次才能互为替代；bge-m3 本来就是单位向量，
+        这一步对它是恒等变换。
+        '''
+        values = [float(x) for x in vector]
+        norm = math.sqrt(sum(value * value for value in values))
+        if norm <= 1e-12:
+            return values
+        return [value / norm for value in values]
+
     def vec_upsert(self, kind: str, ref_id: int, vector,
                    origin_project: str | None = None) -> bool:
         table = _VEC_TABLES.get(kind)
         if not self._vec_enabled or table is None or not vector:
             return False
-        blob = self._vec_blob(vector)
+        blob = self._vec_blob(self._vec_unit(vector))
         with self.transaction() as conn:
             conn.execute(f"DELETE FROM {table} WHERE ref_id = ?", (int(ref_id),))
             conn.execute(
                 f"INSERT INTO {table} (ref_id, origin_project, embedding) "
                 f"VALUES (?, ?, ?)",
                 (int(ref_id), origin_project or "", blob))
+        self._note_vec_change(kind, ref_id)
         return True
 
     def vec_unindex(self, kind: str, ref_id: int) -> bool:
@@ -611,6 +630,74 @@ class Database:
         if not self._vec_enabled or table is None:
             return
         conn.execute(f"DELETE FROM {table} WHERE ref_id = ?", (int(ref_id),))
+        self._note_vec_change(kind, ref_id)
+
+    def _note_vec_change(self, kind: str, ref_id: int) -> None:
+        '''记下「这条向量变了」，ANN 缓存下次检索时按差量同步。'''
+        self._vec_changes.setdefault(kind, set()).add(int(ref_id))
+
+    def take_vec_changes(self, kind: str) -> set:
+        '''取出并清空某 kind 的待同步 id（ANN 专用）。'''
+        with self._lock:
+            return self._vec_changes.pop(kind, set())
+
+    def list_vec_rows(self, kind: str) -> list:
+        '''[(ref_id, origin_project, embedding_blob)]，用于 ANN 首次全量装载。'''
+        table = _VEC_TABLES.get(kind)
+        if not self._vec_enabled or table is None:
+            return []
+        try:
+            return [(int(row["ref_id"]), row["origin_project"] or "",
+                     row["embedding"])
+                    for row in self._conn.execute(
+                        f"SELECT ref_id, origin_project, embedding FROM {table}")]
+        except sqlite3.Error as exc:
+            base.log.warning("db.list_vec_rows_failed", kind=kind, error=repr(exc))
+            return []
+
+    def list_vec_blobs(self, kind: str) -> dict:
+        '''{ref_id: embedding_blob}：洞见归纳做语义聚类时直接算相似度。'''
+        return {ref_id: blob for ref_id, _project, blob in self.list_vec_rows(kind)}
+
+    def get_vec_row(self, kind: str, ref_id: int):
+        '''(origin_project, embedding_blob)；不存在返回 None。'''
+        table = _VEC_TABLES.get(kind)
+        if not self._vec_enabled or table is None:
+            return None
+        try:
+            row = self._conn.execute(
+                f"SELECT origin_project, embedding FROM {table} WHERE ref_id = ?",
+                (int(ref_id),)).fetchone()
+        except sqlite3.Error:
+            return None
+        if row is None:
+            return None
+        return (row["origin_project"] or "", row["embedding"])
+
+    def search_vectors(self, kind: str, vector, k: int = 50,
+                       origin_project: str | None = None,
+                       scope: str = "all") -> dict:
+        '''
+        检索入口：优先 ANN（usearch/HNSW），不可用或异常时退回 vec0 精确 KNN。
+
+        ANN 只是加速层，`vec0` 才是事实源——两者的距离度量都按「越小越近」
+        排序，调用方只用名次，不做绝对阈值判断。
+        '''
+        if not self._vec_enabled or not vector:
+            return {}
+        import ann
+        if ann.available():
+            try:
+                hits = ann.get_store().search(
+                    self, kind, vector, k=max(1, int(k)),
+                    origin_project=origin_project, scope=scope)
+                if hits is not None:
+                    return hits
+            except Exception as exc:      # 索引坏了不能让检索失效
+                base.log.warning("db.ann_search_failed", kind=kind,
+                                 error=repr(exc))
+        return self.vec_search(kind, vector, k=k,
+                               origin_project=origin_project, scope=scope)
 
     def vec_search(self, kind: str, vector, k: int = 50,
                    origin_project: str | None = None,
@@ -619,7 +706,7 @@ class Database:
         table = _VEC_TABLES.get(kind)
         if not self._vec_enabled or table is None or not vector:
             return {}
-        blob = self._vec_blob(vector)
+        blob = self._vec_blob(self._vec_unit(vector))
         limit = max(1, int(k))
 
         def run(project: str | None):

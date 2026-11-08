@@ -91,6 +91,55 @@ class TestParse(InsightCase):
         self.assertEqual(insight.parse_insights(raw, self.rows)[0]["scope"], "global")
 
 
+class TestSemanticClusters(InsightCase):
+    '''线索不同但向量相近的经验也要能成组（实测首线索极度分散，光靠 cue 攒不出簇）。'''
+
+    def _unit(self, values):
+        vector = [0.0] * 1024
+        for index, value in enumerate(values):
+            vector[index] = value
+        return vector
+
+    def seed_with_vector(self, content, vector, cues=("各不相同的线索",)):
+        row = self.seed(content, cues=cues)
+        self.db.vec_upsert("experience", row.id, vector)
+        return row
+
+    def test_similar_vectors_form_cluster(self):
+        if getattr(insight, "_np", None) is None:
+            self.skipTest("未安装 numpy")
+        for content in ("甲做法", "乙做法", "丙做法"):
+            self.seed_with_vector(content, self._unit([1.0, 0.05, 0.0]),
+                                  cues=(content,))
+        self.assertEqual(insight.clusters(self.db, min_support=3), [],
+                         "首线索互不相同：cue 路没有簇")
+        groups = insight.semantic_clusters(self.db, min_support=3, threshold=0.9)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(len(groups[0][1]), 3)
+        self.assertTrue(groups[0][0].startswith("语义:"))
+
+    def test_dissimilar_vectors_no_cluster(self):
+        if getattr(insight, "_np", None) is None:
+            self.skipTest("未安装 numpy")
+        self.seed_with_vector("甲", self._unit([1.0, 0.0, 0.0]), cues=("a",))
+        self.seed_with_vector("乙", self._unit([0.0, 1.0, 0.0]), cues=("b",))
+        self.seed_with_vector("丙", self._unit([0.0, 0.0, 1.0]), cues=("c",))
+        self.assertEqual(insight.semantic_clusters(self.db, min_support=3,
+                                                   threshold=0.9), [])
+
+    def test_all_clusters_merges_without_duplicates(self):
+        if getattr(insight, "_np", None) is None:
+            self.skipTest("未安装 numpy")
+        # 3 条同 cue 且同向量：cue 路会命中，语义路应被去重掉
+        for index, content in enumerate(("甲", "乙", "丙")):
+            self.seed_with_vector(content, self._unit([1.0, 0.02 * index, 0.0]))
+        groups = insight.all_clusters(self.db, min_support=3, limit=10,
+                                      threshold=0.9)
+        self.assertEqual(len(groups), 1, "同一组不应重复出现")
+        ids = [row.id for row in groups[0][1]]
+        self.assertEqual(len(ids), len(set(ids)))
+
+
 class TestInduce(InsightCase):
     def test_induce_writes_rows_and_fts(self):
         rows = [self.seed("先 read 再改"), self.seed("先定位再改"),
@@ -131,6 +180,23 @@ class TestInduce(InsightCase):
                                 min_support=3, commit=False)
         self.assertEqual(report[0]["ids"], [])
         self.assertEqual(self.db.list_insights(), [])
+
+    def test_same_content_from_two_clusters_written_once(self):
+        '''两个簇各收出同一句话时只写一条：否则库和检索结果会被同一规则刷屏。'''
+        for text in ("甲", "乙", "丙"):
+            self.seed(text, cues=("a",))
+        for text in ("丁", "戊", "己"):
+            self.seed(text, cues=("b",))
+        first = json.dumps({"insights": [{
+            "content": "同一条规则", "source_ids": [1, 2]}]}, ensure_ascii=False)
+        second = json.dumps({"insights": [{
+            "content": "同一条规则", "source_ids": [4, 5]}]}, ensure_ascii=False)
+        report = insight.induce(self.db,
+                                FakeSummaryTransport([first, second]),
+                                min_support=3, max_clusters=5)
+        self.assertEqual(len(report), 2, "两个簇都跑了")
+        self.assertEqual(self.db.count_l3("insight"), 1, "跨簇同文只写一条")
+        self.assertEqual(len(report[1]["ids"]), 0, "第二簇被去重")
 
 
 if __name__ == "__main__":

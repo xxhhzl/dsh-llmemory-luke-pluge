@@ -36,6 +36,9 @@ release/
   这两个值只是**三槽配置的默认值**，装好后可以在「设置 → 长期记忆 → 模型」里逐槽改。
 - 向量检索（可选）：内核所在 Python 环境装 `sqlite-vec`（`pip install sqlite-vec`）。
   没装也能用，检索自动退回纯 FTS；装了但没配 embedding 端点同样只降级。
+- ANN 加速（可选）：再装 `usearch` 与 `numpy`（`pip install usearch numpy`）。
+  装了就走向量近似检索（HNSW），没装自动退回 `sqlite-vec` 精确 KNN，接口不变；
+  「模型」页会显示当前走的是 `ANN usearch` 还是「精确 KNN」。
 - Embedding 端点（可选）：OpenAI 兼容（`/v1/embeddings`）或 Ollama 原生
   （`/api/embed`）。本地 Ollama 示例：
 
@@ -126,8 +129,8 @@ python scripts/build_release.py          # 有差异时重新生成 lib/ 与 ker
 | 自动记忆 | 正常聊天即可；消息经去抖后自动切分、摘要、落库 |
 | 工具 | 模型自行调用 `memory_search` / `memory_get` / `memory_recent`；也可以直接说「查一下之前关于 X 的结论」 |
 | 命令 | 输入框发 `/memory`：立即切分当前会话（跳过去抖），结果就地回显 |
-| 设置页 · 概况 | 统计、库路径、最近事件 |
-| 设置页 · 模型 | JEV / 提取 / Embedding 三槽配置，保存即测试；向量索引状态与重建 |
+| 设置页 · 概况 | 统计、库路径、最近事件；**维护**区：重跑待复核事件摘要、归纳洞见（后台跑，显示进度/结果） |
+| 设置页 · 模型 | JEV / 提取 / Embedding 三槽配置，保存即测试；向量索引状态（含 ANN 后端）与重建 |
 | 设置页 · 数据 | 事件 / 经验 / 认知 / 洞见 / 消息 / 引用 / 工作记忆：搜索、分页、**新增、编辑、删除** |
 | 设置页 · 自我 | 「自我设定」（进系统提示词）四类输入 + 「模型自述」（进动态上下文），可预览注入文本 |
 | 右侧栏 · 长期记忆 | 会话 header 的「记忆」按钮或设置页「在右侧栏打开」：按事件/经验/认知/洞见浏览、搜索、看详情 |
@@ -154,22 +157,30 @@ session/event ──ingest-bridge──▶ ingest.request ─▶ 内核：入库
 2. 设置 → 长期记忆 → **模型**：三张卡片的默认值与 `cordis.patch.yml` 一致；
    点「保存并测试」应回 `Embedding OK：1024 维 · 2 条…` / `文本模型 OK：<模型> → OK`。
    embedding 端点没起来时会明确报「连不上 …（ECONNREFUSED）」而不是只说 fetch failed。
-3. 概况页内核版本应为 **0.3.1**（版本没变说明还在跑旧进程，重启 Harness）。
+3. 概况页内核版本应为 **0.3.2**（版本没变说明还在跑旧进程，重启 Harness）。
 4. **升级上来的一次性动作**：老条目没有向量，点一次「重建向量索引」
    （实测 87 条 / 6 次 embedding 请求 / 2.0s）。**点下去后卡片会一直显示
    「重建中 n/N · 已用 xxs」直到内核报完成**；中途读不到状态也保留进度。
    若 embedding 写不进任何向量，会显示「重建失败：…（已完成 a/N）」并中止，
    不会假报完成——先把端点跑起来（`ollama serve` / 桌面端）再重试。
-5. 让模型调用一次 `memory_search`，确认返回 `{items, count, scope, limit}`（空库时 `count: 0`）。
-6. 发几轮对话，等待去抖窗口后确认库里出现事件（`memory_recent` 能查到区间内事件）；
+5. **维护区**：概况页底部「待复核事件 N」应等于库里 `needs_review=1` 的事件数；
+   点「重跑待复核事件摘要」，进度行显示 `重跑中 n/N · 成功 x / 失败 y`，
+   结束后事件标题/摘要更新、`needs_review` 清零、该事件的经验认知落库。
+6. 点「归纳洞见」：进度显示 `归纳中 n/N 簇 · 新增 x 条`。**洞见需要同主题 ≥3 条经验**
+   （线索相同或向量相似度 ≥0.65 才成簇）；不足时结果是「没有可归纳的簇」，属正常。
+   已有同文洞见不会重复写入。
+7. 确认「模型」页的向量索引行显示 `ANN usearch（首次检索时装载）`；跑一次
+   `memory_search` 后刷新应变成 `ANN usearch（n 条已装载）`。
+8. 让模型调用一次 `memory_search`，确认返回 `{items, count, scope, limit}`（空库时 `count: 0`）。
+9. 发几轮对话，等待去抖窗口后确认库里出现事件（`memory_recent` 能查到区间内事件）；
    模型页的向量索引条数应随新条目增长。
-7. 插件详情里确认标题/描述来自 `locale/*.json`，图标为包内 `icon.svg`。
+10. 插件详情里确认标题/描述来自 `locale/*.json`，图标为包内 `icon.svg`。
 
 离线可先验证外壳与内核的进程契约（不需要 Harness）：
 
 ```powershell
 python -m unittest tests.test_shell_contract   # health / schema / 调用 / ingest 帧序
-python -m unittest tests.test_vec              # 向量索引 / embedding 代理 / RRF
+python -m unittest tests.test_vec tests.test_ann tests.test_maintenance
 node tests/js/unit.test.mjs                    # 帧、内容提取、三槽配置与 embed 调用
 ```
 
@@ -180,8 +191,12 @@ node tests/js/unit.test.mjs                    # 帧、内容提取、三槽配�
 ## 已知限制
 
 - 只支持单轮模型调用（内核的 jev / summary 都是 system + 单条 user）。
-- 向量检索是暴力 KNN（sqlite-vec `vec0`，无 ANN 索引）：万级条目以内够用；
-  换 embedding 模型或维度后向量表会重建，必须点一次「重建向量索引」。
+- ANN 索引是**进程内缓存**：重启后首次向量检索要全量装载（当前几十条 <10ms，
+  万级约 1s 量级），不落盘以免索引与库不一致；`usearch`/`numpy` 缺失时自动退回
+  `sqlite-vec` 精确 KNN。换 embedding 模型或维度后向量表会重建，必须点一次
+  「重建向量索引」。
+- 洞见归纳要「同主题 ≥3 条经验」：线索（cues[0]）相同或向量相似度 ≥0.65 才成簇；
+  经验还很分散时归纳不出东西是正常的。
 - 查询向量由外壳现算：本地 Ollama 热态约 30ms，首次加载模型 3s 左右。
 - 会话事件按 `event.seq` 增量投递；同一会话修改历史不会回填（内核只追加）。
 - 工具注册发生在启动握手之后；握手失败时插件仍存在但不提供工具（日志会给出原因）。

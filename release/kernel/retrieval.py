@@ -203,8 +203,9 @@ def _candidates(db: database.Database, query: str, origin_project: str | None,
         for kind in ("experience", "cognition", "insight"):
             if kind not in wanted:
                 continue
-            distances = db.vec_search(kind, query_vector, k=RECALL_LIMIT,
-                                      origin_project=origin_project, scope=scope)
+            distances = db.search_vectors(kind, query_vector, k=RECALL_LIMIT,
+                                          origin_project=origin_project,
+                                          scope=scope)
             for rank, (ref_id, _distance) in enumerate(
                     sorted(distances.items(), key=lambda item: item[1])):
                 vec_rank[(kind, ref_id)] = rank

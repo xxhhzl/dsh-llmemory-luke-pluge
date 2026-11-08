@@ -30,7 +30,7 @@ RELEASE = ROOT / "release"
 JS_FILES = ("index.js", "shell.js", "lifecycle.js", "trace.js", "kernel.js",
             "frames.js", "llm-bridge.js", "tools-bridge.js", "ingest-bridge.js",
             "model-config.js", "core-prompt.js", "commands.js", "stats-route.js",
-            "services.js")
+            "services.js", "hyde.js")
 CLIENT_FILE = "client.js"
 
 

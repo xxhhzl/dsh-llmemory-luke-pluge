@@ -24,7 +24,8 @@ src/js/
 ├── frames.js       信封构造/解析（protocol_version 1.0）
 ├── model-config.js 三槽模型设置：默认值、合并、直连 OpenAI 兼容端点 / embedding
 ├── llm-bridge.js   llm.request → prepareCall（或自定义端点）→ llm.result
-├── tools-bridge.js tools.schema → defineTool 注册；调用回灌 tools.calls（含 query_vector）
+├── hyde.js         HyDE 查询扩展：零命中时生成假想回答并重算向量（复用提取槽）
+├── tools-bridge.js tools.schema → defineTool 注册；调用回灌 tools.calls（含 query_vector 与 HyDE 重试）
 ├── ingest-bridge.js session/event → 按会话去抖 → ingest.request
 ├── core-prompt.js  核心记忆 → 系统提示词段（-2000）/ 自述 → 动态上下文（850）
 ├── commands.js     斜杠命令 /memory（立即切分当前会话）
@@ -70,7 +71,7 @@ src/js/
 | 内核 → 宿主 | `llm.request` | 按 `purpose` 选槽（`jev` → JEV 槽，其余 → 提取槽）；`mode=custom` 直连端点，否则 system 文本拼成 `system`、user 文本转 `createUserMessage`，流式 chunk 用 `BlockAssembler` 收成文本 |
 | 内核 → 宿主 | `embed.request` | `{request_id, input[]}` → `embedTexts`（openai `/v1/embeddings` 或 ollama `/api/embed`）→ `embed.result{vectors}`；失败回 `error.message`，内核只降级不重试 |
 | 内核 → 宿主 | `settings.raw` | 未脱敏的三槽设置（`app_setting` 表）；只走帧通道，不经 HTTP |
-| 宿主 → 内核 | `tools.calls` | 工具 `execute` 发一次调用；`memory_search` 会先用 embedding 端点算好 `query_vector` 一并带上 |
+| 宿主 → 内核 | `tools.calls` | 工具 `execute` 发一次调用；`memory_search` 会先用 embedding 端点算好 `query_vector` 一并带上；零命中且向量通道可用时走 HyDE（[hyde.js](../src/js/hyde.js)）：提取槽生成假想回答 → 重算向量 → 带 `-h` 后缀重试一次，仍零命中保留原结果 |
 | 内核 → 宿主 | `tools.schema` | JSON Schema → 工具 DSL：`anyOf[非 null]` 取首个分支、`enum` 透传、`required` 展开；`{ok:false}` 转成带 `code` 的异常 |
 
 ## 4. 错误与生命周期
@@ -102,7 +103,7 @@ src/js/
 | 打包一致性与语法 | `build_release.py --check` + `node --check` | ✅（含版本号一致性） |
 | `ctx.llm` / `ctx.tools` 两条桥 | 需在 Harness 内安装后验收 | ⏳ 见 release/README.md「验收」 |
 
-## 7. 本机安装记录（2026-11-03 安装 / 2026-11-08 更新到 0.3.3）
+## 7. 本机安装记录（2026-11-03 安装 / 2026-11-08 更新到 0.4.0）
 
 按 profile `desktop` 的既有约定安装（与 `@local/dsh-custom-mode` 的 `link:` 同型）：
 
@@ -128,7 +129,7 @@ Copy-Item release\README.md "$inst\README.md" -Force
 判断是不是硬链接：`fsutil hardlink list <安装目录>\kernel\config.py`，同时列出
 `release\kernel\config.py` 就是（改内容会同步，**新增/删除文件仍要手动处理**）。
 
-当前产物 **0.3.3**、45 个文件（`lib/` 14 个 JS + `kernel/` 23 个 py + 根 6 个 + `locale/` 2 个），
+当前产物 **0.4.0**、47 个文件（`lib/` 15 个 JS + `kernel/` 23 个 py + 根 6 个 + `locale/` 2 个），
 与 `release/` 哈希逐一相同。版本号改了之后，运行中的进程仍报旧值，**重启 Harness** 才会刷新。
 
 生效方式：**重启 Harness**（插件解析表在启动时构建；`ResolutionRouter` 对新增包也要求重启）。

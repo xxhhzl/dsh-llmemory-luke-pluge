@@ -5,7 +5,7 @@
  * （只覆盖内核实际用到的 string / integer / number / boolean / enum / anyOf-null）。
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { embedTexts } from './model-config.js'
+import { embedQuery, hydeVector } from './hyde.js'
 
 const PRIMITIVES = new Set(['string', 'number', 'integer', 'boolean'])
 
@@ -63,6 +63,38 @@ function outputSpec() {
 }
 
 /**
+ * memory_search 的执行体（含 HyDE 重试），抽出来便于离线测试：
+ * 依赖（embedQuery / hydeVector / kernel.request）全部走参数，不碰宿主包。
+ */
+export async function executeMemorySearch(
+  { embedQueryFn = embedQuery, hydeVectorFn = hydeVector, request, logger },
+  { name = 'memory_search', args, sessionId = '', agentId = '', timeoutMs = 30_000 },
+) {
+  const callId = `${name}-${Date.now().toString(36)}`
+  const call = { call_id: callId, name, arguments: args ?? {} }
+  const vector = await embedQueryFn(args?.query)
+  if (vector) call.query_vector = vector
+  const result = await request('tools.calls', { calls: [call] })
+  let entry = Array.isArray(result) ? result[0] : null
+  // HyDE：词法+向量都零命中时，用假想回答的向量再试一次。
+  // 触发条件收窄到 count===0 且向量通道可用，正常命中不多花一次模型调用。
+  const empty = entry?.ok && entry.data?.count === 0
+  if (empty && call.query_vector) {
+    const hyde = await hydeVectorFn(args.query)
+    if (hyde) {
+      const retry = await request('tools.calls', {
+        calls: [{ ...call, query_vector: hyde, call_id: `${callId}-h` }],
+      })
+      const retried = Array.isArray(retry) ? retry[0] : null
+      if (retried?.ok && retried.data?.count > 0) {
+        entry = retried
+      }
+    }
+  }
+  return entry
+}
+
+/**
  * 把内核声明的工具注册进 Harness。
  * @returns {Array<Function>} 每项的 disposer
  */
@@ -80,20 +112,25 @@ export function registerKernelTools(ctx, kernel, schemas, {
       output: outputSpec(),
       async execute(args, exec) {
         const sessionId = exec?.agent?.session?.id ?? ''
+        if (name === 'memory_search' && args?.query) {
+          const settings = getSettings?.()
+          const entry = await executeMemorySearch({
+            embedQueryFn: query => embedQuery(settings, query),
+            hydeVectorFn: query => hydeVector(settings, query),
+            request: (type, payload) => kernel.request(
+              type, payload, { sessionId, agentId, timeoutMs }),
+            logger,
+          }, { name, args, sessionId, agentId, timeoutMs })
+          if (!entry) throw new Error(`内核没有返回 ${name} 的结果`)
+          if (!entry.ok) {
+            const error = new Error(entry.error?.message || `${name} 执行失败`)
+            error.code = entry.error?.code
+            throw error
+          }
+          return entry.data
+        }
         const callId = `${name}-${Date.now().toString(36)}`
         const call = { call_id: callId, name, arguments: args ?? {} }
-        // 读路径的 query 向量在 JS 侧算好随调用下发，避免内核主循环阻塞等 embedding
-        if (name === 'memory_search' && args?.query) {
-          const embedding = getSettings?.()?.embedding
-          if (embedding?.baseUrl && embedding?.model) {
-            try {
-              const [vector] = await embedTexts(embedding, [args.query])
-              if (Array.isArray(vector)) call.query_vector = vector
-            } catch (error) {
-              logger.warn?.(`[longmemory] query embedding 失败，降级词法: ${error.message}`)
-            }
-          }
-        }
         const result = await kernel.request('tools.calls', {
           calls: [call],
         }, { sessionId, agentId, timeoutMs })

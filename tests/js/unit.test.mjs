@@ -341,7 +341,7 @@ test('tailLog 只读文件尾部，且丢掉被截断的首行', async () => {
   }
 })
 
-test('内核起不来：不抛、进程置空、请求快速失败', async () => {
+test('内核起不来：不抛、进程置空、请求快速失败', { skip: process.env.LONGMEMORY_SKIP_SPAWN }, async () => {
   const kernel = new Kernel({
     python: path.join(tmpdir(), 'definitely-no-such-python-9d3f'),
     script: path.resolve('src/main.py'),
@@ -638,6 +638,143 @@ test('连不上端点：把 cause 的 code 带进错误信息', async () => {
     await assert.rejects(
       () => embedTexts({ baseUrl: 'http://127.0.0.1:11434/v1', model: 'bge-m3' }, ['x']),
       /连不上[\s\S]*ECONNREFUSED/)
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+/* ---------------- 工具桥：HyDE 重试（executeMemorySearch 纯函数） ---------------- */
+
+// tools-bridge.js 顶层 import 宿主包（@deepseek-ai/dsh-tools），离线环境没有它，
+// 所以 executeMemorySearch 抽成了纯函数并单独导出；这里剥掉宿主导入后
+// 写临时文件再加载（data: URL 与相对导入不兼容，必须走真实文件；
+// hyde.js / model-config.js 是它的相对依赖，一并复制到同目录）。
+const { executeMemorySearch } = await (async () => {
+  const fs = await import('node:fs/promises')
+  const path = await import('node:path')
+  const dir = path.resolve('.tmp', 'js-test')
+  await fs.mkdir(dir, { recursive: true })
+  for (const name of ['tools-bridge.js', 'hyde.js', 'model-config.js']) {
+    const source = await fs.readFile(path.resolve('src/js', name), 'utf8')
+    const stripped = source.replace(
+      /^import .*@deepseek-ai\/dsh-tools.*\n/m, '')
+    await fs.writeFile(path.join(dir, name), stripped, 'utf8')
+  }
+  return import(`file://${path.join(dir, 'tools-bridge.js').replace(/\\/g, '/')}`)
+})()
+
+import { HYDE_SYSTEM_PROMPT, embedQuery, hydeVector } from '../../src/js/hyde.js'
+
+test('HyDE：零命中 → 假想向量重试命中则采用重试结果', async () => {
+  const calls = []
+  const deps = {
+    // 第一次返回原始查询向量，第二次返回 HyDE 向量
+    embedQueryFn: async () => [0.1],
+    hydeVectorFn: async () => [0.2],
+    request: async (type, payload) => {
+      calls.push({ type, call: payload.calls[0] })
+      const call = payload.calls[0]
+      if (call.call_id.endsWith('-h')) {
+        return [{ ok: true, data: { count: 1, items: [{ id: 7, via: 'hyde' }] } }]
+      }
+      return [{ ok: true, data: { count: 0, items: [] } }]
+    },
+    logger: { debug() {} },
+  }
+  const entry = await executeMemorySearch(deps, {
+    args: { query: '我之前让你做什么' },
+  })
+  assert.equal(entry.ok, true)
+  assert.equal(entry.data.count, 1)
+  assert.equal(entry.data.items[0].via, 'hyde')
+  // 两次 tools.calls：原始向量一次，HyDE 向量一次（call_id 带 -h）
+  assert.equal(calls.length, 2)
+  assert.ok(calls[1].call.call_id.endsWith('-h'))
+  assert.deepEqual(calls[0].call.query_vector, [0.1])
+  assert.deepEqual(calls[1].call.query_vector, [0.2])
+})
+
+test('HyDE：正常命中不重试（不多花模型调用）', async () => {
+  let requested = 0
+  let hydeCalled = 0
+  const entry = await executeMemorySearch({
+    embedQueryFn: async () => [0.5],
+    hydeVectorFn: async () => { hydeCalled += 1; return [0.9] },
+    request: async () => {
+      requested += 1
+      return [{ ok: true, data: { count: 1, items: [{ id: 1 }] } }]
+    },
+    logger: { debug() {} },
+  }, { args: { query: 'drawio 边框' } })
+  assert.equal(entry.data.count, 1)
+  assert.equal(requested, 1)
+  assert.equal(hydeCalled, 0, '命中时不该触发 HyDE 生成')
+})
+
+test('HyDE：重试仍零命中 → 保留原始零结果（不报错）', async () => {
+  const entry = await executeMemorySearch({
+    embedQueryFn: async () => [0.1],
+    hydeVectorFn: async () => [0.2],
+    request: async () => [{ ok: true, data: { count: 0, items: [] } }],
+    logger: { debug() {} },
+  }, { args: { query: '查无此物' } })
+  assert.equal(entry.ok, true)
+  assert.equal(entry.data.count, 0)
+})
+
+test('HyDE：无向量（embedding 未配）→ 不重试', async () => {
+  let hydeCalled = 0
+  const calls = []
+  const entry = await executeMemorySearch({
+    embedQueryFn: async () => null,
+    hydeVectorFn: async () => { hydeCalled += 1; return [0.9] },
+    request: async (type, payload) => {
+      calls.push(payload.calls[0])
+      return [{ ok: true, data: { count: 0, items: [] } }]
+    },
+    logger: { debug() {} },
+  }, { args: { query: '纯词法查询' } })
+  assert.equal(entry.data.count, 0)
+  assert.equal(calls.length, 1)
+  assert.equal(hydeCalled, 0, '没有向量通道就不进 HyDE 分支')
+})
+
+test('HyDE：hydeVector 复用提取槽自定义端点；宿主模式/端点失败返回 null', async () => {
+  const original = globalThis.fetch
+  const seen = []
+  globalThis.fetch = async (url, options) => {
+    seen.push(url)
+    if (url.includes('/chat/completions')) {
+      const body = JSON.parse(options.body)
+      assert.match(body.messages[0].content, /查询扩展器/)
+      assert.match(body.messages[1].content, /用户查询：我之前让你做什么/)
+      return { ok: true, text: async () => JSON.stringify(
+        { choices: [{ message: { content: '用户让我查 dsh-bilibili 插件并审源码' } }] }) }
+    }
+    return { ok: true, text: async () => JSON.stringify(
+      { data: [{ embedding: [0.3] }] }) }
+  }
+  try {
+    const settings = {
+      embedding: { baseUrl: 'http://h/v1', model: 'bge-m3', dim: 1 },
+      'model.extract': { mode: 'custom', baseUrl: 'http://h/v1', model: 'gen' },
+    }
+    const vector = await hydeVector(settings, '我之前让你做什么')
+    assert.deepEqual(vector, [0.3])
+    assert.equal(seen[0], 'http://h/v1/chat/completions')
+    assert.equal(seen[1], 'http://h/v1/embeddings')
+    // 生成空内容 → null
+    globalThis.fetch = async url => ({ ok: true, text: async () => JSON.stringify(
+      url.includes('/chat')
+        ? { choices: [{ message: { content: '   ' } }] }
+        : { data: [{ embedding: [0.3] }] }) })
+    assert.equal(await hydeVector(settings, 'x'), null)
+    // 提取槽是宿主模式（无自定义端点）→ 不生成，直接 null
+    const hostSettings = { embedding: settings.embedding,
+                           'model.extract': { mode: 'host' } }
+    assert.equal(await hydeVector(hostSettings, 'x'), null)
+    // embedding 未配置 → null
+    assert.equal(await embedQuery({}, 'x'), null)
   } finally {
     globalThis.fetch = original
   }

@@ -163,6 +163,13 @@ CREATE TABLE IF NOT EXISTS digest (
   updated_at    TEXT NOT NULL
 );
 
+-- 插件设置（模型/embedding 等）：本地键值，JSON 字符串
+CREATE TABLE IF NOT EXISTS app_setting (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_exp_origin  ON experience(origin_project, status);
 CREATE INDEX IF NOT EXISTS idx_exp_event   ON experience(source_event_id);
 CREATE INDEX IF NOT EXISTS idx_cog_origin  ON cognition(origin_project, status);
@@ -305,6 +312,11 @@ class EventSpan:
 
 
 # l3 两表共用列：检索时用 UNION ALL 合成一个视图
+_VEC_TABLES = {
+    "experience": "vec_experience",
+    "cognition": "vec_cognition",
+    "insight": "vec_insight",
+}
 _L3_COLUMNS = (
     "content", "kind", "confidence", "importance",
     "origin_session", "origin_project", "source_event_id", "cues",
@@ -521,7 +533,10 @@ class Database:
         # 临时表放内存：沙箱/受限环境里系统临时目录可能不可写，
         # 而 FTS5 的 DROP/CREATE 会用到临时存储（表现为 unable to open database file）
         self._conn.execute("PRAGMA temp_store = MEMORY")
+        self._vec_enabled = self._load_vec()
         self.init_schema()
+        if self._vec_enabled:
+            self._init_vec_tables()
 
     # ---- 生命周期 ----
 
@@ -529,6 +544,142 @@ class Database:
         with self._lock:
             self._conn.executescript(SCHEMA)
             self._migrate()
+
+    # ---- sqlite-vec ----
+
+    def _load_vec(self) -> bool:
+        '''加载 sqlite-vec 扩展；失败只降级，不影响主库。'''
+        try:
+            import sqlite_vec
+            self._conn.enable_load_extension(True)
+            sqlite_vec.load(self._conn)
+            self._conn.enable_load_extension(False)
+            self._conn.execute("SELECT vec_version()").fetchone()
+            return True
+        except Exception as exc:
+            base.log.warning("db.vec_unavailable", error=repr(exc))
+            return False
+
+    def _init_vec_tables(self):
+        dim = int(config.get_config().get("embedding", {}).get("dim", 1024))
+        self._vec_dim = dim
+        for kind, table in _VEC_TABLES.items():
+            row = self._conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                (table,)).fetchone()
+            if row is not None and f"float[{dim}]" not in (row["sql"] or "").lower():
+                self._conn.execute(f"DROP TABLE {table}")   # 维度变了：重建（需重索引）
+                row = None
+            if row is None:
+                self._conn.execute(
+                    f"CREATE VIRTUAL TABLE {table} USING vec0("
+                    f"ref_id INTEGER PRIMARY KEY, origin_project TEXT, "
+                    f"embedding FLOAT[{dim}])")
+        self._conn.commit()
+
+    @staticmethod
+    def _vec_blob(vector) -> bytes:
+        import sqlite_vec
+        return sqlite_vec.serialize_float32([float(x) for x in vector])
+
+    def vec_upsert(self, kind: str, ref_id: int, vector,
+                   origin_project: str | None = None) -> bool:
+        table = _VEC_TABLES.get(kind)
+        if not self._vec_enabled or table is None or not vector:
+            return False
+        blob = self._vec_blob(vector)
+        with self.transaction() as conn:
+            conn.execute(f"DELETE FROM {table} WHERE ref_id = ?", (int(ref_id),))
+            conn.execute(
+                f"INSERT INTO {table} (ref_id, origin_project, embedding) "
+                f"VALUES (?, ?, ?)",
+                (int(ref_id), origin_project or "", blob))
+        return True
+
+    def vec_unindex(self, kind: str, ref_id: int) -> bool:
+        '''移除一条向量（只清索引，记忆行本身不动）。'''
+        table = _VEC_TABLES.get(kind)
+        if not self._vec_enabled or table is None:
+            return False
+        with self.transaction() as conn:
+            self._vec_remove(conn, kind, ref_id)
+        return True
+
+    def _vec_remove(self, conn, kind: str, ref_id: int) -> None:
+        '''在当前事务里清掉一条向量（记忆行本身不动，只清索引）。'''
+        table = _VEC_TABLES.get(kind)
+        if not self._vec_enabled or table is None:
+            return
+        conn.execute(f"DELETE FROM {table} WHERE ref_id = ?", (int(ref_id),))
+
+    def vec_search(self, kind: str, vector, k: int = 50,
+                   origin_project: str | None = None,
+                   scope: str = "all") -> dict:
+        '''返回 {ref_id: cosine distance}；scope=project 时合并「本项目 + 通用」。'''
+        table = _VEC_TABLES.get(kind)
+        if not self._vec_enabled or table is None or not vector:
+            return {}
+        blob = self._vec_blob(vector)
+        limit = max(1, int(k))
+
+        def run(project: str | None):
+            sql = (f"SELECT ref_id, distance FROM {table} "
+                   f"WHERE embedding MATCH ? AND k = {limit}")
+            params = [blob]
+            if project is not None:
+                sql += " AND origin_project = ?"
+                params.append(project)
+            try:
+                return {int(row["ref_id"]): float(row["distance"])
+                        for row in self._conn.execute(sql, params)}
+            except sqlite3.Error as exc:
+                base.log.warning("db.vec_search_failed", kind=kind, error=repr(exc))
+                return {}
+
+        if scope == "project":
+            merged = run(origin_project or "")
+            for ref_id, distance in run("").items():
+                merged[ref_id] = min(distance, merged.get(ref_id, distance))
+            return merged
+        return run(None)
+
+    def vec_status(self) -> dict:
+        tables = {}
+        if self._vec_enabled:
+            for kind, table in _VEC_TABLES.items():
+                try:
+                    count = self._conn.execute(
+                        f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"]
+                except sqlite3.Error:
+                    count = 0
+                tables[kind] = int(count)
+        return {"enabled": self._vec_enabled,
+                "dim": getattr(self, "_vec_dim", 0), "counts": tables}
+
+    # ---- 插件设置 ----
+
+    def get_setting(self, key: str):
+        row = self._conn.execute(
+            "SELECT value FROM app_setting WHERE key = ?", (key,)).fetchone()
+        if row is None:
+            return None
+        try:
+            return json.loads(row["value"])
+        except (TypeError, ValueError):
+            return None
+
+    def set_setting(self, key: str, value) -> None:
+        payload = json.dumps(value, ensure_ascii=False)
+        with self.transaction() as conn:
+            conn.execute(
+                "INSERT INTO app_setting (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+                "updated_at = excluded.updated_at",
+                (key, payload, base.get_cur_time()))
+
+    def list_settings(self) -> dict:
+        return {row["key"]: json.loads(row["value"])
+                for row in self._conn.execute("SELECT key, value FROM app_setting")}
 
     def _migrate(self):
         '''老库补列：CREATE TABLE IF NOT EXISTS 不会给已存在的表加字段。'''
@@ -1293,6 +1444,18 @@ class Database:
         '''按条件取经验；origin_project 给定时包含通用条目（origin_project IS NULL）。'''
         return self._list_l3("experience", Experience, **kwargs)
 
+    def list_l3_by_event(self, table: str, event_id: int) -> list:
+        '''按来源事件取 l3（向量索引/回填用）。'''
+        if table == "experience":
+            model = Experience
+        elif table == "cognition":
+            model = Cognition
+        else:
+            raise ValueError(f"不支持的表: {table!r}")
+        rows = self._conn.execute(
+            f"SELECT * FROM {table} WHERE source_event_id = ?", (int(event_id),)).fetchall()
+        return [model.from_row(row) for row in rows]
+
     def list_cognitions(self, **kwargs) -> list:
         return self._list_l3("cognition", Cognition, **kwargs)
 
@@ -1323,6 +1486,7 @@ class Database:
             # 失效条目退出全文索引，否则会一直占用召回名额（同事务，不留残影）
             conn.execute("DELETE FROM memory_fts WHERE ref_kind = ? AND ref_id = ?",
                          (table, old_id))
+            self._vec_remove(conn, table, old_id)
             return new_id
 
     def supersede_experience(self, old_id: int, item: Experience) -> int | None:
@@ -1348,6 +1512,7 @@ class Database:
                 return False
             conn.execute("DELETE FROM memory_fts WHERE ref_kind = ? AND ref_id = ?",
                          (table, item_id))
+            self._vec_remove(conn, table, item_id)
             return True
 
     def invalidate_experience(self, item_id: int, reason: str) -> bool:

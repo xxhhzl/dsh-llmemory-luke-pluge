@@ -181,45 +181,69 @@ def _weights() -> dict:
 
 
 def _candidates(db: database.Database, query: str, origin_project: str | None,
-                scope: str, kinds: Iterable[str], now: datetime) -> dict:
+                scope: str, kinds: Iterable[str], now: datetime,
+                query_vector: list | None = None) -> dict:
     '''
-    召回：{ (kind, id): {"row":..., "rel":..., "assoc":...} }
+    多路召回 + RRF 融合：{ (kind, id): {"row":..., "rel":..., "assoc":...} }
 
-    取数走批量 `get_many`：旧实现每条命中各查一次库，一次检索实测上百条 SQL。
+    路：FTS5 BM25 + sqlite-vec KNN（若有 query_vector）+ 结构联想。
+    RRF(k=60) 融合，rel 只是相对名次；最终排序仍由 _score 的精排决定。
     '''
-    found = {}
+    wanted = set(kinds)
+    fts_rank: dict = {}
     hits = [item for item in db.search_fts(
                 query, limit=RECALL_LIMIT, origin_project=origin_project,
                 restrict_project=(scope == "project"))
-            if item["ref_kind"] in kinds]
-    grouped: dict[str, list] = {}
+            if item["ref_kind"] in wanted]
     for rank, item in enumerate(hits):
-        grouped.setdefault(item["ref_kind"], []).append((rank, int(item["ref_id"])))
+        fts_rank.setdefault((item["ref_kind"], int(item["ref_id"])), rank)
 
-    associated = 0
-    for kind, entries in grouped.items():
-        rows = db.get_many(kind, [row_id for _, row_id in entries])
-        for rank, row_id in entries:
+    vec_rank: dict = {}
+    if query_vector and getattr(db, "_vec_enabled", False):
+        for kind in ("experience", "cognition", "insight"):
+            if kind not in wanted:
+                continue
+            distances = db.vec_search(kind, query_vector, k=RECALL_LIMIT,
+                                      origin_project=origin_project, scope=scope)
+            for rank, (ref_id, _distance) in enumerate(
+                    sorted(distances.items(), key=lambda item: item[1])):
+                vec_rank[(kind, ref_id)] = rank
+
+    keys = set(fts_rank) | set(vec_rank)
+    grouped: dict[str, list] = {}
+    for kind, row_id in keys:
+        grouped.setdefault(kind, []).append(row_id)
+
+    found = {}
+    for kind, ids in grouped.items():
+        rows = db.get_many(kind, ids)
+        for row_id in ids:
             row = rows.get(row_id)
             if row is None or not _eligible(row, origin_project, scope, now):
                 continue
-            found[(kind, row_id)] = {"row": row, "rel": 1.0 / (1.0 + rank),
+            score = 0.0
+            if (kind, row_id) in fts_rank:
+                score += 1.0 / (60 + fts_rank[(kind, row_id)])
+            if (kind, row_id) in vec_rank:
+                score += 1.0 / (60 + vec_rank[(kind, row_id)])
+            found[(kind, row_id)] = {"row": row, "rel": score or 0.001,
                                      "assoc": 1.0}
-            # 联想扩展：同 subject / 同 cues 的 l3 以 0.5 分进候选。
-            # 有总量上限：否则 50 条命中各查一次，延迟随命中数线性增长。
-            # 洞见没有 l3 的 subject/context 结构，不做联想扩展。
-            if kind in ("event", "insight") or associated >= MAX_ASSOCIATIONS:
+
+    associated = 0
+    for (kind, _row_id), entry in list(found.items()):
+        row = entry["row"]
+        if kind in ("event", "insight") or associated >= MAX_ASSOCIATIONS:
+            continue
+        for other in db.find_l3_candidates(
+                kind, subject=getattr(row, "subject", None),
+                query=_first_cue(row), origin_project=origin_project, limit=3):
+            associated += 1
+            key = (kind, other.id)
+            if key in found or not _eligible(other, origin_project, scope, now):
                 continue
-            for other in db.find_l3_candidates(
-                    kind, subject=getattr(row, "subject", None),
-                    query=_first_cue(row), origin_project=origin_project, limit=3):
-                associated += 1
-                key = (kind, other.id)
-                if key in found or not _eligible(other, origin_project, scope, now):
-                    continue
-                found[key] = {"row": other, "rel": 0.5, "assoc": 0.5}
-                if associated >= MAX_ASSOCIATIONS:
-                    break
+            found[key] = {"row": other, "rel": 0.01, "assoc": 0.5}
+            if associated >= MAX_ASSOCIATIONS:
+                break
     return found
 
 
@@ -347,7 +371,7 @@ def _select(scored: list, limit: int, weights: dict) -> list:
 def search(db: database.Database, query: str, *, origin_project: str | None = None,
            scope: str | None = None, limit: int = 10,
            kinds: Iterable[str] = ("event", "experience", "cognition", "insight"),
-           touch: bool = True) -> list:
+           touch: bool = True, query_vector: list | None = None) -> list:
     '''
     记忆检索：返回按综合分排序的 Hit 列表。
 
@@ -364,7 +388,8 @@ def search(db: database.Database, query: str, *, origin_project: str | None = No
         raise ValueError(f"scope 只能是 project / all，收到 {scope!r}")
     weights = _weights()
     now = _now()
-    found = _candidates(db, query, origin_project, scope, set(kinds), now)
+    found = _candidates(db, query, origin_project, scope, set(kinds), now,
+                        query_vector=query_vector)
     if not found:
         return []
     scored = _score(found, weights, origin_project)

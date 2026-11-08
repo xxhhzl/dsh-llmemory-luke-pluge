@@ -668,13 +668,14 @@ class IngestWorker:
                                  last_at=msgs[-1]["ts"], tokens=event.tokens)
                 summary = extract(meta, msgs, self._summary_factory(),
                                   existing=_existing_memories(db, msgs))
-                ingest_event(db, session_id=job["session_id"], summary=summary,
-                             transport=self._consolidate_factory(),
-                             origin_project=job.get("origin_project"),
-                             message_ids=event.message_ids, refresh=False)
+                ing = ingest_event(db, session_id=job["session_id"], summary=summary,
+                                   transport=self._consolidate_factory(),
+                                   origin_project=job.get("origin_project"),
+                                   message_ids=event.message_ids, refresh=False)
                 created += 1
                 summaries += 1 if summary.ok else 0
                 closed += 1
+                self._index_event(db, ing.event.id)
             except Exception as exc:
                 failed += 1
                 base.log.error("ingest.event_failed", session_id=job["session_id"],
@@ -682,6 +683,15 @@ class IngestWorker:
                 continue
         return {"created": created, "resumed": resumed, "summaries": summaries,
                 "closed": closed, "conflicts": conflicts, "failed": failed}
+
+    def _index_event(self, db, event_id: int) -> None:
+        '''向量索引（失败只降级为纯词法，不影响落库）。'''
+        try:
+            import embed
+            embed.index_event(db, event_id)
+        except Exception as exc:
+            base.log.warning("ingest.vec_index_failed", event_id=event_id,
+                             error=repr(exc))
 
     def _bind_new_messages(self, db, job, message_ids, bound: int) -> tuple:
         '''
@@ -763,6 +773,7 @@ class IngestWorker:
                      origin_project=job.get("origin_project"),
                      message_ids=[m["msg_id"] for m in new_messages],
                      refresh=False)
+        self._index_event(db, event_id)
         db.index_fts("event", event_id, summary.title, summary.summary or "",
                      origin_project=event.origin_project,
                      session_id=job["session_id"])

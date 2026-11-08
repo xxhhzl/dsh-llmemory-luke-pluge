@@ -6,6 +6,7 @@ import base
 import admin
 import commands
 import core
+import embed
 import ingest
 import llm
 import routo
@@ -50,6 +51,8 @@ def routo_init(routo_table: routo.routo_register):
     routo_table.register("ingest.request", ingest.ingest_request)
     # 外壳代理的模型调用应答：按 request_id 唤醒等待中的 worker
     routo_table.register("llm.result", llm.on_result)
+    routo_table.register("embed.result", embed.on_result)
+    routo_table.register("settings.raw", admin.settings_raw)
 
 
 def drain(q: base.message_queue):
@@ -84,6 +87,7 @@ def main():
 
     # 模型调用一律走外壳代理：先绑定队列，后续业务模块用 llm.get_client()
     llm.bind(message_q)
+    embed.bind(message_q)
 
     # 常驻写线程 + 后台 ingest worker：主线程只负责读 stdin 与分发，
     # 模型调用（llm.request/llm.result）和异步帧都不会阻塞它。

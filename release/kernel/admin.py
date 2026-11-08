@@ -463,6 +463,94 @@ def self_disable(db, data: dict) -> dict:
     return {"id": row_id, "status": "invalid", "reason": reason}
 
 
+SETTING_KEYS = ("model.jev", "model.extract", "embedding")
+_SECRET_FIELDS = ("apiKey", "key")
+
+
+def _mask_setting(value):
+    '''读取设置时隐藏 key，只留尾 4 位。'''
+    if not isinstance(value, dict):
+        return value
+    masked = dict(value)
+    for field in _SECRET_FIELDS:
+        secret = masked.get(field)
+        if isinstance(secret, str) and secret:
+            masked[field] = f"…{secret[-4:]}" if len(secret) > 4 else "…"
+    return masked
+
+
+def settings_get(db, data: dict) -> dict:
+    stored = db.list_settings()
+    items = {}
+    for key in SETTING_KEYS:
+        value = stored.get(key)
+        if value is not None:
+            items[key] = _mask_setting(value)
+    return {"items": items, "keys": list(SETTING_KEYS)}
+
+
+def settings_raw(data, q):
+    '''外壳专用：返回未脱敏设置（key 只在宿主进程间传递，不经 HTTP）。'''
+    import frame as _frame
+    _frame.push(q, data, "settings.raw", {"items": _db().list_settings()})
+
+
+def settings_set(db, data: dict) -> dict:
+    key = str(data.get("key") or "").strip()
+    if key not in SETTING_KEYS:
+        raise AdminError(f"未知设置项: {key!r}")
+    value = data.get("value")
+    if not isinstance(value, dict):
+        raise AdminError("value 必须是对象")
+    old = db.get_setting(key) or {}
+    merged = {**(old if isinstance(old, dict) else {}), **value}
+    # UI 只能拿到掩码 key：空值或掩码值表示“保持原 key”
+    secret = str(value.get("apiKey") or "")
+    if (not secret or secret.startswith("…")) and isinstance(old, dict) and old.get("apiKey"):
+        merged["apiKey"] = old["apiKey"]
+    db.set_setting(key, merged)
+    return {"key": key, "value": _mask_setting(merged)}
+
+
+_REINDEX = {"running": False, "done": 0, "total": 0, "error": ""}
+
+
+def vec_status(db, data: dict) -> dict:
+    return {**db.vec_status(), "reindex": dict(_REINDEX)}
+
+
+def vec_reindex(db, data: dict) -> dict:
+    '''后台重建向量索引（sqlite-vec + 外壳 embedding）。'''
+    if _REINDEX["running"]:
+        return {"started": False, "reason": "already_running"}
+    _REINDEX.update({"running": True, "done": 0, "total": 0, "error": ""})
+
+    def work():
+        try:
+            import embed
+            rows = []
+            for kind, loader in (
+                    ("experience", lambda: db.list_experiences(limit=100000)),
+                    ("cognition", lambda: db.list_cognitions(limit=100000)),
+                    ("insight", lambda: db.list_insights(limit=100000))):
+                for row in loader():
+                    if getattr(row, "status", "active") == "active":
+                        rows.append((kind, row))
+            _REINDEX["total"] = len(rows)
+            for index in range(0, len(rows), 16):
+                batch = rows[index:index + 16]
+                embed.index_rows(db, batch)
+                _REINDEX["done"] = min(len(rows), index + len(batch))
+        except Exception as exc:
+            _REINDEX["error"] = str(exc)
+        finally:
+            _REINDEX["running"] = False
+
+    import threading
+    threading.Thread(target=work, name="vec-reindex", daemon=True).start()
+    return {"started": True}
+
+
 def describe(db) -> dict:
     conn = db._conn
     tables = []
@@ -496,6 +584,10 @@ _OPS = {
     "self.list": self_list,
     "self.set": self_set,
     "self.disable": self_disable,
+    "settings.get": settings_get,
+    "settings.set": settings_set,
+    "vec.status": vec_status,
+    "vec.reindex": vec_reindex,
     "core.preview": lambda db, data: core.compile_core(db),
 }
 
@@ -517,6 +609,8 @@ def admin(data, q: base.message_queue):
         if op.startswith("self.") or (op in ("insert", "update", "delete")
                                       and payload.get("table") == "self_memory"):
             frame.push(q, data, "notify", {"kind": "core"})
+        if op == "settings.set":
+            frame.push(q, data, "notify", {"kind": "settings"})
     except AdminError as exc:
         frame.push(q, data, "admin", {"ok": False, "op": op, "error": str(exc)})
     except Exception as exc:      # 兜底：管理界面不能把内核打挂

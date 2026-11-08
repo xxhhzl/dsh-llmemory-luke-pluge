@@ -196,5 +196,12 @@ def induce(db: database.Database, transport, *, min_support: int = 3,
                              origin_project=None,
                              session_id=rows[0].origin_session)
                 ids.append(new_id)
+                try:                    # 向量索引：失败不影响洞见落库
+                    import embed
+                    row = db.get_insight(new_id)
+                    if row is not None:
+                        embed.index_rows(db, [("insight", row)])
+                except Exception:
+                    pass
         report.append({"cluster": cue, "insights": insights, "ids": ids})
     return report

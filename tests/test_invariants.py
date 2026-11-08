@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import re
 import shutil
 import sys
 import unittest
@@ -18,6 +19,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import config
 import consolidate
 from consolidate import parse_decisions
 from database import Cognition, Database, Experience, Memory, Message
@@ -221,6 +223,17 @@ class TestEventScope(InvariantCase):
         result = apply_summary(self.db, session_id=S1, summary=summary(),
                                origin_project="proj_b")
         self.assertEqual(result.event.origin_project, "proj_b")
+
+
+class TestVersionConsistency(unittest.TestCase):
+    """版本号只有一处真相：Python 内核与 JS 信封必须一致，否则排查升级问题很费劲。"""
+
+    def test_frames_js_matches_config(self):
+        text = (Path(__file__).resolve().parents[1] / "src" / "js" / "frames.js"
+                ).read_text(encoding="utf-8")
+        match = re.search(r"export const PLUGIN_VERSION = '([^']+)'", text)
+        self.assertIsNotNone(match, "frames.js 里找不到 PLUGIN_VERSION")
+        self.assertEqual(match.group(1), config.PLUGIN_VERSION)
 
 
 if __name__ == "__main__":

@@ -435,5 +435,67 @@ class TestSelf(AdminCase):
         self.assertIn("我是 A", preview["text"])
 
 
+class TestSettings(AdminCase):
+    '''三槽模型设置：读时脱敏、写时保住原 key、只收白名单键。'''
+
+    def test_read_is_masked(self):
+        admin.settings_set(self.db, {"key": "model.jev", "value": {
+            "mode": "custom", "baseUrl": "http://127.0.0.1:11434/v1",
+            "model": "bge-m3", "apiKey": "sk-123456"}})
+        items = admin.settings_get(self.db, {})["items"]
+        self.assertEqual(items["model.jev"]["apiKey"], "…3456")
+        self.assertEqual(items["model.jev"]["model"], "bge-m3")
+        self.assertNotIn("sk-123456", json.dumps(items, ensure_ascii=False))
+
+    def test_masked_or_empty_key_keeps_secret(self):
+        admin.settings_set(self.db, {"key": "model.extract", "value": {
+            "mode": "custom", "apiKey": "sk-abcdef"}})
+        # 页面拿到的永远是掩码：原样回传不能被当成新 key 存下来
+        admin.settings_set(self.db, {"key": "model.extract", "value": {
+            "mode": "host", "apiKey": "…cdef"}})
+        raw = self.db.get_setting("model.extract")
+        self.assertEqual(raw["apiKey"], "sk-abcdef")
+        self.assertEqual(raw["mode"], "host")
+
+        admin.settings_set(self.db, {"key": "model.extract", "value": {"apiKey": ""}})
+        self.assertEqual(self.db.get_setting("model.extract")["apiKey"], "sk-abcdef")
+
+    def test_new_key_overwrites(self):
+        admin.settings_set(self.db, {"key": "embedding", "value": {
+            "baseUrl": "http://127.0.0.1:11434/v1", "apiKey": "old-key"}})
+        admin.settings_set(self.db, {"key": "embedding", "value": {
+            "apiKey": "new-key"}})
+        self.assertEqual(self.db.get_setting("embedding")["apiKey"], "new-key")
+        self.assertEqual(self.db.get_setting("embedding")["baseUrl"],
+                         "http://127.0.0.1:11434/v1", '未提交的字段沿用旧值')
+
+    def test_rejects_unknown_key_and_bad_value(self):
+        with self.assertRaises(admin.AdminError):
+            admin.settings_set(self.db, {"key": "store.db_path", "value": {}})
+        with self.assertRaises(admin.AdminError):
+            admin.settings_set(self.db, {"key": "embedding", "value": "flat"})
+
+    def test_set_pushes_settings_notify(self):
+        q = base.message_queue()
+        admin.admin({"type": "admin", "request_id": "r1", "session_id": S1,
+                     "agent_id": "a1",
+                     "data": {"op": "settings.set", "key": "embedding",
+                              "value": {"model": "bge-m3"}}}, q)
+        first = json.loads(q.recv())
+        second = json.loads(q.recv())
+        self.assertEqual(first["type"], "admin")
+        self.assertTrue(first["data"]["ok"])
+        self.assertEqual(second["type"], "notify")
+        self.assertEqual(second["data"]["kind"], "settings")
+
+    def test_vec_status_shape(self):
+        status = admin.vec_status(self.db, {})
+        self.assertIn("enabled", status)
+        self.assertIn("dim", status)
+        self.assertIn("counts", status)
+        self.assertIn("reindex", status)
+        self.assertFalse(status["reindex"]["running"])
+
+
 if __name__ == "__main__":
     unittest.main()

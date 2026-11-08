@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import argparse
 import filecmp
+import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -27,7 +29,8 @@ RELEASE = ROOT / "release"
 # 宿主侧模块 -> release/lib/；client.js 是浏览器入口，必须放包根（manifest 指向 ./client.js）
 JS_FILES = ("index.js", "shell.js", "lifecycle.js", "trace.js", "kernel.js",
             "frames.js", "llm-bridge.js", "tools-bridge.js", "ingest-bridge.js",
-            "core-prompt.js", "commands.js", "stats-route.js", "services.js")
+            "model-config.js", "core-prompt.js", "commands.js", "stats-route.js",
+            "services.js")
 CLIENT_FILE = "client.js"
 
 
@@ -82,7 +85,29 @@ def check() -> list[str]:
     extras = [p.name for p in (RELEASE / "kernel").glob("*.py")
               if not (SRC / p.name).exists()] if (RELEASE / "kernel").exists() else []
     stale.extend(f"kernel/{name}（源码已删除）" for name in extras)
+    stale.extend(_version_drift())
     return stale
+
+
+def _version_drift() -> list[str]:
+    """package.json / frames.js 的版本必须跟上内核（升级后显示旧版本就是这里漏了）。"""
+    match = re.search(r'PLUGIN_VERSION = "([^"]+)"',
+                      (SRC / "config.py").read_text(encoding="utf-8"))
+    if match is None:
+        return ["src/config.py 缺少 PLUGIN_VERSION"]
+    expected = match.group(1)
+    drift: list[str] = []
+    manifest = RELEASE / "package.json"
+    if manifest.exists():
+        declared = json.loads(manifest.read_text(encoding="utf-8")).get("version")
+        if declared != expected:
+            drift.append(f'package.json 版本 {declared} ≠ 内核 {expected}')
+    js_match = re.search(r"PLUGIN_VERSION = '([^']+)'",
+                         (JS_SRC / "frames.js").read_text(encoding="utf-8"))
+    if js_match is None or js_match.group(1) != expected:
+        drift.append(f"lib/frames.js 版本 {js_match.group(1) if js_match else '缺失'}"
+                     f" ≠ 内核 {expected}")
+    return drift
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -3,6 +3,7 @@
  *
  *   GET  /longmemory/stats                              统计（设置页概况）
  *   POST /longmemory/api                                管理 API：{op: tables|list|get|insert|update|delete, ...}
+ *   POST /longmemory/test                               模型连通性测试 {kind: jev|extract|embedding}
  *   GET  /longmemory/logs?source=shell|kernel&lines=200 插件日志尾部
  *
  * 安全边界：这些接口能改记忆库，只接受本机回环请求；不提供跨机访问。
@@ -12,6 +13,7 @@ import { homedir } from 'node:os'
 import path from 'node:path'
 
 import { optionalService } from './services.js'
+import { chatCompletion, embedTexts } from './model-config.js'
 
 const MAX_BODY_BYTES = 1_000_000
 const MAX_LOG_LINES = 1000
@@ -154,7 +156,7 @@ function sendJson(res, status, payload) {
 }
 
 export function registerLongmemoryRoutes(ctx, {
-  kernel, agentId = '', timeoutMs = 15_000, trace = () => {},
+  kernel, agentId = '', timeoutMs = 15_000, trace = () => {}, getSettings = null,
 } = {}) {
   // 服务名是 `webServer`（cordis Service 名，大小写敏感）；`webserver` 仅为容错
   const server = optionalService(ctx, 'webServer') ?? optionalService(ctx, 'webserver')
@@ -180,7 +182,20 @@ export function registerLongmemoryRoutes(ctx, {
             && (req.method === 'GET' || req.method === 'HEAD')) {
           const sessionId = url.searchParams.get('session_id') ?? ''
           const data = await kernel.request('stats', {}, { sessionId, agentId, timeoutMs })
-          sendJson(res, 200, data)
+          const current = getSettings?.() || {}
+          const shape = profile => {
+            if (!profile) return null
+            const { apiKey, ...rest } = profile
+            return rest
+          }
+          sendJson(res, 200, {
+            ...data,
+            models: {
+              jev: shape(current['model.jev']),
+              extract: shape(current['model.extract']),
+              embedding: shape(current.embedding),
+            },
+          })
           return
         }
 
@@ -192,6 +207,28 @@ export function registerLongmemoryRoutes(ctx, {
             source,
             lines: data.slice(-Math.max(1, Math.min(lines || 200, MAX_LOG_LINES))),
           })
+          return
+        }
+
+        if (route === '/longmemory/test' && req.method === 'POST') {
+          const payload = await readJsonBody(req).catch(() => ({}))
+          const kind = String(payload.kind || '')
+          const current = getSettings?.() || {}
+          const profile = payload.profile
+            || (kind === 'embedding' ? current.embedding
+                : current[kind === 'jev' ? 'model.jev' : 'model.extract'])
+          if (!profile) throw new Error('没有可测试的模型配置')
+          const started = Date.now()
+          if (kind === 'embedding') {
+            const vectors = await embedTexts(profile, ['ping', '测试'])
+            sendJson(res, 200, { ok: true, dim: vectors[0]?.length || 0,
+                                 count: vectors.length, ms: Date.now() - started })
+          } else {
+            const result = await chatCompletion(profile, { system: '', user: '只回复 OK' })
+            sendJson(res, 200, { ok: true, model: result.model,
+                                 sample: String(result.content || '').slice(0, 80),
+                                 ms: Date.now() - started })
+          }
           return
         }
 

@@ -11,6 +11,7 @@ import { mkdirSync } from 'node:fs'
 import { Kernel } from './kernel.js'
 import { IngestBridge } from './ingest-bridge.js'
 import { CorePrompt } from './core-prompt.js'
+import { defaultSettings, embedTexts, loadSettings } from './model-config.js'
 import { registerMemoryCommand } from './commands.js'
 import { registerLongmemoryRoutes } from './stats-route.js'
 import { trace as defaultTrace } from './trace.js'
@@ -101,6 +102,12 @@ export function createShell(ctx, config = {}, {
     timeoutMs: config.requestTimeoutMs ?? 15000,
     trace,
   })
+  // 三槽模型配置（JEV / 提取 / Embedding）；默认继承宿主
+  let modelSettings = defaultSettings(config)
+  const refreshSettings = async () => {
+    modelSettings = await loadSettings(kernel, config)
+    return modelSettings
+  }
 
   const toolDisposers = []
   const extraDisposers = []
@@ -122,7 +129,7 @@ export function createShell(ctx, config = {}, {
         model: config.model,
         maxTokens: config.maxTokens,
         requestTimeoutMs: config.llmTimeoutMs ?? 120000,
-      })
+      }, modelSettings)
       kernel.send('llm.result', data, {
         request_id: frame.request_id,
         session_id: frame.session_id,
@@ -144,6 +151,7 @@ export function createShell(ctx, config = {}, {
     await waitHealthy(kernel)
     // 环境变量已给出库路径；再显式 set 一次，保证运行期配置一致
     await kernel.request('config.set', { patch: { store: { db_path: dbFile } } })
+    await refreshSettings()
     // 核心记忆在每次（重）连后刷新；失败不阻塞启动
     try {
       await corePrompt.refresh()
@@ -168,8 +176,36 @@ export function createShell(ctx, config = {}, {
     restarter.schedule(info)
   }
 
+  /** 内核 embed.request → 外壳 embedding 端点 → embed.result。 */
+  const handleEmbedRequest = async frame => {
+    const payload = frame?.data || {}
+    const requestId = payload.request_id || frame?.request_id || ''
+    try {
+      const vectors = await embedTexts(modelSettings.embedding, payload.input || [])
+      kernel.send('embed.result', {
+        request_id: requestId,
+        vectors,
+        model: modelSettings.embedding.model,
+        dim: vectors[0]?.length || 0,
+      }, { request_id: frame?.request_id })
+    } catch (error) {
+      kernel.send('embed.result', {
+        request_id: requestId,
+        error: { message: String(error?.message ?? error) },
+      }, { request_id: frame?.request_id })
+    }
+  }
+
   /** 记忆写入完成后刷新核心记忆（版本不变时内部不更新文本）。 */
   const onKernelFrame = frame => {
+    if (frame?.type === 'embed.request') {
+      void handleEmbedRequest(frame)
+      return
+    }
+    if (frame?.type === 'notify' && frame?.data?.kind === 'settings') {
+      void refreshSettings()
+      return
+    }
     if (frame?.type === 'notify' && frame?.data?.kind === 'core') {
       corePrompt.refresh().catch(error => {
         trace(`core refresh failed: ${error?.message ?? error}`)
@@ -196,6 +232,7 @@ export function createShell(ctx, config = {}, {
       'tools.schema', {}), {
       agentId,
       timeoutMs: config.requestTimeoutMs ?? 30000,
+      getSettings: () => modelSettings,
     }))
     if (disposed) return { tools: toolDisposers.length }
     bridge.attach()
@@ -207,6 +244,7 @@ export function createShell(ctx, config = {}, {
       })],
       ['routes:/longmemory/*', () => registerLongmemoryRoutes(ctx, {
         kernel, agentId, timeoutMs: config.requestTimeoutMs ?? 15000, trace,
+        getSettings: () => modelSettings,
       })],
     ]) {
       try {

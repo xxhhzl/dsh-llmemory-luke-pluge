@@ -16,6 +16,8 @@ import { CorePrompt, CORE_SECTION, SELF_NOTES_CONTEXT }
   from '../../src/js/core-prompt.js'
 import { buildFrame, decodeFrame, encodeFrame } from '../../src/js/frames.js'
 import { IngestBridge, contentToText } from '../../src/js/ingest-bridge.js'
+import { defaultSettings, mergeSettings, profileFor, chatCompletion, embedTexts }
+  from '../../src/js/model-config.js'
 import { registerLongmemoryRoutes, isLoopback, authorizeRequest,
   isAllowedHost, isAllowedOrigin, hostnameOf, tailLog }
   from '../../src/js/stats-route.js'
@@ -461,4 +463,128 @@ test('核心记忆：宿主没有 systemPrompt 时安全跳过', () => {
   const prompt = new CorePrompt({}, {}, { trace: () => {} })
   assert.equal(prompt.attach(), false)
   prompt.dispose()
+})
+
+/* ---------------- 三槽模型配置 ---------------- */
+
+test('模型三槽：默认继承宿主，存储值只覆盖给出的字段', () => {
+  const defaults = defaultSettings({ provider: 'workbuddy', model: 'deepseek-v4.1-flash' })
+  assert.equal(defaults['model.jev'].mode, 'host')
+  assert.equal(defaults['model.jev'].provider, 'workbuddy')
+  assert.equal(defaults['model.extract'].model, 'deepseek-v4.1-flash')
+  assert.equal(defaults.embedding.model, 'bge-m3')
+  assert.equal(defaults.embedding.dim, 1024)
+
+  const merged = mergeSettings({ 'model.jev': {
+    mode: 'custom', baseUrl: 'http://h/v1', apiKey: 'sk-x',
+  } }, defaults)
+  assert.equal(merged['model.jev'].mode, 'custom')
+  assert.equal(merged['model.jev'].apiKey, 'sk-x')
+  assert.equal(merged['model.jev'].model, 'deepseek-v4.1-flash', '缺字段沿用默认')
+  assert.equal(merged['model.extract'].mode, 'host')
+  assert.equal(merged.embedding.baseUrl, defaults.embedding.baseUrl)
+  assert.equal(mergeSettings(null, defaults).embedding.dim, 1024, '没存过就全默认')
+})
+
+test('profileFor：jev 用 JEV 槽，其余文本调用用提取槽', () => {
+  const settings = { 'model.jev': { model: 'a' }, 'model.extract': { model: 'b' } }
+  assert.equal(profileFor(settings, 'jev').model, 'a')
+  for (const purpose of ['summary', 'consolidate', 'insight', 'self', undefined]) {
+    assert.equal(profileFor(settings, purpose).model, 'b')
+  }
+  assert.deepEqual(profileFor(null, 'jev'), {})
+})
+
+test('chatCompletion：OpenAI 兼容端点带 Bearer，取 choices[0]', async () => {
+  const calls = []
+  const original = globalThis.fetch
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options })
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        model: 'm1', usage: { total_tokens: 3 },
+        choices: [{ message: { content: 'OK' } }],
+      }),
+    }
+  }
+  try {
+    const result = await chatCompletion({
+      baseUrl: 'http://127.0.0.1:11434/v1/', model: 'm1', apiKey: 'sk-1', timeoutMs: 5000,
+    }, { system: 'sys', user: '只回复 OK' })
+    assert.equal(result.content, 'OK')
+    assert.equal(result.model, 'm1')
+    assert.equal(calls[0].url, 'http://127.0.0.1:11434/v1/chat/completions',
+      '拼接前去掉尾部斜杠')
+    const body = JSON.parse(calls[0].options.body)
+    assert.equal(body.model, 'm1')
+    assert.equal(body.temperature, 0)
+    assert.deepEqual(body.messages.map(item => item.role), ['system', 'user'])
+    assert.equal(body.messages[1].content, '只回复 OK')
+    assert.equal(calls[0].options.headers.authorization, 'Bearer sk-1')
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test('chatCompletion：缺 baseUrl 直接报错；HTTP 失败带状态码', async () => {
+  await assert.rejects(() => chatCompletion({ model: 'm1' }, { user: 'x' }), /baseUrl/)
+
+  const original = globalThis.fetch
+  globalThis.fetch = async () => ({
+    ok: false, status: 500, text: async () => 'internal error',
+  })
+  try {
+    await assert.rejects(
+      () => chatCompletion({ baseUrl: 'http://h/v1', model: 'm1' }, { user: 'x' }),
+      /HTTP 500/)
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test('embedTexts：openai 走 /embeddings，ollama 走 /api/embed', async () => {
+  const urls = []
+  const original = globalThis.fetch
+  globalThis.fetch = async (url, options) => {
+    urls.push(url)
+    const isOllama = url.endsWith('/api/embed')
+    assert.equal(JSON.parse(options.body).input.length, 1)
+    return {
+      ok: true,
+      text: async () => JSON.stringify(isOllama
+        ? { embeddings: [[0.1, 0.2]] }
+        : { data: [{ embedding: [0.1, 0.2] }] }),
+    }
+  }
+  try {
+    const openai = await embedTexts(
+      { baseUrl: 'http://h/v1', model: 'bge-m3', dim: 2 }, ['x'])
+    assert.deepEqual(openai, [[0.1, 0.2]])
+    const ollama = await embedTexts(
+      { baseUrl: 'http://h/v1', model: 'bge-m3', flavor: 'ollama', dim: 2 }, ['x'])
+    assert.deepEqual(ollama, [[0.1, 0.2]])
+    assert.deepEqual(urls, ['http://h/v1/embeddings', 'http://h/api/embed'],
+      'ollama 去掉 /v1 用原生接口')
+    assert.deepEqual(await embedTexts({ baseUrl: 'http://h/v1', model: 'm' }, []), [],
+      '空输入不发请求')
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test('embedTexts：维度与配置不符时报错', async () => {
+  const original = globalThis.fetch
+  globalThis.fetch = async () => ({
+    ok: true,
+    text: async () => JSON.stringify({ data: [{ embedding: [0.1, 0.2, 0.3] }] }),
+  })
+  try {
+    await assert.rejects(
+      () => embedTexts({ baseUrl: 'http://h/v1', model: 'm', dim: 1024 }, ['x']),
+      /维度/)
+  } finally {
+    globalThis.fetch = original
+  }
 })

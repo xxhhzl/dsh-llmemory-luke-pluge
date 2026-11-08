@@ -5,6 +5,7 @@
  * 这里把「system + 单轮 user」翻成 Harness 的 stream 调用并回文本。
  */
 import { BlockAssembler, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { chatCompletion, profileFor } from './model-config.js'
 
 const DEFAULT_PURPOSE = 'longmemory'
 
@@ -48,12 +49,28 @@ export function finishFailure(finish) {
  * 处理一帧 llm.request，返回要回给内核的 llm.result data。
  * 失败也返回结构化 error，让内核按自己的降级策略处理。
  */
-export async function handleLlmRequest(ctx, frame, config = {}) {
+export async function handleLlmRequest(ctx, frame, config = {}, settings = null) {
   const requestId = frame?.data?.request_id || frame?.request_id || ''
   const payload = frame?.data ?? {}
   const { system, user } = splitMessages(payload.messages)
+  const profile = profileFor(settings, payload.purpose || DEFAULT_PURPOSE)
+  const provider = profile.provider || config.provider
+  const model = profile.model || config.model
 
-  if (!config.provider || !config.model) {
+  if (profile.mode === 'custom' && profile.baseUrl) {
+    try {
+      const result = await chatCompletion(profile, { system, user })
+      return { request_id: requestId, content: result.content,
+               model: result.model, usage: result.usage }
+    } catch (error) {
+      return {
+        request_id: requestId,
+        error: { code: 'llm_error', message: String(error?.message ?? error) },
+      }
+    }
+  }
+
+  if (!provider || !model) {
     return {
       request_id: requestId,
       error: { code: 1004, message: '外壳未配置 provider / model（插件 config）' },
@@ -69,8 +86,8 @@ export async function handleLlmRequest(ctx, frame, config = {}) {
   try {
     const call = await ctx.llm.prepareCall(
       {
-        provider: config.provider,
-        model: config.model,
+        provider,
+        model,
         ...(Number(config.maxTokens) > 0 ? { maxTokens: Number(config.maxTokens) } : {}),
       },
       controller.signal,

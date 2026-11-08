@@ -3,13 +3,15 @@
  *
  * 区域：
  *   概况  统计 + 库路径 + 最近事件
+ *   模型  JEV / 提取 / Embedding 三槽设置（含保存即测试、向量索引重建）
  *   数据  事件 / 经验 / 认知 / 消息 / 引用 / 工作记忆 的通用表格（增删查改）
  *         列与可编辑字段来自内核 `op:'tables'`，新增表不需要改前端
  *   日志  shell.log / kernel.stderr.log 尾部，可自动刷新
  *
  * Host 接口（仅回环）：
  *   GET  /longmemory/stats
- *   POST /longmemory/api   {op: tables|list|get|insert|update|delete, ...}
+ *   POST /longmemory/api   {op: tables|list|get|insert|update|delete|settings.*|vec.*, ...}
+ *   POST /longmemory/test  {kind: jev|extract|embedding}
  *   GET  /longmemory/logs?source=shell|kernel&lines=N
  */
 window.__ModuleLoader__.load({
@@ -20,6 +22,7 @@ window.__ModuleLoader__.load({
 
     const TABS = [
       { id: 'overview', label: '概况' },
+      { id: 'models', label: '模型' },
       { id: 'event', label: '事件' },
       { id: 'experience', label: '经验' },
       { id: 'cognition', label: '认知' },
@@ -557,6 +560,259 @@ window.__ModuleLoader__.load({
               }, '停用')))))))
     }
 
+    /** 三槽默认值：与 src/js/model-config.js 保持一致（内核没存过设置时用这套）。 */
+    const MODEL_FALLBACK = {
+      'model.jev': { mode: 'host', provider: '', model: '', baseUrl: '',
+                     apiKey: '', timeoutMs: 120000 },
+      'model.extract': { mode: 'host', provider: '', model: '', baseUrl: '',
+                         apiKey: '', timeoutMs: 120000 },
+      embedding: { flavor: 'openai', baseUrl: 'http://127.0.0.1:11434/v1',
+                   model: 'bge-m3', apiKey: '', dim: 1024, batchSize: 16,
+                   timeoutMs: 60000 },
+    }
+
+    const MODEL_CARDS = [
+      ['model.jev', 'JEV 切分',
+       '判断每条消息是「新事件 / 延续当前事件 / 重开旧事件」，只输出结构化结果，调用最频繁。'],
+      ['model.extract', '摘要与提取',
+       '事件摘要、经验、认知，以及合并、洞见、模型自述等其它文本调用。'],
+    ]
+
+    const MODEL_KIND = { 'model.jev': 'jev', 'model.extract': 'extract', embedding: 'embedding' }
+
+    async function postJson(url, payload) {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload ?? {}),
+      })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok || data?.ok === false) {
+        throw new Error(data?.message || data?.error || `HTTP ${response.status}`)
+      }
+      return data
+    }
+
+    /** 模型设置：JEV / 提取 / Embedding 三槽，key 存内核 app_setting（本地库）。 */
+    function ModelSettings() {
+      const [settings, setSettings] = React.useState(null)
+      const [dirty, setDirty] = React.useState({})
+      const [busy, setBusy] = React.useState('')
+      const [status, setStatus] = React.useState('')
+      const [error, setError] = React.useState('')
+      const [vec, setVec] = React.useState(null)
+
+      const loadVec = React.useCallback(async () => {
+        try {
+          setVec(await callApi({ op: 'vec.status' }))
+        } catch {
+          setVec(null)
+        }
+      }, [])
+
+      const load = React.useCallback(async () => {
+        setError('')
+        try {
+          const response = await fetch('/longmemory/stats', { cache: 'no-store' })
+          if (!response.ok) throw new Error(`HTTP ${response.status}`)
+          const stats = await response.json()
+          const source = {
+            'model.jev': stats.models?.jev,
+            'model.extract': stats.models?.extract,
+            embedding: stats.models?.embedding,
+          }
+          const next = {}
+          for (const key of Object.keys(MODEL_FALLBACK)) {
+            next[key] = { ...MODEL_FALLBACK[key], ...(source[key] || {}) }
+          }
+          setSettings(next)
+          setDirty({})
+        } catch (e) {
+          setError(String(e?.message ?? e))
+        }
+        await loadVec()
+      }, [loadVec])
+
+      React.useEffect(() => { void load() }, [load])
+
+      // 重建索引是后台线程：跑着就轮询进度
+      const reindexing = Boolean(vec?.reindex?.running)
+      React.useEffect(() => {
+        if (!reindexing) return undefined
+        const timer = setInterval(() => { void loadVec() }, 2000)
+        return () => clearInterval(timer)
+      }, [reindexing, loadVec])
+
+      const update = (key, name, value) => {
+        setSettings(prev => ({ ...prev, [key]: { ...prev[key], [name]: value } }))
+        setDirty(prev => ({ ...prev, [key]: true }))
+        setStatus('')
+      }
+
+      const save = async key => {
+        setStatus('')
+        setError('')
+        const value = { ...settings[key] }
+        for (const name of ['timeoutMs', 'dim', 'batchSize']) {
+          if (typeof value[name] === 'string') value[name] = Number(value[name]) || 0
+        }
+        try {
+          const result = await callApi({ op: 'settings.set', key, value })
+          setSettings(prev => ({
+            ...prev, [key]: { ...MODEL_FALLBACK[key], ...(result.value || {}) },
+          }))
+          setDirty(prev => ({ ...prev, [key]: false }))
+          return true
+        } catch (e) {
+          setError(String(e?.message ?? e))
+          return false
+        }
+      }
+
+      const saveAndTest = async key => {
+        const ok = await save(key)
+        if (!ok) return
+        const kind = MODEL_KIND[key]
+        setBusy(kind)
+        try {
+          const result = await postJson('/longmemory/test', { kind })
+          setStatus(kind === 'embedding'
+            ? `Embedding OK：${result.dim} 维 · ${result.count} 条 · ${result.ms ?? '?'}ms`
+            : `文本模型 OK：${result.model} → ${result.sample || '（空）'} · ${result.ms ?? '?'}ms`)
+        } catch (e) {
+          setError(`测试失败：${String(e?.message ?? e)}`)
+        } finally {
+          setBusy('')
+        }
+      }
+
+      const reindex = async () => {
+        setStatus('')
+        setError('')
+        try {
+          const result = await callApi({ op: 'vec.reindex' })
+          setStatus(result.started ? '开始重建向量索引…' : '索引重建已在运行')
+          await loadVec()
+        } catch (e) {
+          setError(String(e?.message ?? e))
+        }
+      }
+
+      const field = (key, name, label, options = {}) => h('label', {
+        key: `${key}.${name}`, style: S.field,
+      },
+        h('span', { style: S.label }, label),
+        h('input', {
+          style: options.narrow ? { ...S.input, minWidth: '90px' } : S.input,
+          type: options.type || 'text',
+          value: settings[key][name] ?? '',
+          placeholder: options.placeholder || '',
+          onChange: e => update(key, name, e.target.value),
+        }))
+
+      if (!settings) {
+        return h('div', { style: S.cardLabel },
+          error ? `读取设置失败：${error}` : '读取模型设置…')
+      }
+
+      const llmCard = ([key, title, hint]) => {
+        const custom = settings[key].mode === 'custom'
+        return h('div', {
+          key, style: { ...S.card, display: 'flex', flexDirection: 'column', gap: '8px' },
+        },
+          h('div', { style: { display: 'flex', alignItems: 'baseline', gap: '8px' } },
+            h('strong', { style: { fontSize: '13px' } }, title),
+            dirty[key] && h('span', { style: S.cardLabel }, '未保存')),
+          h('div', { style: S.cardLabel }, hint),
+          h('label', { key: `${key}.mode`, style: S.field },
+            h('span', { style: S.label }, '调用通道'),
+            h('select', {
+              style: S.input,
+              value: settings[key].mode || 'host',
+              onChange: e => update(key, 'mode', e.target.value),
+            },
+              h('option', { key: 'host', value: 'host' }, '宿主模型（ctx.llm）'),
+              h('option', { key: 'custom', value: 'custom' }, '自定义端点（OpenAI 兼容）'))),
+          custom
+            ? h('div', null,
+                field(key, 'baseUrl', 'baseUrl', { placeholder: 'https://api.example.com/v1' }),
+                field(key, 'model', '模型名', { placeholder: 'deepseek-v4.1-flash' }),
+                field(key, 'apiKey', 'API Key（留空保持原值）', { type: 'password' }))
+            : h('div', null,
+                field(key, 'provider', 'provider', { placeholder: 'workbuddy' }),
+                field(key, 'model', '模型名', { placeholder: 'deepseek-v4.1-flash' })),
+          field(key, 'timeoutMs', '超时（毫秒）', { narrow: true }),
+          h('div', { style: S.bar },
+            h('button', {
+              style: S.button, type: 'button', disabled: Boolean(busy),
+              onClick: () => { void saveAndTest(key) },
+            }, busy === MODEL_KIND[key] ? '测试中…' : '保存并测试')))
+      }
+
+      const embeddingCard = () => {
+        const key = 'embedding'
+        const counts = vec?.counts || {}
+        const progress = vec?.reindex || {}
+        return h('div', {
+          key, style: { ...S.card, display: 'flex', flexDirection: 'column', gap: '8px' },
+        },
+          h('div', { style: { display: 'flex', alignItems: 'baseline', gap: '8px' } },
+            h('strong', { style: { fontSize: '13px' } }, 'Embedding'),
+            dirty[key] && h('span', { style: S.cardLabel }, '未保存')),
+          h('div', { style: S.cardLabel },
+            '检索向量化。默认本地 Ollama bge-m3（1024 维），改维度后需要重建索引。'),
+          h('label', { key: `${key}.flavor`, style: S.field },
+            h('span', { style: S.label }, '接口协议'),
+            h('select', {
+              style: S.input,
+              value: settings[key].flavor || 'openai',
+              onChange: e => update(key, 'flavor', e.target.value),
+            },
+              h('option', { key: 'openai', value: 'openai' },
+                'OpenAI 兼容（/v1/embeddings）'),
+              h('option', { key: 'ollama', value: 'ollama' }, 'Ollama 原生（/api/embed）'))),
+          field(key, 'baseUrl', 'baseUrl', { placeholder: 'http://127.0.0.1:11434/v1' }),
+          field(key, 'model', '模型名', { placeholder: 'bge-m3' }),
+          field(key, 'apiKey', 'API Key（留空保持原值）', { type: 'password' }),
+          h('div', { style: S.bar },
+            field(key, 'dim', '维度', { narrow: true }),
+            field(key, 'batchSize', '批大小', { narrow: true }),
+            field(key, 'timeoutMs', '超时（毫秒）', { narrow: true })),
+          h('div', { style: S.cardLabel },
+            vec
+              ? `向量索引：${vec.enabled ? '可用' : '不可用（缺 sqlite-vec）'} · ${vec.dim || 0} 维 · `
+                + `经验 ${counts.experience ?? 0} / 认知 ${counts.cognition ?? 0} / `
+                + `洞见 ${counts.insight ?? 0}`
+              : '向量索引状态读取中…'),
+          progress.running && h('div', { style: S.cardLabel },
+            `重建中 ${progress.done ?? 0}/${progress.total ?? 0}`),
+          progress.error && h('div', { style: S.error }, `重建失败：${progress.error}`),
+          h('div', { style: S.bar },
+            h('button', {
+              style: S.button, type: 'button', disabled: Boolean(busy),
+              onClick: () => { void saveAndTest(key) },
+            }, busy === 'embedding' ? '测试中…' : '保存并测试'),
+            h('button', {
+              style: S.button, type: 'button', disabled: reindexing,
+              onClick: () => { void reindex() },
+            }, reindexing ? '重建中…' : '重建向量索引')))
+      }
+
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
+        h('div', { style: { display: 'grid', gap: '12px',
+                            gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))' } },
+          ...MODEL_CARDS.map(llmCard),
+          embeddingCard()),
+        h('div', { style: S.bar },
+          h('button', { style: S.button, type: 'button', onClick: () => { void load() } },
+            '重新读取'),
+          status && h('span', { style: S.cardLabel }, status)),
+        error && h('div', { style: S.error }, error),
+        h('div', { style: { ...S.cardLabel, maxWidth: '760px' } },
+          '设置存在本地记忆库 app_setting 表；API Key 只在本机进程间使用，'
+          + '页面上永远显示为掩码，留空或提交掩码都表示保持原值。'))
+    }
+
     function MemorySettings({ openBrowser } = {}) {
       const [tab, setTab] = React.useState('overview')
       const [schema, setSchema] = React.useState(null)
@@ -571,7 +827,7 @@ window.__ModuleLoader__.load({
       }, [])
 
       const tableSchema = name => schema?.tables?.find(item => item.name === name)
-      const dataTab = tab !== 'overview' && tab !== 'logs'
+      const dataTab = tab !== 'overview' && tab !== 'logs' && tab !== 'models'
         && tab !== 'self_configured' && tab !== 'self_notes'
 
       return h('section', { style: S.wrap },
@@ -587,6 +843,7 @@ window.__ModuleLoader__.load({
           }, item.label))),
         error && h('div', { style: S.error }, `管理接口不可用：${error}`),
         tab === 'overview' && h(Overview),
+        tab === 'models' && h(ModelSettings),
         tab === 'logs' && h(Logs),
         tab === 'self_configured' && h(SelfSettings, { mode: 'configured' }),
         tab === 'self_notes' && h(SelfSettings, { mode: 'agent' }),

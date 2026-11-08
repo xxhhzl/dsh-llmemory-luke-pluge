@@ -8,7 +8,7 @@ import time
 import base
 
 PROTOCOL_VERSION = "1.0" # 协议版本
-PLUGIN_VERSION = "0.2.2" # 插件版本
+PLUGIN_VERSION = "0.3.0" # 插件版本
 
 # 检查协议版本
 def is_format(protocol_version: str) -> bool:
@@ -26,8 +26,9 @@ FrameType = Literal[
     "ingest.request", "ingest.receipt", "ingest.completed",
     "library.query", "library.data", "notify",
     "llm.request", "llm.result",
+    "embed.request", "embed.result",
     "error", "config.set", "config.get", "health", "shutdown", "stats", "admin",
-    "core.get", "core",
+    "core.get", "core", "settings.raw",
 ]
 
 class Link_Json(BaseModel):
@@ -130,6 +131,9 @@ DEFAULT_CONFIG = {
         "section_order": -2000,       # 系统提示词段顺序（最前，先于 harness 身份 -1000）
         "context_order": 850,          # 动态上下文顺序
     },
+    "embedding": {
+        "dim": 1024,                   # bge-m3 维度；换模型需重建向量表
+    },
     "log": {"level": "info"},           # debug / info / warn / error
 }
 
@@ -163,6 +167,7 @@ _LEAF_SPEC = {
     "core.max_self_notes": {"type": int, "min": 0, "max": 100},
     "core.section_order": {"type": int, "min": -10000, "max": 20000},
     "core.context_order": {"type": int, "min": -10000, "max": 20000},
+    "embedding.dim": {"type": int, "min": 64, "max": 8192},
     "log.level": {"type": str, "enum": {"debug", "info", "warn", "error"}},
 }
 

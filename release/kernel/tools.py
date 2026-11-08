@@ -133,7 +133,7 @@ class memory_search_args(BaseModel):
 
 @tool(memory_search_args)
 def memory_search(query, limit=5, kind=None, scope=None, min_score=None,
-                  *, session_id=None, origin_project=None):
+                  *, session_id=None, origin_project=None, query_vector=None):
     '''在长期记忆里找线索：返回事件摘要、经验、认知、洞见（按相关性 × 记忆强度排序）。先用它定位拿 id，再用 memory_get 读正文；问「刚才那段时间」用 memory_recent。'''
     search_cfg = _search_defaults()
     effective_limit = max(1, min(int(limit), int(search_cfg.get("limit_max", 20))))
@@ -145,7 +145,8 @@ def memory_search(query, limit=5, kind=None, scope=None, min_score=None,
     db = _db()          # 共享连接：不能用 with，退出时会把它关掉
     hits = retrieval.search(db, query, scope=effective_scope,
                             origin_project=origin_project,
-                            limit=effective_limit, kinds=kinds)
+                            limit=effective_limit, kinds=kinds,
+                            query_vector=query_vector)
     items = [hit.to_dict() for hit in hits if hit.score >= threshold]
     # 可观测：让调用方分清「真的没有」「被 limit 切了」「被 scope 滤了」
     return {"items": items, "count": len(items),
@@ -353,6 +354,7 @@ def tools_call(data, q: base.message_queue):
         call_id = call.get("call_id") or ""
         name = call.get("name") or ""
         args = call.get("arguments") or {}
+        context["query_vector"] = call.get("query_vector")
         entry = tools.get(name)
         if entry is None:
             results.append(_error(call_id, f"未知工具: {name}", -32601))

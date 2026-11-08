@@ -5,6 +5,7 @@
  * （只覆盖内核实际用到的 string / integer / number / boolean / enum / anyOf-null）。
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { embedTexts } from './model-config.js'
 
 const PRIMITIVES = new Set(['string', 'number', 'integer', 'boolean'])
 
@@ -66,7 +67,7 @@ function outputSpec() {
  * @returns {Array<Function>} 每项的 disposer
  */
 export function registerKernelTools(ctx, kernel, schemas, {
-  agentId = '', timeoutMs = 30_000, logger = console,
+  agentId = '', timeoutMs = 30_000, logger = console, getSettings = null,
 } = {}) {
   const disposers = []
   for (const schema of schemas ?? []) {
@@ -80,8 +81,21 @@ export function registerKernelTools(ctx, kernel, schemas, {
       async execute(args, exec) {
         const sessionId = exec?.agent?.session?.id ?? ''
         const callId = `${name}-${Date.now().toString(36)}`
+        const call = { call_id: callId, name, arguments: args ?? {} }
+        // 读路径的 query 向量在 JS 侧算好随调用下发，避免内核主循环阻塞等 embedding
+        if (name === 'memory_search' && args?.query) {
+          const embedding = getSettings?.()?.embedding
+          if (embedding?.baseUrl && embedding?.model) {
+            try {
+              const [vector] = await embedTexts(embedding, [args.query])
+              if (Array.isArray(vector)) call.query_vector = vector
+            } catch (error) {
+              logger.warn?.(`[longmemory] query embedding 失败，降级词法: ${error.message}`)
+            }
+          }
+        }
         const result = await kernel.request('tools.calls', {
-          calls: [{ call_id: callId, name, arguments: args ?? {} }],
+          calls: [call],
         }, { sessionId, agentId, timeoutMs })
         const entry = Array.isArray(result) ? result[0] : null
         if (!entry) throw new Error(`内核没有返回 ${name} 的结果`)

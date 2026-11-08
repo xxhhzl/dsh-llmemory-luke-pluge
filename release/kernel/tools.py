@@ -138,8 +138,8 @@ def memory_search(query, limit=5, kind=None, scope=None, min_score=None,
 
 何时用：用户提到「之前 / 上次 / 我们讨论过 / 你说过 / 偏好 / 约定」，或这次任务要沿用既有决定、项目约定、踩过的坑时；不确定记忆里有没有，也值得先查一次。
 何时不用：只是定位当前代码或文件用 grep / read；本次对话里已经给出的信息不必再查。
-用法：先用它拿到 id 与摘要，再用 memory_get 读正文；按时间回放（「那段时间」）用 memory_recent。
-读结果：score 是相关性 × 记忆强度的融合分，meta.use_count 是使用热度；记忆是「当时记下的」，与当前事实冲突时以当前为准。'''
+用法：先拿到 id、摘要和 meta.excerpt（命中片段）；回答需要具体名称、命令、参数、数字或 URL 时，必须对分数最高的 1–3 条调 memory_get 读原文，只确认「有没有/是不是」可停在摘要。时间线问题（「之前让你做什么」）优先用 memory_recent。
+读结果：score 是相关性 × 记忆强度的融合分，meta.use_count 是使用热度；记忆是「当时记下的」，与当前事实冲突时以当前为准。按 next_action_hint 决定是否换工具或继续深挖。'''
     search_cfg = _search_defaults()
     effective_limit = max(1, min(int(limit), int(search_cfg.get("limit_max", 20))))
     effective_scope = scope or search_cfg.get("default_scope", "all")
@@ -153,12 +153,26 @@ def memory_search(query, limit=5, kind=None, scope=None, min_score=None,
                             limit=effective_limit, kinds=kinds,
                             query_vector=query_vector)
     items = [hit.to_dict() for hit in hits if hit.score >= threshold]
+    if not items:
+        next_hint = ("没有命中。若问的是「之前/上次/那段时间做过什么」，"
+                     "改用 memory_recent 并省略 session_id 跨会话回放；"
+                     "也可换更具体的名词重试 memory_search。")
+    elif any(item["kind"] == "event" for item in items):
+        next_hint = ("事件条目的 text 是摘要，meta.excerpt 是命中片段。"
+                     "答案需要具体名称/命令/数字/URL 时，对最相关的 1–3 条事件调 "
+                     "memory_get(kind='event') 读原文；正文截断时用返回的 "
+                     "next_msg_offset 续读。若问题其实按时间线提问，改用 memory_recent。")
+    else:
+        next_hint = ("这些经验/认知/洞见已含完整正文。若需要它们来自哪次任务的细节，"
+                     "用返回的 source_event_id 对 memory_get(kind='event') 深挖；"
+                     "若问题按时间线提问，改用 memory_recent。")
     # 可观测：让调用方分清「真的没有」「被 limit 切了」「被 scope 滤了」
     return {"items": items, "count": len(items),
             "scope": effective_scope, "scope_applied": effective_scope,
             "limit": effective_limit,
             # 截断发生在 min_score 过滤之前，用原始命中数判断更准
             "has_more": len(hits) >= effective_limit or len(items) < len(hits),
+            "next_action_hint": next_hint,
             "filters": {"kind": kind or "all", "min_score": threshold},
             "total": None,      # FTS 只取 top-50，给不出全局总数，如实置空
             }
@@ -169,15 +183,23 @@ class memory_get_args(BaseModel):
     kind: Literal["event", "experience", "cognition", "insight"] = Field(
         default="event",
         description="id 的类型，必须与来源一致：event / experience / cognition / insight")
+    max_chars: int = Field(
+        default=8000, ge=0, le=100000,
+        description="事件正文单次字符预算，默认 8000；0=一次返回全部正文；"
+                    "截断时用 next_msg_offset 续读，不必调大")
+    msg_offset: int = Field(
+        default=0, ge=0,
+        description="正文消息起点；续读时原样传上一页返回的 next_msg_offset")
 
 
 @tool(memory_get_args)
-def memory_get(id, kind="event"):
-    '''按 id 读一条完整记忆：event 返回事件行 + 全部正文消息；经验/认知/洞见返回整行。
+def memory_get(id, kind="event", max_chars=8000, msg_offset=0):
+    '''按 id 读一条完整记忆：event 返回事件行 + 正文消息；经验/认知/洞见返回整行。
 
-id 来自 memory_search 的 items[].id（先搜再读，不要猜 id）；看原文、核对细节时用它。'''
+id 来自 memory_search 的 items[].id（先搜再读，不要猜 id）；看原文、核对细节时用它。答案需要具体名称、命令、数字或 URL 时必须读原文。正文默认限 8000 字符；truncated=true 时用 next_msg_offset 续读，可逐页读完而不撑爆上下文。'''
     db = _db()          # 共享连接，勿关闭
-    out = retrieval.get(db, kind, int(id))
+    out = retrieval.get(db, kind, int(id), max_chars=int(max_chars),
+                        msg_offset=int(msg_offset))
     if not out:
         raise ToolError(CODE_NOT_FOUND, f"找不到 {kind} #{id}")
     return out
@@ -189,7 +211,9 @@ class memory_recent_args(BaseModel):
     to_at: str = Field(description=(
         "窗口终点，ISO 8601 且带时区，例如 2026-11-04T09:45:00+08:00（含边界，内部归一到 UTC）"))
     session_id: str | None = Field(
-        default=None, description="会话 id；省略=信封里的当前会话")
+        default=None,
+        description="会话 id；**省略=跨会话回放全部事件**（「我之前/下午让你做什么」"
+                    "这类问题就该省略它）；只在明确要限定当前会话时才传")
     limit: int = Field(default=10, ge=1, le=50,
                        description="返回条数：事件占大头，经验/认知各最多 3 条")
 
@@ -199,9 +223,11 @@ def memory_recent(from_at, to_at, session_id=None, limit=10,
                   *, origin_project=None):
     '''按时间区间回放：那段时间发生了什么（事件摘要）+ 沉淀了什么（经验/认知）。
 
-何时用：用户问「昨天 / 上周 / 那段时间」做过什么，或要给某个时间段做回顾；需要按主题找而不是按时间找时用 memory_search。'''
+何时用：用户问「昨天 / 上周 / 那段时间 / 我之前让你做什么」做过什么——这类问题**靠时间线回忆而不是关键词**，应优先用它而不是 memory_search；`session_id` 省略时会跨会话找（别的会话里的事也能找到）。需要按主题找而不是按时间找时用 memory_search。'''
     db = _db()          # 共享连接，勿关闭
-    hits = retrieval.recent(db, session_id or "", from_at=from_at,
+    # session_id 缺省为 None = 跨会话；信封里的当前会话不再默认回填，
+    # 否则「我之前让你做什么」会被会话边界挡住（这正是 0.3.4 要修的缺口）
+    hits = retrieval.recent(db, session_id or None, from_at=from_at,
                             to_at=to_at, limit=limit,
                             origin_project=origin_project)
     return {"items": [hit.to_dict() for hit in hits], "count": len(hits)}
@@ -364,6 +390,11 @@ def tools_call(data, q: base.message_queue):
         name = call.get("name") or ""
         args = call.get("arguments") or {}
         context["query_vector"] = call.get("query_vector")
+        if name == "memory_recent":
+            # memory_recent 的 None 是有语义的：跨会话回放。
+            # 通用 _merge_context 会把 None 替换成信封 session_id，
+            # 因此该工具在这里消费信封值，不让它二次注入。
+            context["session_id"] = args.get("session_id")
         entry = tools.get(name)
         if entry is None:
             results.append(_error(call_id, f"未知工具: {name}", -32601))

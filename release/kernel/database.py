@@ -506,6 +506,30 @@ def _like_escape(text: str) -> str:
             .replace("%", "\\%").replace("_", "\\_"))
 
 
+def _excerpt(body: str, tokens, *, before: int = 30, after: int = 50) -> str:
+    '''
+    命中片段：定位第一个命中的查询词，取它前后各若干字符。
+    供 memory_search 的 excerpt 字段——让「有没有聊到 X」这类问题不用
+    memory_get 就能回答；没有命中词时取开头。
+    '''
+    text = str(body or "")
+    if not text:
+        return ""
+    lower = text.lower()
+    pos = -1
+    for token in tokens:
+        found = lower.find(str(token).lower())
+        if found >= 0 and (pos < 0 or found < pos):
+            pos = found
+    if pos < 0:
+        return text[:before + after]
+    start = max(0, pos - before)
+    end = min(len(text), pos + after)
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(text) else ""
+    return f"{prefix}{text[start:end]}{suffix}"
+
+
 # ---------------- 存储 ----------------
 
 class Database:
@@ -1277,28 +1301,38 @@ class Database:
             return None
         return EventSpan(event=event, first_at=row["first_at"], last_at=row["last_at"])
 
-    def list_events_overlapping(self, session_id: str, from_at: str, to_at: str,
-                                limit: int = 50) -> list[EventSpan]:
+    def list_events_overlapping(self, session_id: str | None, from_at: str,
+                                to_at: str, limit: int = 50) -> list[EventSpan]:
         '''
         取发生区间与 [from_at, to_at] 相交的事件（闭区间）：
         last_at >= from_at AND first_at <= to_at。
 
         比较走 SQLite 的 `datetime()`：它认识 ISO 8601 的时区后缀并换算到 UTC，
         所以老库的 +08:00 与新写入的 +00:00 混存时也不会错 8 小时。
+
+        :param session_id: None 表示**跨会话**回放（「我下午让你做什么」这种
+                           问题不该被会话边界挡住）；传值则只看该会话。
         '''
+        # 会话过滤拆成可省的两处：子查询 WHERE 与外层 WHERE。
+        # 参数顺序必须与 SQL 文本一致：子查询 session → 外层 session → from → to → limit。
+        session_join = "AND r.session_id = ? " if session_id is not None else ""
+        session_where = "AND e.session_id = ? " if session_id is not None else ""
+        session_params = [session_id] if session_id is not None else []
+        params = session_params + session_params + [from_at, to_at, limit]
         rows = self._conn.execute(
             "SELECT e.*, t.first_at AS first_at, t.last_at AS last_at FROM event e "
             "JOIN (SELECT r.event_id AS eid, MIN(m.occur_at) AS first_at, "
             "             MAX(m.occur_at) AS last_at "
             "      FROM memory r JOIN message m "
             "        ON m.session_id = r.session_id AND m.message_id = r.message_id "
-            "      WHERE r.event_id IS NOT NULL AND r.session_id = ? "
+            f"      WHERE r.event_id IS NOT NULL {session_join}"
             "      GROUP BY r.event_id) t ON t.eid = e.id "
-            "WHERE e.session_id = ? "
+            "WHERE 1=1 "
+            f"  {session_where}"
             "  AND datetime(t.last_at) >= datetime(?) "
             "  AND datetime(t.first_at) <= datetime(?) "
             "ORDER BY datetime(t.last_at) DESC LIMIT ?",
-            (session_id, session_id, from_at, to_at, limit)).fetchall()
+            params).fetchall()
         return [EventSpan(event=Event.from_row(row),
                           first_at=row["first_at"], last_at=row["last_at"])
                 for row in rows]
@@ -1751,7 +1785,10 @@ class Database:
             rows = like(mode_and=True)
         if not rows and len(tokens) > 1:
             rows = like(mode_and=False)
-        return [dict(row) for row in rows]
+        result = [dict(row) for row in rows]
+        for item in result:
+            item["excerpt"] = _excerpt(item.get("body") or "", tokens)
+        return result
 
     # ---- 统计 ----
 

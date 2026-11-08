@@ -7,12 +7,14 @@ import shutil
 import sys
 import unittest
 import uuid
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import admin
 import base
+import embed
 from database import Cognition, Database, Experience, Memory, Message
 
 BASE_TMP = Path(__file__).resolve().parents[1] / ".tmp" / "test_admin"
@@ -494,7 +496,127 @@ class TestSettings(AdminCase):
         self.assertIn("dim", status)
         self.assertIn("counts", status)
         self.assertIn("reindex", status)
+        for key in ("running", "done", "total", "error", "started_at",
+                    "finished_at", "elapsed_ms"):
+            self.assertIn(key, status["reindex"], f"reindex 快照缺 {key}")
         self.assertFalse(status["reindex"]["running"])
+
+    def test_reindex_marks_started_and_returns_snapshot(self):
+        self.addCleanup(admin._REINDEX.update, dict(admin._REINDEX))
+        admin._REINDEX.update({"running": False, "done": 0, "total": 0, "error": "",
+                               "started_at": "", "finished_at": "", "elapsed_ms": 0})
+        with mock.patch.object(admin.threading, "Thread") as thread:
+            result = admin.vec_reindex(self.db, {})
+        self.assertTrue(result["started"])
+        self.assertTrue(result["state"]["running"], "返回快照要能让前端立刻进入重建中")
+        self.assertTrue(result["state"]["started_at"])
+        self.assertEqual(result["state"]["done"], 0)
+        thread.return_value.start.assert_called_once()
+
+    def test_reindex_while_running_returns_progress(self):
+        self.addCleanup(admin._REINDEX.update, dict(admin._REINDEX))
+        admin._REINDEX.update({"running": True, "done": 3, "total": 9, "error": "",
+                               "started_at": "2026-11-08T10:00:00+08:00",
+                               "finished_at": "", "elapsed_ms": 0})
+        with mock.patch.object(admin.threading, "Thread") as thread:
+            result = admin.vec_reindex(self.db, {})
+        self.assertFalse(result["started"])
+        self.assertEqual(result["reason"], "already_running")
+        self.assertEqual(result["state"]["done"], 3, "重复点击要能接班当前进度")
+        thread.assert_not_called()
+
+    def test_reindex_finishes_with_finished_at_and_elapsed(self):
+        self.addCleanup(admin._REINDEX.update, dict(admin._REINDEX))
+        admin._REINDEX.update({"running": False, "done": 0, "total": 0, "error": "",
+                               "started_at": "", "finished_at": "", "elapsed_ms": 0})
+        self.db.insert_experience(Experience(
+            content="待索引经验", source_event_id=1,
+            created_at="2026-11-03T10:00:00+00:00"))
+
+        class InlineThread:      # 同步跑一遍 work()，避免测试里留后台线程
+            def __init__(self, target=None, name=None, daemon=None):
+                self._target = target
+
+            def start(self):
+                self._target()
+
+        with mock.patch.object(admin.threading, "Thread", InlineThread):
+            started = admin.vec_reindex(self.db, {})
+        self.assertTrue(started["started"])
+        state = admin.vec_status(self.db, {})["reindex"]
+        self.assertFalse(state["running"], "跑完要落回 idle，前端才知道收进度")
+        self.assertTrue(state["finished_at"])
+        self.assertGreaterEqual(state["elapsed_ms"], 0)
+        self.assertEqual(state["done"], 1)
+        self.assertEqual(state["total"], 1)
+
+    def test_reindex_reports_embedding_failure_and_aborts(self):
+        '''端点没起来时不能「假成功」：要记错误并连续两批就收手。'''
+        self.addCleanup(admin._REINDEX.update, dict(admin._REINDEX))
+        admin._REINDEX.update({"running": False, "done": 0, "total": 0, "error": "",
+                               "started_at": "", "finished_at": "", "elapsed_ms": 0})
+        for index in range(20):        # 两批：16 + 4
+            self.db.insert_experience(Experience(
+                content=f"待索引经验 {index}", source_event_id=1,
+                created_at="2026-11-03T10:00:00+00:00"))
+
+        calls = []
+
+        class Failing:
+            def request(self, texts, timeout=None):
+                calls.append(len(texts))
+                raise embed.EmbedError(
+                    "embedding 端点 连不上 http://127.0.0.1:11434/v1（ECONNREFUSED）")
+
+        class InlineThread:
+            def __init__(self, target=None, name=None, daemon=None):
+                self._target = target
+
+            def start(self):
+                self._target()
+
+        with mock.patch.object(embed, "_client", Failing()), \
+                mock.patch.object(admin.threading, "Thread", InlineThread):
+            admin.vec_reindex(self.db, {})
+
+        state = admin.vec_status(self.db, {})["reindex"]
+        self.assertFalse(state["running"])
+        self.assertIn("没有写入任何向量", state["error"])
+        self.assertIn("连不上", state["error"])
+        self.assertEqual(len(calls), 2, "连续两批写入失败就中止，不空跑满库")
+        self.assertEqual(self.db.vec_status()["counts"]["experience"], 0)
+
+    def test_reindex_success_writes_vectors(self):
+        if not self.db._vec_enabled:
+            self.skipTest("未安装 sqlite-vec")
+        self.addCleanup(admin._REINDEX.update, dict(admin._REINDEX))
+        admin._REINDEX.update({"running": False, "done": 0, "total": 0, "error": "",
+                               "started_at": "", "finished_at": "", "elapsed_ms": 0})
+        for index in range(3):
+            self.db.insert_experience(Experience(
+                content=f"可索引经验 {index}", source_event_id=1,
+                created_at="2026-11-03T10:00:00+00:00"))
+
+        class Fake:
+            def request(self, texts, timeout=None):
+                return [[0.01] * 1024 for _ in texts]
+
+        class InlineThread:
+            def __init__(self, target=None, name=None, daemon=None):
+                self._target = target
+
+            def start(self):
+                self._target()
+
+        with mock.patch.object(embed, "_client", Fake()), \
+                mock.patch.object(admin.threading, "Thread", InlineThread):
+            admin.vec_reindex(self.db, {})
+
+        state = admin.vec_status(self.db, {})["reindex"]
+        self.assertFalse(state["running"])
+        self.assertEqual(state["error"], "", "全部写成功时不该报错")
+        self.assertEqual((state["done"], state["total"]), (3, 3))
+        self.assertEqual(self.db.vec_status()["counts"]["experience"], 3)
 
 
 if __name__ == "__main__":

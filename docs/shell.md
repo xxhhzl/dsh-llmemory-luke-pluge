@@ -90,15 +90,15 @@ src/js/
 
 | 项 | 方式 | 结果 |
 |---|---|---|
-| 帧构造/解析、内容块提取、路由准入、投递回滚、三槽配置、embedding 调用 | `node tests/js/unit.test.mjs` | ✅ 30 条 |
+| 帧构造/解析、内容块提取、路由准入、投递回滚、三槽配置、embedding 调用 | `node tests/js/unit.test.mjs` | ✅ 31 条 |
 | 生命周期（重启策略、dispose 顺序、订阅去重） | `node tests/js/shell.test.mjs` | ✅ 7 条（假内核，不需要 Python） |
 | 外壳↔内核进程契约（启动/工具/ingest/坏字节/坏信封） | `python -m unittest tests.test_shell_contract` | ✅ 11 条（复刻外壳动作；沙箱里 Node 不能管道抓子进程输出） |
-| 向量索引 / embedding 代理 / RRF 融合 / 设置脱敏 | `python -m unittest tests.test_vec tests.test_admin` | ✅ 59 条（未装 sqlite-vec 时向量用例自动 skip） |
+| 向量索引 / embedding 代理 / RRF 融合 / 设置脱敏 | `python -m unittest tests.test_vec tests.test_admin` | ✅ 68 条（未装 sqlite-vec 时向量用例自动 skip） |
 | 真实链路（kernel → embed.request → Ollama → vec0 → 检索） | `tests/run_vec_e2e.py`（模拟外壳） | ✅ 实测 bge-m3 1024 维，词面零重叠也能召回 |
 | 打包一致性与语法 | `build_release.py --check` + `node --check` | ✅（含版本号一致性） |
 | `ctx.llm` / `ctx.tools` 两条桥 | 需在 Harness 内安装后验收 | ⏳ 见 release/README.md「验收」 |
 
-## 7. 本机安装记录（2026-11-03 安装 / 2026-11-04 更新到 0.2.0）
+## 7. 本机安装记录（2026-11-03 安装 / 2026-11-08 更新到 0.3.1）
 
 按 profile `desktop` 的既有约定安装（与 `@local/dsh-custom-mode` 的 `link:` 同型）：
 
@@ -124,7 +124,7 @@ Copy-Item release\README.md "$inst\README.md" -Force
 判断是不是硬链接：`fsutil hardlink list <安装目录>\kernel\config.py`，同时列出
 `release\kernel\config.py` 就是（改内容会同步，**新增/删除文件仍要手动处理**）。
 
-当前产物 **0.3.0**、43 个文件（`lib/` 14 个 JS + `kernel/` 21 个 py + 根 6 个 + `locale/` 2 个），
+当前产物 **0.3.1**、43 个文件（`lib/` 14 个 JS + `kernel/` 21 个 py + 根 6 个 + `locale/` 2 个），
 与 `release/` 哈希逐一相同。版本号改了之后，运行中的进程仍报旧值，**重启 Harness** 才会刷新。
 
 生效方式：**重启 Harness**（插件解析表在启动时构建；`ResolutionRouter` 对新增包也要求重启）。

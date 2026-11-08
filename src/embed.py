@@ -118,8 +118,16 @@ def text_for(kind: str, row) -> str:
     return " ".join(x for x in (row.content, cues) if x)
 
 
-def index_rows(db: database.Database, items: list, *, timeout: float | None = None) -> int:
-    '''items: [(kind, row)]；批量 embedding 后写入 vec 表。失败返回 0。'''
+def index_rows(db: database.Database, items: list, *, timeout: float | None = None,
+               on_error=None) -> int:
+    '''
+    items: [(kind, row)]；批量 embedding 后写入 vec 表。
+
+    :param on_error: 失败时回调（收到异常）。调用方（admin 的重建索引）靠它
+                     把失败原因带回界面——只返回 0 的话，「全部失败」和
+                     「没有条目」分不开，界面会假报「完成」。
+    :return: 实际写入条数
+    '''
     if not getattr(db, "_vec_enabled", False) or not items:
         return 0
     texts = [text_for(kind, row) for kind, row in items]
@@ -127,6 +135,15 @@ def index_rows(db: database.Database, items: list, *, timeout: float | None = No
         vectors = get_client().request(texts, timeout=timeout)
     except Exception as exc:
         base.log.warning("embed.index_failed", error=repr(exc))
+        if on_error is not None:
+            on_error(exc)
+        return 0
+    if len(vectors) != len(texts):
+        exc = EmbedError(f"embedding 返回 {len(vectors)} 条，期望 {len(texts)} 条")
+        base.log.warning("embed.index_count_mismatch",
+                         got=len(vectors), want=len(texts))
+        if on_error is not None:
+            on_error(exc)
         return 0
     written = 0
     for (kind, row), vector in zip(items, vectors):

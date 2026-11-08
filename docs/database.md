@@ -285,6 +285,11 @@ CREATE VIRTUAL TABLE vec_experience USING vec0(
   embedding 端点慢或挂掉，不能连累记忆落库。
 - 维度变了（换 embedding 模型）时，打开库会 `DROP` 掉旧维度的向量表并重建，
   需要 `vec.reindex` 回填；`vec.status` 会显示维度与各表条数。
+- `vec.reindex` 的失败口径：`embed.index_rows` 把失败原因回调给调用方，
+  连续两批**一条都没写进去**就中止并记 `reindex.error`（实测：端点没起来时
+  87 条会在 16ms 内「跑完」但写入 0 条，不能算成功）；`reindex` 快照带
+  `started_at` / `finished_at` / `elapsed_ms` / `done` / `total`，界面据此
+  一直显示「重建中」直到 `running=false`，再切换成完成或失败。
 - 失效 / 被取代的 l3 在同一事务里删掉向量（`_vec_remove`），否则会继续占
   KNN 的 top-k 名额；记忆行本身仍然保留。
 - 检索：`retrieval._candidates` 把 FTS 名次与向量名次用 RRF（k=60）融合，

@@ -57,6 +57,9 @@ window.__ModuleLoader__.load({
       tabActive: { color: 'var(--dsw-alias-label-primary)',
                    borderBottom: '2px solid var(--dsw-alias-label-primary)' },
       bar: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' },
+      barTrack: { height: '4px', borderRadius: '2px', overflow: 'hidden',
+                  background: 'var(--dsw-alias-border-l1)' },
+      barFill: { height: '100%', background: 'var(--dsw-alias-label-primary)' },
       input: { font: 'inherit', fontSize: '13px', padding: '4px 8px', minWidth: '160px',
                borderRadius: '6px', border: '.5px solid var(--dsw-alias-border-l2)',
                background: 'transparent', color: 'inherit' },
@@ -601,13 +604,52 @@ window.__ModuleLoader__.load({
       const [status, setStatus] = React.useState('')
       const [error, setError] = React.useState('')
       const [vec, setVec] = React.useState(null)
+      const [rebuild, setRebuild] = React.useState(null)
+      // 点击后、后端确认「已开始」之前，轮询到的旧快照不能把「重建中」提前收掉
+      const startAck = React.useRef(true)
 
+      // 读不到状态时保留上一次的显示：一次失败不能把「重建中」收掉
       const loadVec = React.useCallback(async () => {
         try {
-          setVec(await callApi({ op: 'vec.status' }))
+          const status = await callApi({ op: 'vec.status' })
+          setVec(status)
+          return status
         } catch {
-          setVec(null)
+          return null
         }
+      }, [])
+
+      /** 内核的 reindex 快照 → 界面状态（running 结束后给 done / error）。 */
+      const applyReindex = React.useCallback(state => {
+        if (!state) return
+        if (state.running) {
+          setRebuild({
+            phase: 'running', done: state.done ?? 0, total: state.total ?? 0,
+            error: '', startedAt: state.started_at || '', elapsedMs: 0,
+          })
+          return
+        }
+        if (state.error) {
+          setRebuild({
+            phase: 'error', done: state.done ?? 0, total: state.total ?? 0,
+            error: state.error, startedAt: state.started_at || '',
+            elapsedMs: state.elapsed_ms ?? 0,
+          })
+          return
+        }
+        if (state.done || state.total) {
+          setRebuild({
+            phase: 'done', done: state.done ?? 0, total: state.total ?? 0,
+            error: '', startedAt: state.started_at || '',
+            elapsedMs: state.elapsed_ms ?? 0,
+          })
+          return
+        }
+        // 空库：只有「刚才是 running」时才需要落一条完成提示
+        setRebuild(prev => (prev?.phase === 'running'
+          ? { phase: 'done', done: 0, total: 0, error: '', startedAt: '',
+              elapsedMs: state.elapsed_ms ?? 0 }
+          : prev))
       }, [])
 
       const load = React.useCallback(async () => {
@@ -630,18 +672,39 @@ window.__ModuleLoader__.load({
         } catch (e) {
           setError(String(e?.message ?? e))
         }
-        await loadVec()
-      }, [loadVec])
+        applyReindex((await loadVec())?.reindex)
+      }, [loadVec, applyReindex])
 
       React.useEffect(() => { void load() }, [load])
 
-      // 重建索引是后台线程：跑着就轮询进度
-      const reindexing = Boolean(vec?.reindex?.running)
+      // 重建是后台线程：点下去到 running=False 之前一直显示进度，读不到状态也不收起
+      const reindexing = rebuild?.phase === 'running'
       React.useEffect(() => {
         if (!reindexing) return undefined
-        const timer = setInterval(() => { void loadVec() }, 2000)
-        return () => clearInterval(timer)
-      }, [reindexing, loadVec])
+        let alive = true
+        let failures = 0
+        const tick = async () => {
+          const status = await loadVec()
+          if (!alive) return
+          if (status?.reindex) {
+            failures = 0
+            if (status.reindex.running || startAck.current) {
+              applyReindex(status.reindex)
+            }
+            return
+          }
+          failures += 1
+          if (failures >= 8) {          // 约 12s 读不到状态：保留进度但报错
+            setRebuild(prev => (prev && prev.phase === 'running'
+              ? { ...prev, phase: 'error',
+                  error: '状态读取失败（内核无响应），重建可能仍在后台进行' }
+              : prev))
+          }
+        }
+        void tick()
+        const timer = setInterval(() => { void tick() }, 1500)
+        return () => { alive = false; clearInterval(timer) }
+      }, [reindexing, loadVec, applyReindex])
 
       const update = (key, name, value) => {
         setSettings(prev => ({ ...prev, [key]: { ...prev[key], [name]: value } }))
@@ -687,15 +750,54 @@ window.__ModuleLoader__.load({
       }
 
       const reindex = async () => {
+        if (rebuild?.phase === 'running') return
         setStatus('')
         setError('')
+        // 点下去立刻进入「重建中」，不等第一次轮询
+        startAck.current = false
+        setRebuild({ phase: 'running', done: 0, total: 0, error: '',
+                     startedAt: new Date().toISOString(), elapsedMs: 0 })
         try {
           const result = await callApi({ op: 'vec.reindex' })
-          setStatus(result.started ? '开始重建向量索引…' : '索引重建已在运行')
+          startAck.current = true
+          if (result?.state) applyReindex(result.state)
           await loadVec()
         } catch (e) {
-          setError(String(e?.message ?? e))
+          startAck.current = false
+          setRebuild({ phase: 'error', done: 0, total: 0, startedAt: '',
+                       elapsedMs: 0, error: String(e?.message ?? e) })
         }
+      }
+
+      /** 重建进度：running 一直显示到内核报 running=False 为止。 */
+      const reindexStatus = () => {
+        if (!rebuild) return null
+        if (rebuild.phase === 'running') {
+          const total = Number(rebuild.total) || 0
+          const pct = total
+            ? Math.min(100, Math.round((Number(rebuild.done) || 0) / total * 100))
+            : 0
+          const started = Date.parse(rebuild.startedAt)
+          const elapsed = Number.isNaN(started)
+            ? null
+            : Math.max(0, Math.round((Date.now() - started) / 1000))
+          return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+            h('div', { style: S.cardLabel },
+              `重建中 ${rebuild.done}${total ? `/${total}（${pct}%）` : ''}`
+              + (elapsed === null ? '' : ` · 已用 ${elapsed}s`)),
+            h('div', { style: S.barTrack },
+              h('div', { style: { ...S.barFill, width: `${pct}%` } })))
+        }
+        if (rebuild.phase === 'error') {
+          return h('div', { style: S.error },
+            `重建失败：${rebuild.error || '未知错误'}`
+            + (rebuild.total ? `（已完成 ${rebuild.done}/${rebuild.total}）` : ''))
+        }
+        return h('div', { style: S.cardLabel },
+          rebuild.total
+            ? `上次重建完成：${rebuild.done}/${rebuild.total}`
+              + (rebuild.elapsedMs ? ` · ${(rebuild.elapsedMs / 1000).toFixed(1)}s` : '')
+            : '上次重建完成：没有需要索引的条目')
       }
 
       const field = (key, name, label, options = {}) => h('label', {
@@ -752,7 +854,6 @@ window.__ModuleLoader__.load({
       const embeddingCard = () => {
         const key = 'embedding'
         const counts = vec?.counts || {}
-        const progress = vec?.reindex || {}
         return h('div', {
           key, style: { ...S.card, display: 'flex', flexDirection: 'column', gap: '8px' },
         },
@@ -784,9 +885,7 @@ window.__ModuleLoader__.load({
                 + `经验 ${counts.experience ?? 0} / 认知 ${counts.cognition ?? 0} / `
                 + `洞见 ${counts.insight ?? 0}`
               : '向量索引状态读取中…'),
-          progress.running && h('div', { style: S.cardLabel },
-            `重建中 ${progress.done ?? 0}/${progress.total ?? 0}`),
-          progress.error && h('div', { style: S.error }, `重建失败：${progress.error}`),
+          reindexStatus(),
           h('div', { style: S.bar },
             h('button', {
               style: S.button, type: 'button', disabled: Boolean(busy),

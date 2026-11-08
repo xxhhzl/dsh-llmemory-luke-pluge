@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
+import time
 from datetime import datetime, timezone
 
 import base
@@ -512,7 +514,9 @@ def settings_set(db, data: dict) -> dict:
     return {"key": key, "value": _mask_setting(merged)}
 
 
-_REINDEX = {"running": False, "done": 0, "total": 0, "error": ""}
+_REINDEX = {"running": False, "done": 0, "total": 0, "error": "",
+            "started_at": "", "finished_at": "", "elapsed_ms": 0}
+_REINDEX_LOCK = threading.Lock()
 
 
 def vec_status(db, data: dict) -> dict:
@@ -520,14 +524,29 @@ def vec_status(db, data: dict) -> dict:
 
 
 def vec_reindex(db, data: dict) -> dict:
-    '''后台重建向量索引（sqlite-vec + 外壳 embedding）。'''
-    if _REINDEX["running"]:
-        return {"started": False, "reason": "already_running"}
-    _REINDEX.update({"running": True, "done": 0, "total": 0, "error": ""})
+    '''
+    后台重建向量索引（sqlite-vec + 外壳 embedding）。
+
+    UI 靠 `reindex` 快照画进度：点下去立刻是 running，轮询到 running=False
+    才算结束。已经跑着的时候把当前快照一起返回，前端才不会误判成「没开始」
+    而把「重建中」收掉。
+    '''
+    with _REINDEX_LOCK:
+        if _REINDEX["running"]:
+            return {"started": False, "reason": "already_running",
+                    "state": dict(_REINDEX)}
+        _REINDEX.update({"running": True, "done": 0, "total": 0, "error": "",
+                         "started_at": base.get_cur_time(), "finished_at": "",
+                         "elapsed_ms": 0})
+        snapshot = dict(_REINDEX)
 
     def work():
+        started = time.monotonic()
         try:
             import embed
+            if not getattr(db, "_vec_enabled", False):
+                _REINDEX["error"] = "向量索引不可用（缺 sqlite-vec 扩展或向量表未建）"
+                return
             rows = []
             for kind, loader in (
                     ("experience", lambda: db.list_experiences(limit=100000)),
@@ -537,18 +556,37 @@ def vec_reindex(db, data: dict) -> dict:
                     if getattr(row, "status", "active") == "active":
                         rows.append((kind, row))
             _REINDEX["total"] = len(rows)
+
+            failures = 0
+            written = 0
+
+            def note_error(exc):
+                nonlocal failures
+                failures += 1
+                if not _REINDEX["error"]:
+                    _REINDEX["error"] = str(exc) or "embedding 调用失败"
+
             for index in range(0, len(rows), 16):
                 batch = rows[index:index + 16]
-                embed.index_rows(db, batch)
+                written += embed.index_rows(db, batch, on_error=note_error)
                 _REINDEX["done"] = min(len(rows), index + len(batch))
+                # 端点没起来时每批都会秒失败：连续两批写不进任何向量就收手，
+                # 免得「假装重建成功」（实测：Ollama 未启动时 87 条 <0.2s 全绿）
+                if written == 0 and failures >= 2:
+                    _REINDEX["error"] = (
+                        f"embedding 没有写入任何向量，已中止：{_REINDEX['error']}")
+                    break
+            if rows and written == 0 and not _REINDEX["error"]:
+                _REINDEX["error"] = "embedding 没有写入任何向量（检查端点配置）"
         except Exception as exc:
             _REINDEX["error"] = str(exc)
         finally:
             _REINDEX["running"] = False
+            _REINDEX["finished_at"] = base.get_cur_time()
+            _REINDEX["elapsed_ms"] = int((time.monotonic() - started) * 1000)
 
-    import threading
     threading.Thread(target=work, name="vec-reindex", daemon=True).start()
-    return {"started": True}
+    return {"started": True, "state": snapshot}
 
 
 def describe(db) -> dict:

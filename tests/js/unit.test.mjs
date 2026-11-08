@@ -627,3 +627,18 @@ test('embedTexts：维度与配置不符时报错', async () => {
     globalThis.fetch = original
   }
 })
+
+test('连不上端点：把 cause 的 code 带进错误信息', async () => {
+  const original = globalThis.fetch
+  const failure = Object.assign(new TypeError('fetch failed'),
+    { cause: { code: 'ECONNREFUSED' } })
+  globalThis.fetch = async () => { throw failure }
+  try {
+    // 只有 'fetch failed' 的话，界面上根本看不出是端点没起来
+    await assert.rejects(
+      () => embedTexts({ baseUrl: 'http://127.0.0.1:11434/v1', model: 'bge-m3' }, ['x']),
+      /连不上[\s\S]*ECONNREFUSED/)
+  } finally {
+    globalThis.fetch = original
+  }
+})

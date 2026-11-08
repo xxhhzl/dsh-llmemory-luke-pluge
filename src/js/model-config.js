@@ -67,32 +67,52 @@ function baseUrl(value) {
   return String(value || '').trim().replace(/\/+$/, '')
 }
 
-/** OpenAI 兼容 chat/completions（自定义端点）。 */
-export async function chatCompletion(profile, { system = '', user = '' } = {}) {
-  const url = `${baseUrl(profile.baseUrl)}/chat/completions`
-  if (!profile.baseUrl || !profile.model) throw new Error('自定义端点缺少 baseUrl / model')
-  const { controller, done } = withTimeout(profile.timeoutMs)
+/**
+ * POST JSON 并解析响应。
+ *
+ * fetch 的网络失败只会说 "fetch failed"；把 cause 里的 code（ECONNREFUSED /
+ * ENOTFOUND …）带出来，界面才分得清「端点没起来」和「模型返回错误」。
+ */
+async function requestJson(url, payload, { profile, signal, what }) {
+  let response
   try {
-    const response = await fetch(url, {
+    response = await fetch(url, {
       method: 'POST',
-      signal: controller.signal,
+      signal,
       headers: {
         'content-type': 'application/json',
         ...(profile.apiKey ? { authorization: `Bearer ${profile.apiKey}` } : {}),
       },
-      body: JSON.stringify({
-        model: profile.model,
-        temperature: 0,
-        stream: false,
-        messages: [
-          ...(system ? [{ role: 'system', content: system }] : []),
-          { role: 'user', content: user },
-        ],
-      }),
+      body: JSON.stringify(payload),
     })
-    const text = await response.text()
-    if (!response.ok) throw new Error(`HTTP ${response.status}: ${text.slice(0, 200)}`)
-    const data = JSON.parse(text)
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw new Error(`${what} 超时（${Number(profile.timeoutMs) || 60000}ms）`)
+    }
+    const cause = error?.cause?.code || error?.cause?.message || ''
+    throw new Error(`${what} 连不上 ${url}`
+      + (cause ? `（${cause}）` : `（${error?.message || 'fetch failed'}）`))
+  }
+  const text = await response.text()
+  if (!response.ok) throw new Error(`HTTP ${response.status}: ${text.slice(0, 200)}`)
+  return JSON.parse(text)
+}
+
+/** OpenAI 兼容 chat/completions（自定义端点）。 */
+export async function chatCompletion(profile, { system = '', user = '' } = {}) {
+  if (!profile.baseUrl || !profile.model) throw new Error('自定义端点缺少 baseUrl / model')
+  const url = `${baseUrl(profile.baseUrl)}/chat/completions`
+  const { controller, done } = withTimeout(profile.timeoutMs)
+  try {
+    const data = await requestJson(url, {
+      model: profile.model,
+      temperature: 0,
+      stream: false,
+      messages: [
+        ...(system ? [{ role: 'system', content: system }] : []),
+        { role: 'user', content: user },
+      ],
+    }, { profile, signal: controller.signal, what: '模型端点' })
     const content = data?.choices?.[0]?.message?.content
     if (typeof content !== 'string') throw new Error('响应缺少 choices[0].message.content')
     return { content, model: data?.model || profile.model, usage: data?.usage || {} }
@@ -113,18 +133,8 @@ export async function embedTexts(profile, texts) {
     : `${root}/embeddings`
   const { controller, done } = withTimeout(profile.timeoutMs)
   try {
-    const response = await fetch(url, {
-      method: 'POST',
-      signal: controller.signal,
-      headers: {
-        'content-type': 'application/json',
-        ...(profile.apiKey ? { authorization: `Bearer ${profile.apiKey}` } : {}),
-      },
-      body: JSON.stringify({ model: profile.model, input }),
-    })
-    const text = await response.text()
-    if (!response.ok) throw new Error(`HTTP ${response.status}: ${text.slice(0, 200)}`)
-    const data = JSON.parse(text)
+    const data = await requestJson(url, { model: profile.model, input },
+      { profile, signal: controller.signal, what: 'embedding 端点' })
     const vectors = flavor === 'ollama'
       ? data?.embeddings
       : (data?.data || []).map(item => item?.embedding)

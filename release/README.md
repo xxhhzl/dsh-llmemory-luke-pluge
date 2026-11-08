@@ -40,9 +40,12 @@ release/
   （`/api/embed`）。本地 Ollama 示例：
 
   ```powershell
-  ollama pull bge-m3
+  ollama pull bge-m3     # 拉模型；之后让服务一直跑着（桌面端或 ollama serve）
   # 默认值已指向 http://127.0.0.1:11434/v1 · bge-m3 · 1024 维
   ```
+
+  端点没跑起来时：保存并测试会报「连不上 …（ECONNREFUSED）」，重建索引会中止并报错
+  （不会写空索引、也不会假报完成）。
 
 ## 安装
 
@@ -150,9 +153,13 @@ session/event ──ingest-bridge──▶ ingest.request ─▶ 内核：入库
 1. `cordis_inspect_query` 确认插件行已 `applied`，且出现五把 `memory_*` 工具。
 2. 设置 → 长期记忆 → **模型**：三张卡片的默认值与 `cordis.patch.yml` 一致；
    点「保存并测试」应回 `Embedding OK：1024 维 · 2 条…` / `文本模型 OK：<模型> → OK`。
-3. 概况页内核版本应为 **0.3.0**（版本没变说明还在跑旧进程，重启 Harness）。
+   embedding 端点没起来时会明确报「连不上 …（ECONNREFUSED）」而不是只说 fetch failed。
+3. 概况页内核版本应为 **0.3.1**（版本没变说明还在跑旧进程，重启 Harness）。
 4. **升级上来的一次性动作**：老条目没有向量，点一次「重建向量索引」
-   （实测 87 条 / 6 次 embedding 请求 / 2.0s），卡片上三表条数应与库里 active 条目一致。
+   （实测 87 条 / 6 次 embedding 请求 / 2.0s）。**点下去后卡片会一直显示
+   「重建中 n/N · 已用 xxs」直到内核报完成**；中途读不到状态也保留进度。
+   若 embedding 写不进任何向量，会显示「重建失败：…（已完成 a/N）」并中止，
+   不会假报完成——先把端点跑起来（`ollama serve` / 桌面端）再重试。
 5. 让模型调用一次 `memory_search`，确认返回 `{items, count, scope, limit}`（空库时 `count: 0`）。
 6. 发几轮对话，等待去抖窗口后确认库里出现事件（`memory_recent` 能查到区间内事件）；
    模型页的向量索引条数应随新条目增长。

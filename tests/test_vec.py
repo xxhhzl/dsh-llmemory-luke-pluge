@@ -206,6 +206,35 @@ class TestIndexRows(VecCase):
             self.assertEqual(embed.index_event(self.db, 1), 0)
         self.assertEqual(fake.calls, [])
 
+    def test_client_error_is_reported(self):
+        item = self.db.get_experience(self.add_experience("端点挂了"))
+        errors = []
+
+        class Failing:
+            def request(self, texts, timeout=None):
+                raise embed.EmbedError("embedding 端点 连不上（ECONNREFUSED）")
+
+        with mock.patch.object(embed, "_client", Failing()):
+            written = embed.index_rows(self.db, [("experience", item)],
+                                       on_error=errors.append)
+        self.assertEqual(written, 0)
+        self.assertEqual(len(errors), 1, "失败要回调出去，调用方才能报错")
+        self.assertIn("连不上", str(errors[0]))
+
+    def test_count_mismatch_is_reported(self):
+        item = self.db.get_experience(self.add_experience("条数不匹配"))
+        errors = []
+
+        class Short:
+            def request(self, texts, timeout=None):
+                return []
+
+        with mock.patch.object(embed, "_client", Short()):
+            written = embed.index_rows(self.db, [("experience", item)],
+                                       on_error=errors.append)
+        self.assertEqual(written, 0)
+        self.assertIn("期望 1 条", str(errors[0]))
+
 
 @unittest.skipUnless(HAS_VEC, "未安装 sqlite-vec")
 class TestRRFFusion(VecCase):

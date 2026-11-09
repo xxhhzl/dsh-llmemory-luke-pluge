@@ -291,6 +291,50 @@ test('投递失败后新事件仍接在已回滚的消息后面', async () => {
   assert.deepEqual(calls[1], ['m1', 'm2', 'm3'], '顺序不能乱')
 })
 
+test('seq=0 的事件不能被当成重复丢掉', () => {
+  // 宿主事件序号从 0 开始（session/permission 占 0）；缓冲初始 lastSeq=0
+  // 会把真正的 seq=0 误判为「已见过」。
+  let handler
+  const bridge = new IngestBridge(
+    { on: (name, fn) => { handler = fn; return () => {} } },
+    { request: async () => ({ accepted: true }) },
+    { trace: () => {} })
+  bridge.attach()
+
+  handler({ id: 's0' }, {
+    type: 'user/message', seq: 0,
+    data: { id: 'm0', content: [{ type: 'text', text: '第一条消息' }] },
+  })
+
+  const buffer = bridge.buffers.get('s0')
+  assert.ok(buffer, '收到事件应建立会话缓冲')
+  assert.equal(buffer.messages.length, 1, 'seq=0 的消息必须进缓冲')
+  assert.equal(buffer.messages[0].seq, 0)
+  assert.equal(buffer.messages[0].content, '第一条消息')
+  assert.equal(buffer.lastSeq, 0)
+  if (buffer.timer) clearTimeout(buffer.timer)
+})
+
+test('重复投递同一 seq 仍然去重', () => {
+  let handler
+  const bridge = new IngestBridge(
+    { on: (name, fn) => { handler = fn; return () => {} } },
+    { request: async () => ({ accepted: true }) },
+    { trace: () => {} })
+  bridge.attach()
+
+  const event = {
+    type: 'user/message', seq: 5,
+    data: { id: 'm5', content: [{ type: 'text', text: '重复' }] },
+  }
+  handler({ id: 's5' }, event)
+  handler({ id: 's5' }, event)
+
+  const buffer = bridge.buffers.get('s5')
+  assert.equal(buffer.messages.length, 1, '同一 seq 不能重复入缓冲')
+  if (buffer.timer) clearTimeout(buffer.timer)
+})
+
 test('准入判定：路由层真的拒掉外来 Origin（不是只测函数）', async () => {
   let route
   const ctx = { webServer: { register: (r) => { route = r; return () => {} } } }

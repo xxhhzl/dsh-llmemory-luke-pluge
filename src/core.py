@@ -301,13 +301,21 @@ def compile_core(db: database.Database, cfg: dict | None = None,
 
 
 def get_core(data, q: base.message_queue, db=None):
-    '''协议入口：返回核心记忆与自述快照；召回按需编译（advance_turn 控制冷却）。'''
+    '''协议入口：返回核心记忆与自述快照；召回按需编译（advance_turn 控制冷却）。
+
+    业务参数在**帧的 `data`** 里（与 tools.calls / admin / ingest.request 一致），
+    只有 `request_id`/`session_id`/`agent_id` 在信封顶层。外壳用
+    `kernel.request('core.get', {query_hint, recall, advance_turn}, {sessionId})`
+    发帧，所以 session_id 取 data 优先、信封兜底——只读顶层会让 query_hint 与
+    两个开关全部落回默认值（0.5.3 修）。
+    '''
     if db is None:
         import tools                                # 复用共享连接（勿关闭）
         db = tools._db()
-    payload = compile_core(
-        db, session_id=data.get("session_id"),
-        query_hint=data.get("query_hint"),
-        advance_turn=bool(data.get("advance_turn", True)),
-        use_recall=bool(data.get("recall", True)))
-    frame.push(q, data, "core", payload)
+    payload = data.get("data") or {}
+    result = compile_core(
+        db, session_id=payload.get("session_id") or data.get("session_id"),
+        query_hint=payload.get("query_hint"),
+        advance_turn=bool(payload.get("advance_turn", True)),
+        use_recall=bool(payload.get("recall", True)))
+    frame.push(q, data, "core", result)

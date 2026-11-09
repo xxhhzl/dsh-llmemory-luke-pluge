@@ -84,10 +84,13 @@ export class IngestBridge {
 
     let buffer = this.buffers.get(sessionId)
     if (!buffer) {
-      buffer = { messages: [], lastSeq: 0, timer: null }
+      // lastSeq=null 表示「尚未见过任何序号」：宿主 seq 从 0 开始编号
+      // （session/permission 占 0，surface 事件通常从 8 起），初始化为 0
+      // 会把真正的 seq=0 事件当成重复丢掉。
+      buffer = { messages: [], lastSeq: null, timer: null }
       this.buffers.set(sessionId, buffer)
     }
-    if (seq <= buffer.lastSeq) return
+    if (buffer.lastSeq !== null && seq <= buffer.lastSeq) return
     this.trace?.(`event ${event.type} seq=${seq} role=${role} chars=${content.length}`)
 
     buffer.messages.push({

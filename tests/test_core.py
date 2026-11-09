@@ -8,11 +8,13 @@ import sys
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 import base                                       # noqa: E402
+import config                                     # noqa: E402
 import core                                       # noqa: E402
 from database import (Cognition, Database, Experience, Insight,  # noqa: E402
                       SelfMemory)
@@ -132,6 +134,87 @@ class TestRoute(CoreCase):
         self.assertEqual(frame["type"], "core")
         self.assertTrue(frame["data"]["enabled"])
         self.assertIn("<self_configured>", frame["data"]["text"])
+
+
+class TestCoreGetProtocolFrame(CoreCase):
+    '''
+    走**真实协议帧**：业务参数在帧的 `data` 里，`session_id` 在信封顶层。
+
+    外壳发的是 `kernel.request('core.get', {query_hint, recall, advance_turn},
+    {sessionId})`，帧形如
+    `{type, request_id, session_id, data: {query_hint, recall, advance_turn}}`。
+    只测 `compile_core()` 会绕过这一层，参数丢失也看不出来（0.5.3 的教训）。
+    '''
+
+    def setUp(self):
+        super().setUp()
+        core._recall_state.clear()
+
+    def tearDown(self):
+        core._recall_state.clear()
+        super().tearDown()
+
+    def _with_recall(self):
+        current = config.get_config()
+        recall = {**current.get("recall", {}), "min_score": 0.0}
+        return mock.patch.object(config, "get_config",
+                                 return_value={**current, "recall": recall})
+
+    def _seed_recallable(self):
+        item = self.seed_cognition("装插件之前先说明会改哪些文件")
+        self.db.index_fts("cognition", item, "项目", "装插件之前先说明会改哪些文件")
+        return item
+
+    def _call(self, **data):
+        '''按外壳的方式组帧（参数在 data 层、session 在信封），返回应答 data。'''
+        q = base.message_queue()
+        core.get_core({
+            "type": "core.get",
+            "request_id": "r_frame",
+            "session_id": S1,
+            "data": data,
+        }, q, self.db)
+        return json.loads(q.recv())["data"]
+
+    def test_frame_flags_are_honored(self):
+        self._seed_recallable()
+        with self._with_recall():
+            payload = self._call(query_hint="装插件之前先说明",
+                                 recall=False, advance_turn=False)
+        self.assertTrue(payload["recall_skipped"],
+                        "recall=false 必须被内核读到")
+        self.assertEqual(payload["recall_text"], "")
+
+    def test_frame_query_hint_drives_recall(self):
+        self._seed_recallable()
+        with self._with_recall():
+            payload = self._call(query_hint="装插件之前先说明",
+                                 recall=True, advance_turn=True)
+        self.assertGreaterEqual(len(payload["recall_items"]), 1,
+                                "query_hint 必须被内核读到")
+
+    def test_frame_background_refresh_does_not_consume_cooldown(self):
+        '''后台帧（recall=false, advance_turn=false）不能推进冷却。'''
+        self._seed_recallable()
+        with self._with_recall():
+            first = self._call(query_hint="装插件之前先说明",
+                               recall=True, advance_turn=True)
+            self.assertGreaterEqual(len(first["recall_items"]), 1)
+            for _ in range(9):
+                self._call(recall=False, advance_turn=False)
+            second = self._call(query_hint="装插件之前先说明",
+                                recall=True, advance_turn=True)
+        self.assertEqual(second["recall_items"], [],
+                         "冷却按用户步骤算，后台帧不该把它耗光")
+
+    def test_envelope_session_still_works(self):
+        '''外壳只给信封 session_id、data 里没有时，仍要能绑定会话。'''
+        self._seed_recallable()
+        q = base.message_queue()
+        core.get_core({"type": "core.get", "request_id": "r_e",
+                       "session_id": S1, "data": {}}, q, self.db)
+        frame = json.loads(q.recv())
+        self.assertTrue(frame["data"]["enabled"])
 
 
 if __name__ == "__main__":

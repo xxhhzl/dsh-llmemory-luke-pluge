@@ -223,6 +223,12 @@ export function createShell(ctx, config = {}, {
     trace(`start (kernel=${script})`)
     stopped = false
     corePrompt.attach()                   // 只需注册一次；重启不重复
+    // 召回按「本步的会话 + 本步的用户输入」在提示词组装前刷新（0.5.1）
+    try {
+      corePrompt.bindStep()
+    } catch (error) {
+      trace(`recall bindStep failed: ${error?.message ?? error}`)
+    }
     await connect()
 
     if (disposed) return { tools: 0 }

@@ -128,37 +128,50 @@ def _recent_query(db, session_id: str | None, cfg: dict) -> str:
     return text[:int(cfg.get("query_chars", 500))]
 
 
+def _commit_recall(session_id: str | None, text: str, items: list) -> None:
+    '''每次编译都覆盖快照：空召回也要写空，避免界面显示上一轮的结果。'''
+    with _recall_lock:
+        _last_recall["text"] = text
+        _last_recall["items"] = list(items)
+        _last_recall["session_id"] = session_id
+
+
 def _build_recall(db, session_id: str | None, query_hint: str | None) -> dict:
     '''
     被动回想：按当前对话捞几条相关记忆，组装 <recall> 块。
 
-    两条硬约束：
+    三条硬约束：
     - `touch=False`：注入不算「被使用」，否则每轮都加热度，越召回越热；
-    - 冷却：同一条记忆在同一会话里 N 轮内不重复注入，避免看第二遍就当背景。
+    - 冷却：同一条记忆在同一会话里 N 轮内不重复注入，避免看第二遍就当背景；
+    - **必须绑定会话**：没有 session_id 就不召回。旧实现退回「最近有消息的
+      会话」，多会话场景会把别的会话的记忆注入当前提示词（0.5.1 修）。
     '''
     cfg = config.get_config().get("recall", {}) or {}
-    empty = {"text": "", "items": []}
+    session_id = (session_id or "").strip() or None
+
+    def finish(text: str, items: list) -> dict:
+        _commit_recall(session_id, text, items)
+        return {"text": text, "items": items}
+
     if not cfg.get("enabled", True):
-        return empty
-    # 外壳的 core.get 不带 session_id：退回「最近有消息的会话」，否则召回恒为空
+        return finish("", [])
     if not session_id:
-        try:
-            session_id = db.latest_session_id()
-        except Exception:
-            session_id = None
+        return finish("", [])
+
     query = (query_hint or "").strip() or _recent_query(db, session_id, cfg)
+    query = query[:int(cfg.get("query_chars", 500))]
     if not query:
-        return empty
+        return finish("", [])
 
     limit = int(cfg.get("max_items", 2))
     if any(word in query for word in STRONG_HINTS):
         limit = int(cfg.get("max_items_strong", 5))
     if limit <= 0:
-        return empty
+        return finish("", [])
     min_score = float(cfg.get("min_score", 0.55))
     cooldown = int(cfg.get("same_id_cooldown", 10))
 
-    key = session_id or ""
+    key = session_id
     with _recall_lock:
         state = _recall_state.setdefault(key, {"turn": 0, "seen": {}})
         state["turn"] += 1
@@ -168,7 +181,7 @@ def _build_recall(db, session_id: str | None, query_hint: str | None) -> dict:
         hits = retrieval.search(db, query, limit=limit, scope="all", touch=False)
     except Exception as exc:                      # 召回失败不能拖垮上下文编译
         base.log.warning("recall.search_failed", error=type(exc).__name__)
-        return empty
+        return finish("", [])
 
     # 先按分数取前 limit 条，再滤冷却：宁可不注入，也不拿低分条目硬凑
     candidates = [hit for hit in hits if hit.score >= min_score][:limit]
@@ -187,7 +200,7 @@ def _build_recall(db, session_id: str | None, query_hint: str | None) -> dict:
             state["seen"] = {k: v for k, v in state["seen"].items() if v > cutoff}
 
     if not picked:
-        return empty
+        return finish("", [])
 
     lines = ['<recall note="回忆，可能过时；与现场证据冲突时以现场为准">']
     items = []
@@ -200,11 +213,7 @@ def _build_recall(db, session_id: str | None, query_hint: str | None) -> dict:
         items.append({"kind": hit.kind, "id": hit.id, "text": brief,
                       "score": round(hit.score, 4), "created_at": stamp})
     lines.append("</recall>")
-    with _recall_lock:
-        _last_recall["text"] = "\n".join(lines)
-        _last_recall["items"] = list(items)
-        _last_recall["session_id"] = session_id
-    return {"text": "\n".join(lines), "items": items}
+    return finish("\n".join(lines), items)
 
 
 def compile_core(db: database.Database, cfg: dict | None = None,

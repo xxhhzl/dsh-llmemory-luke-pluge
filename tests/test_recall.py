@@ -87,6 +87,33 @@ class TestRecall(RecallCase):
         self.assertEqual(payload["recall_text"], "")
         self.assertEqual(payload["recall_items"], [])
 
+    def test_without_session_never_borrows_latest(self):
+        '''没有 session_id 时不能退回「最近有消息的会话」——那会把别的会话注入进来。'''
+        self._seed()
+        with self._with_recall():
+            payload = core.compile_core(self.db, session_id=None)
+        self.assertEqual(payload["recall_text"], "")
+        self.assertEqual(payload["recall_items"], [])
+
+    def test_query_hint_drives_recall(self):
+        self._seed()
+        with self._with_recall():
+            payload = core.compile_core(self.db, session_id=S1,
+                                        query_hint="装插件之前先说明")
+        self.assertGreaterEqual(len(payload["recall_items"]), 1)
+
+    def test_empty_recall_clears_snapshot(self):
+        '''空召回也要覆盖快照，否则界面会显示上一轮的记忆。'''
+        self._seed()
+        with self._with_recall():
+            core.compile_core(self.db, session_id=S1)
+            self.assertTrue(core.last_recall()["text"])
+            core.compile_core(self.db, session_id="s_other")
+        snapshot = core.last_recall()
+        self.assertEqual(snapshot["text"], "")
+        self.assertEqual(snapshot["items"], [])
+        self.assertEqual(snapshot["session_id"], "s_other")
+
 
 if __name__ == "__main__":
     unittest.main()

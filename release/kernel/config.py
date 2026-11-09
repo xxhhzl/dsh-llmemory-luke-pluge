@@ -8,7 +8,7 @@ import time
 import base
 
 PROTOCOL_VERSION = "1.0" # 协议版本
-PLUGIN_VERSION = "0.5.0" # 插件版本
+PLUGIN_VERSION = "0.5.1" # 插件版本
 
 # 检查协议版本
 def is_format(protocol_version: str) -> bool:
@@ -111,6 +111,7 @@ DEFAULT_CONFIG = {
         "w_importance": 0.25,          # 记忆强度：重要性
         "w_confidence": 0.15,          # 记忆强度：确信度/可靠性
         "w_project": 0.10,             # 记忆强度：情境匹配
+        "w_feedback": 0.25,            # 记忆强度：人工反馈分（±3 饱和，bounded）
         "explore_ratio": 0.1,          # 探索位比例（冷条目曝光）
         "max_per_cluster": 2,          # 同一事件簇最多几条
         "cross_project_penalty": 0.0,  # 跨项目召回的额外衰减 0–1（0=关闭，A/B 后再调）
@@ -161,6 +162,7 @@ _LEAF_SPEC = {
     "search.w_importance": {"type": float, "min": 0.0, "max": 1.0},
     "search.w_confidence": {"type": float, "min": 0.0, "max": 1.0},
     "search.w_project": {"type": float, "min": 0.0, "max": 1.0},
+    "search.w_feedback": {"type": float, "min": 0.0, "max": 1.0},
     "search.explore_ratio": {"type": float, "min": 0.0, "max": 1.0},
     "search.max_per_cluster": {"type": int, "min": 1, "max": 20},
     "search.cross_project_penalty": {"type": float, "min": 0.0, "max": 1.0},

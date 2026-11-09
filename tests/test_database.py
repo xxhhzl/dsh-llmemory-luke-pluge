@@ -96,7 +96,7 @@ class TestSchema(DatabaseCase):
             "id", "session_id", "title", "summary", "created_at",
             "prev_event_id", "next_event_id", "related_events", "cnt",
             "origin_project", "summarized_at", "needs_review", "review_reason",
-            "last_used_at"])
+            "last_used_at", "valid_to"])
 
     def test_wal_mode(self):
         row = self.db._conn.execute("PRAGMA journal_mode").fetchone()

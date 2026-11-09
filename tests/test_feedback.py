@@ -44,6 +44,10 @@ class FeedbackCase(unittest.TestCase):
         return [hit.id for hit in retrieval.search(
             self.db, query, limit=10, scope="all", touch=False)]
 
+    def _scores(self, query):
+        return {(hit.kind, hit.id): hit.score for hit in retrieval.search(
+            self.db, query, limit=10, scope="all", touch=False)}
+
 
 class TestFeedbackSignals(FeedbackCase):
     def test_useful_raises_use_count(self):
@@ -111,6 +115,65 @@ class TestReportAlias(FeedbackCase):
             "SELECT status FROM cognition WHERE id = ?",
             (item["id"],)).fetchone()
         self.assertEqual(row["status"], "invalid")
+
+
+class TestFeedbackActuallyScores(FeedbackCase):
+    '''反馈必须改变检索排序，而不只是改数据库字段。'''
+
+    def test_useless_lowers_search_score(self):
+        item = self._note("反馈降权测试辛")
+        key = ("experience", item["id"])
+        before = self._scores("反馈降权测试辛")[key]
+        tools.memory_feedback([item["id"]], kind="experience", signal="useless")
+        after = self._scores("反馈降权测试辛")[key]
+        self.assertLess(after, before, "useless 之后同一条目的分数必须下降")
+
+    def test_useful_raises_search_score(self):
+        item = self._note("反馈加权测试壬")
+        key = ("experience", item["id"])
+        before = self._scores("反馈加权测试壬")[key]
+        tools.memory_feedback([item["id"]], kind="experience", signal="useful")
+        after = self._scores("反馈加权测试壬")[key]
+        self.assertGreater(after, before, "useful 之后同一条目的分数必须上升")
+
+    def test_feedback_is_bounded(self):
+        '''连续 20 次 useless 不能把分数压成负数。'''
+        item = self._note("反馈饱和测试癸")
+        for _ in range(20):
+            tools.memory_feedback([item["id"]], kind="experience", signal="useless")
+        key = ("experience", item["id"])
+        score = self._scores("反馈饱和测试癸")[key]
+        self.assertGreaterEqual(score, 0.0)
+
+    def test_wrong_event_leaves_recall(self):
+        event = self.db.create_event("s_feedback", "错误的事件摘要")
+        self.db.set_event_summary(event.id, "这是一条与事实不符的事件摘要")
+        self.db.index_fts("event", event.id, event.title, "这是一条与事实不符的事件摘要",
+                          session_id="s_feedback")
+        self.assertIn(("event", event.id), self._scores("事实不符"))
+        result = tools.memory_feedback([event.id], kind="event", signal="wrong",
+                                       note="与事实不符")
+        self.assertTrue(result["items"][0]["ok"])
+        self.assertNotIn(("event", event.id), self._scores("事实不符"),
+                         "标了 wrong 的事件必须退出召回")
+        row = self.db._conn.execute(
+            "SELECT valid_to, needs_review FROM event WHERE id = ?",
+            (event.id,)).fetchone()
+        self.assertTrue(row["valid_to"], "事件失效要留下时间戳")
+        self.assertEqual(row["needs_review"], 1, "同时保留待复核标记")
+
+    def test_wrong_l3_removes_vector(self):
+        if not self.db.vec_status().get("enabled"):
+            self.skipTest("向量不可用")
+        item = self._note("向量残留测试子")
+        dim = self.db.vec_status().get("dim") or 0
+        vector = [0.0] * dim
+        vector[0] = 1.0
+        self.db.vec_upsert("experience", item["id"], vector)
+        self.assertTrue(self.db.vec_search("experience", vector, k=5))
+        tools.memory_feedback([item["id"]], kind="experience", signal="wrong")
+        self.assertEqual(self.db.vec_search("experience", vector, k=5), {},
+                         "失效条目必须同时摘掉向量，否则白占 KNN 名额")
 
 
 if __name__ == "__main__":

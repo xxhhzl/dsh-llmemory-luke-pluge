@@ -6,6 +6,7 @@
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { embedQuery, hydeVector } from './hyde.js'
+import { executeMemoryNote } from './note-call.js'
 
 const PRIMITIVES = new Set(['string', 'number', 'integer', 'boolean'])
 
@@ -121,6 +122,22 @@ export function registerKernelTools(ctx, kernel, schemas, {
               type, payload, { sessionId, agentId, timeoutMs }),
             logger,
           }, { name, args, sessionId, agentId, timeoutMs })
+          if (!entry) throw new Error(`内核没有返回 ${name} 的结果`)
+          if (!entry.ok) {
+            const error = new Error(entry.error?.message || `${name} 执行失败`)
+            error.code = entry.error?.code
+            throw error
+          }
+          return entry.data
+        }
+        if (name === 'memory_note' && args?.content) {
+          const settings = getSettings?.()
+          const entry = await executeMemoryNote({
+            embedQueryFn: text => embedQuery(settings, text),
+            request: (type, payload, opts) => kernel.request(
+              type, payload,
+              { sessionId, agentId, timeoutMs: opts?.timeoutMs ?? timeoutMs }),
+          }, { name, args, timeoutMs })
           if (!entry) throw new Error(`内核没有返回 ${name} 的结果`)
           if (!entry.ok) {
             const error = new Error(entry.error?.message || `${name} 执行失败`)

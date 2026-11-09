@@ -292,17 +292,25 @@ def memory_feedback(ids, kind="cognition", signal="useful", note=None, *,
                 items.append({"id": item_id, "ok": False, "reason": "not_found"})
                 continue
             if kind == "event":
-                # 事件表没有 feedback_score：用 cnt 和复核标记表达同样语义
+                # 事件表没有 feedback_score：用 cnt 表达有用/没用；
+                # outdated/wrong 走统一失效入口（置 valid_to + 摘索引）
                 if signal == "useful":
                     conn.execute("UPDATE event SET cnt = cnt + 1, "
                                  "last_used_at = ? WHERE id = ?", (now, item_id))
                 elif signal == "useless":
                     conn.execute("UPDATE event SET cnt = MAX(cnt - 1, 0) "
                                  "WHERE id = ?", (item_id,))
-                else:
-                    conn.execute("UPDATE event SET needs_review = 1, "
-                                 "review_reason = ? WHERE id = ?",
-                                 (note_text or signal, item_id))
+                elif not db.retire_event(item_id, note_text or signal):
+                    # 已经失效过：幂等返回成功，不把「重复上报」当成找不到
+                    exists = conn.execute(
+                        "SELECT 1 FROM event WHERE id = ?", (item_id,)).fetchone()
+                    if exists is None:
+                        items.append({"id": item_id, "ok": False,
+                                      "reason": "not_found"})
+                        continue
+                    items.append({"id": item_id, "ok": True, "signal": signal,
+                                  "note": "already_retired"})
+                    continue
                 items.append({"id": item_id, "ok": True, "signal": signal})
                 continue
 
@@ -316,19 +324,17 @@ def memory_feedback(ids, kind="cognition", signal="useful", note=None, *,
                     f"UPDATE {kind} SET feedback_score = feedback_score - 1 "
                     f"WHERE id = ?", (item_id,))
             elif signal == "outdated":
-                conn.execute(
-                    f"UPDATE {kind} SET valid_to = ?, "
-                    f"feedback_score = feedback_score - 1 WHERE id = ?",
-                    (now, item_id))
-                conn.execute("DELETE FROM memory_fts WHERE ref_kind = ? "
-                             "AND ref_id = ?", (kind, item_id))
+                # 过时：置 valid_to 并摘掉 FTS / 向量（同事务内完成）
+                if not db.mark_l3_outdated(kind, item_id, note_text or "outdated"):
+                    items.append({"id": item_id, "ok": False,
+                                  "reason": "not_active"})
+                    continue
             else:
-                conn.execute(
-                    f"UPDATE {kind} SET status = 'invalid', "
-                    f"invalid_reason = ? WHERE id = ?",
-                    (note_text or "wrong", item_id))
-                conn.execute("DELETE FROM memory_fts WHERE ref_kind = ? "
-                             "AND ref_id = ?", (kind, item_id))
+                # 与事实不符：置 invalid，同样摘掉 FTS / 向量
+                if not db.invalidate_l3(kind, item_id, note_text or "wrong"):
+                    items.append({"id": item_id, "ok": False,
+                                  "reason": "not_active"})
+                    continue
             items.append({"id": item_id, "ok": True, "signal": signal})
 
     updated = sum(1 for item in items if item["ok"])

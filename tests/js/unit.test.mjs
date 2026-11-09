@@ -12,8 +12,9 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { registerMemoryCommand } from '../../src/js/commands.js'
-import { CorePrompt, CORE_SECTION, SELF_NOTES_CONTEXT }
+import { CorePrompt, CORE_SECTION, SELF_NOTES_CONTEXT, lastUserText }
   from '../../src/js/core-prompt.js'
+import { executeMemoryNote } from '../../src/js/note-call.js'
 import { buildFrame, decodeFrame, encodeFrame } from '../../src/js/frames.js'
 import { IngestBridge, contentToText } from '../../src/js/ingest-bridge.js'
 import { defaultSettings, mergeSettings, profileFor, chatCompletion, embedTexts }
@@ -654,7 +655,7 @@ const { executeMemorySearch } = await (async () => {
   const path = await import('node:path')
   const dir = path.resolve('.tmp', 'js-test')
   await fs.mkdir(dir, { recursive: true })
-  for (const name of ['tools-bridge.js', 'hyde.js', 'model-config.js']) {
+  for (const name of ['tools-bridge.js', 'note-call.js', 'hyde.js', 'model-config.js']) {
     const source = await fs.readFile(path.resolve('src/js', name), 'utf8')
     const stripped = source.replace(
       /^import .*@deepseek-ai\/dsh-tools.*\n/m, '')
@@ -778,4 +779,110 @@ test('HyDE：hydeVector 复用提取槽自定义端点；宿主模式/端点失�
   } finally {
     globalThis.fetch = original
   }
+})
+
+/* ---------------- 会话隔离与 memory_note 向量链路（0.5.1） ---------------- */
+
+test('lastUserText：取最后一条用户文本，跳过插件/工具来源', () => {
+  assert.equal(lastUserText(null), '')
+  assert.equal(lastUserText([
+    { role: 'user', content: [{ type: 'text', text: '第一句' }] },
+    { role: 'assistant', content: [{ type: 'text', text: '回答' }] },
+    { role: 'user', content: [{ type: 'text', text: '  ' }] },
+    { role: 'user', content: [{ type: 'text', text: '第二句' }] },
+  ]), '第二句')
+  assert.equal(lastUserText([
+    { role: 'user', source: { kind: 'plugin' }, content: '注入的' },
+    { role: 'user', content: '真正的' },
+  ]), '真正的')
+})
+
+test('core.get 必须带当前会话与查询；召回按会话缓存', async () => {
+  const seen = []
+  const kernel = {
+    request: async (type, data, options) => {
+      seen.push({ type, data, options })
+      return {
+        enabled: true,
+        version: 'v1',
+        text: '<long_term_memory/>',
+        notes_version: 'n1',
+        notes_text: '<self_notes/>',
+        recall_version: `r-${options?.sessionId || ''}`,
+        recall_text: `<recall>${options?.sessionId || ''}:${data?.query_hint || ''}</recall>`,
+        recall_items: [],
+      }
+    },
+  }
+  const prompt = new CorePrompt({}, kernel, { trace: () => {} })
+  await prompt.refresh({ sessionId: 'sA', queryHint: '装插件' })
+  assert.equal(seen[0].type, 'core.get')
+  assert.equal(seen[0].options.sessionId, 'sA')
+  assert.equal(seen[0].data.query_hint, '装插件')
+  assert.match(prompt.currentRecall(), /sA:装插件/)
+
+  await prompt.refresh({ sessionId: 'sB', queryHint: '查资料' })
+  assert.match(prompt.currentRecall(), /sA:装插件/,
+    '直接刷新别的会话不能顶掉当前会话')
+  prompt.activeSession = 'sB'
+  assert.match(prompt.currentRecall(), /sB:查资料/)
+
+  prompt.activeSession = 'sA'
+  assert.match(prompt.currentRecall(), /sA:装插件/, 'A 的召回不能被 B 覆盖')
+  prompt.activeSession = 'sC'
+  assert.equal(prompt.currentRecall(), '', '没有编译过的会话不借别人的召回')
+})
+
+test('agent/pre-step：在组装前用本步会话与用户输入刷新召回，并原样返回 next', async () => {
+  const calls = []
+  const kernel = {
+    request: async (type, data, options) => {
+      calls.push({ type, data, options })
+      return { enabled: true, version: 'v', text: '', notes_version: '',
+               notes_text: '', recall_text: '<recall>x</recall>', recall_items: [] }
+    },
+  }
+  let handler
+  const ctx = { on: (name, fn) => { assert.equal(name, 'agent/pre-step'); handler = fn; return () => {} } }
+  const prompt = new CorePrompt(ctx, kernel, { trace: () => {} })
+  prompt.bindStep()
+  const decision = { kind: 'enter', messages: [] }
+  const message = { role: 'user', content: [{ type: 'text', text: '上次那个插件怎么装的' }] }
+  const result = await handler({ agent: { session: { id: 'sess-1' } }, messages: [message] },
+    async () => decision)
+  assert.equal(result, decision, 'waterfall 必须原样返回 next() 的结果')
+  assert.equal(calls[0].options.sessionId, 'sess-1')
+  assert.equal(calls[0].data.query_hint, '上次那个插件怎么装的')
+  assert.match(prompt.currentRecall(), /<recall>/)
+})
+
+test('memory_note：用 content 算向量并随调用传给内核', async () => {
+  const requests = []
+  const entry = await executeMemoryNote({
+    embedQueryFn: async text => { assert.equal(text, '导出前统一线宽'); return [0.5, 0.25] },
+    request: async (type, payload, options) => {
+      requests.push({ type, payload, options })
+      return [{ call_id: payload.calls[0].call_id, ok: true, data: { action: 'created' } }]
+    },
+  }, { args: { content: '导出前统一线宽', kind: 'experience' }, timeoutMs: 1234 })
+
+  assert.equal(entry.ok, true)
+  assert.equal(requests[0].type, 'tools.calls')
+  const call = requests[0].payload.calls[0]
+  assert.equal(call.name, 'memory_note')
+  assert.deepEqual(call.query_vector, [0.5, 0.25], '没有向量就退化成字面查重')
+  assert.equal(requests[0].options.timeoutMs, 1234)
+})
+
+test('memory_note：embedding 失败时不带向量，仍照常调用', async () => {
+  let call
+  await executeMemoryNote({
+    embedQueryFn: async () => null,
+    request: async (type, payload) => {
+      call = payload.calls[0]
+      return [{ ok: true, data: {} }]
+    },
+  }, { args: { content: '某条经验' } })
+  assert.equal(call.name, 'memory_note')
+  assert.equal('query_vector' in call, false)
 })

@@ -68,7 +68,8 @@ CREATE TABLE IF NOT EXISTS event (
   summarized_at  TEXT,                       -- 上次摘要时间；用于判断是否需要重跑调用 A
   needs_review   INTEGER NOT NULL DEFAULT 0, -- 摘要失败/降级，等待复核
   review_reason  TEXT,
-  last_used_at   TEXT                        -- 最近一次被召回/再认的时间
+  last_used_at   TEXT,                       -- 最近一次被召回/再认的时间
+  valid_to       TEXT                        -- 失效时间；非空且已过则退出召回
 );
 
 -- 仅加索引，不改列；related_events 按 doc 要求不建索引
@@ -267,6 +268,7 @@ class Event:
     needs_review: int = 0              # 1 = 待复核（摘要失败或条目降级）
     review_reason: str | None = None
     last_used_at: str | None = None    # 最近一次被召回/再认
+    valid_to: str | None = None        # 失效时间；非空且已过则退出召回
 
     def to_dict(self) -> dict:
         return {
@@ -279,6 +281,7 @@ class Event:
             "needs_review": bool(self.needs_review),
             "review_reason": self.review_reason,
             "last_used_at": self.last_used_at,
+            "valid_to": self.valid_to,
         }
 
     @classmethod
@@ -304,6 +307,7 @@ class Event:
             needs_review=row["needs_review"] if "needs_review" in keys else 0,
             review_reason=row["review_reason"] if "review_reason" in keys else None,
             last_used_at=row["last_used_at"] if "last_used_at" in keys else None,
+            valid_to=row["valid_to"] if "valid_to" in keys else None,
         )
 
 
@@ -351,6 +355,7 @@ class Experience:
     superseded_id: int | None = None
     valid_to: str | None = None
     invalid_reason: str | None = None
+    feedback_score: int = 0       # 反馈分：useful +1 / useless −1，检索时参与降权
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Experience":
@@ -364,6 +369,8 @@ class Experience:
             last_used_at=row["last_used_at"], created_at=row["created_at"],
             status=row["status"], superseded_id=row["superseded_id"],
             valid_to=row["valid_to"], invalid_reason=row["invalid_reason"],
+            feedback_score=(row["feedback_score"]
+                            if "feedback_score" in row.keys() else 0),
         )
 
 
@@ -387,6 +394,7 @@ class Cognition:
     superseded_id: int | None = None
     valid_to: str | None = None
     invalid_reason: str | None = None
+    feedback_score: int = 0
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Cognition":
@@ -399,6 +407,8 @@ class Cognition:
             last_used_at=row["last_used_at"], created_at=row["created_at"],
             status=row["status"], superseded_id=row["superseded_id"],
             valid_to=row["valid_to"], invalid_reason=row["invalid_reason"],
+            feedback_score=(row["feedback_score"]
+                            if "feedback_score" in row.keys() else 0),
         )
 
 
@@ -421,6 +431,7 @@ class Insight:
     superseded_id: int | None = None
     valid_to: str | None = None
     invalid_reason: str | None = None
+    feedback_score: int = 0
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Insight":
@@ -434,6 +445,8 @@ class Insight:
             last_used_at=row["last_used_at"], created_at=row["created_at"],
             status=row["status"], superseded_id=row["superseded_id"],
             valid_to=row["valid_to"], invalid_reason=row["invalid_reason"],
+            feedback_score=(row["feedback_score"]
+                            if "feedback_score" in row.keys() else 0),
         )
 
 
@@ -686,6 +699,28 @@ class Database:
         '''{ref_id: embedding_blob}：洞见归纳做语义聚类时直接算相似度。'''
         return {ref_id: blob for ref_id, _project, blob in self.list_vec_rows(kind)}
 
+    def get_vec_blobs(self, kind: str, ref_ids) -> dict:
+        '''
+        {ref_id: embedding_blob}：只取指定条目的向量（检索侧语义去重用）。
+
+        全量 `list_vec_blobs` 是 O(N×维度) 且每次检索都要付一遍；去重只比较
+        本次选中的几条，按 id 批量读就够了。
+        '''
+        table = _VEC_TABLES.get(kind)
+        wanted = sorted({int(ref_id) for ref_id in (ref_ids or ())})
+        if not self._vec_enabled or table is None or not wanted:
+            return {}
+        marks = ", ".join("?" for _ in wanted)
+        try:
+            return {int(row["ref_id"]): row["embedding"]
+                    for row in self._conn.execute(
+                        f"SELECT ref_id, embedding FROM {table} "
+                        f"WHERE ref_id IN ({marks})", wanted)}
+        except sqlite3.Error as exc:
+            base.log.warning("db.get_vec_blobs_failed", kind=kind,
+                             error=repr(exc))
+            return {}
+
     def get_vec_row(self, kind: str, ref_id: int):
         '''(origin_project, embedding_blob)；不存在返回 None。'''
         table = _VEC_TABLES.get(kind)
@@ -816,6 +851,10 @@ class Database:
         if "last_used_at" not in columns:
             self._conn.execute(
                 "ALTER TABLE event ADD COLUMN last_used_at TEXT")
+        if "valid_to" not in columns:
+            # 事件失效（outdated/wrong）：置了时间就不再被召回，正文保留可追溯
+            self._conn.execute(
+                "ALTER TABLE event ADD COLUMN valid_to TEXT")
         # 经验补 scope（适用范围）：老库按「跨项目可见即通用」回填
         exp_columns = {row["name"] for row in self._conn.execute(
             "PRAGMA table_info(experience)")}
@@ -1670,6 +1709,55 @@ class Database:
 
     def invalidate_cognition(self, item_id: int, reason: str) -> bool:
         return self._invalidate_l3("cognition", item_id, reason)
+
+    def invalidate_l3(self, table: str, item_id: int, reason: str) -> bool:
+        '''
+        统一失效入口（经验 / 认知 / 洞见）：状态、全文索引、向量、ANN 变更
+        一次处理完。工具层只调这里，避免不同入口各自漏一步。
+        '''
+        if table not in ("experience", "cognition", "insight"):
+            raise ValueError(f"不支持的 l3 表: {table!r}")
+        return self._invalidate_l3(table, item_id, reason)
+
+    def mark_l3_outdated(self, table: str, item_id: int, reason: str) -> bool:
+        '''
+        「过时」语义：不改 status（正文仍可追溯），只把 valid_to 置为现在并
+        摘掉 FTS / 向量，检索侧 `_eligible` 会因此跳过它。
+        '''
+        if table not in ("experience", "cognition", "insight"):
+            raise ValueError(f"不支持的 l3 表: {table!r}")
+        now = base.get_cur_time()
+        with self.transaction() as conn:
+            cur = conn.execute(
+                f"UPDATE {table} SET valid_to = ?, invalid_reason = ?, "
+                f"feedback_score = feedback_score - 1 "
+                f"WHERE id = ? AND status = 'active' "
+                f"AND (valid_to IS NULL OR valid_to > ?)",
+                (now, reason, item_id, now))
+            if cur.rowcount != 1:
+                return False
+            conn.execute("DELETE FROM memory_fts WHERE ref_kind = ? AND ref_id = ?",
+                         (table, item_id))
+            self._vec_remove(conn, table, item_id)
+            return True
+
+    def retire_event(self, event_id: int, reason: str) -> bool:
+        '''
+        事件失效（outdated / wrong）：置 valid_to + 待复核标记，摘掉全文索引。
+        事件没有独立 status，valid_to 就是它的「退出召回」开关。
+        '''
+        now = base.get_cur_time()
+        with self.transaction() as conn:
+            cur = conn.execute(
+                "UPDATE event SET valid_to = ?, needs_review = 1, review_reason = ? "
+                "WHERE id = ? AND (valid_to IS NULL OR valid_to > ?)",
+                (now, reason, int(event_id), now))
+            if cur.rowcount != 1:
+                return False
+            conn.execute(
+                "DELETE FROM memory_fts WHERE ref_kind = 'event' AND ref_id = ?",
+                (int(event_id),))
+            return True
 
     def _touch_l3(self, table: str, ids, by: int = 1) -> int:
         amount = int(by)

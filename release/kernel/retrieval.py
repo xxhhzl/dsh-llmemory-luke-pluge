@@ -24,6 +24,7 @@ import database
 DEFAULT_ALPHA = 0.6
 DEFAULT_EXPLORE_RATIO = 0.1
 DEFAULT_MAX_PER_CLUSTER = 2
+DEFAULT_FEEDBACK_WEIGHT = 0.25   # 反馈分在 strength 里的权重（有界，±3 满分）
 DEFAULT_DEDUP_SIM = 0.85   # l3 之间余弦 ≥ 此值：判为同义，只留分高的
                            # 实测（2026-11-09，148 条 cognition）：
                            #   同义组两两 0.915–0.983；随机对 p99 仅 0.77
@@ -180,6 +181,7 @@ def _weights() -> dict:
         "w_importance": float(search.get("w_importance", 0.25)),
         "w_confidence": float(search.get("w_confidence", 0.15)),
         "w_project": float(search.get("w_project", 0.10)),
+        "w_feedback": float(search.get("w_feedback", DEFAULT_FEEDBACK_WEIGHT)),
         "explore_ratio": float(search.get("explore_ratio", DEFAULT_EXPLORE_RATIO)),
         "max_per_cluster": int(search.get("max_per_cluster", DEFAULT_MAX_PER_CLUSTER)),
         "cross_project_penalty": float(search.get("cross_project_penalty", 0.0)),
@@ -279,6 +281,24 @@ def _reliability(record, kind: str) -> float:
     return REVIEW_PENALTY if confidence < LOW_CONFIDENCE else 1.0
 
 
+FEEDBACK_CAP = 3          # ±3 次反馈到达饱和，继续累计不再放大（防失控）
+
+
+def _feedback(record) -> float:
+    '''
+    反馈分 → [−1, 1]。
+
+    只截断不归一化到方差：useful/useless 是人工信号，一次就该有可感知的
+    位移；±3 次到顶，避免长期使用后少数条目被反馈分彻底支配。
+    '''
+    try:
+        raw = int(getattr(record, "feedback_score", 0) or 0)
+    except (TypeError, ValueError):
+        raw = 0
+    capped = max(-FEEDBACK_CAP, min(FEEDBACK_CAP, raw))
+    return capped / FEEDBACK_CAP
+
+
 def _score(found: dict, weights: dict, origin_project: str | None) -> list:
     '''
     精排：final = α·rel + (1−α)·strength。
@@ -323,8 +343,10 @@ def _score(found: dict, weights: dict, origin_project: str | None) -> list:
                     + weights["w_importance"] * importance
                     + weights["w_confidence"] * confidence
                     + weights["w_project"] * match
+                    + weights["w_feedback"] * _feedback(record)
                     + 0.05 * entry["assoc"])
         strength *= _reliability(record, kind)      # 待复核 / 低可信条目降权
+        strength = max(0.0, min(1.0, strength))     # 反馈项可能把总分顶出 1
         total = weights["alpha"] * rel_norm[key] + (1 - weights["alpha"]) * strength
         scored.append((total, kind, row_id, record, entry["assoc"],
                        entry.get("excerpt")))
@@ -416,8 +438,12 @@ def _dedup_semantic(db, selected: list, weights: dict) -> tuple:
         return selected, {}
 
     vectors = {}
+    # 只读本次选中的几条：全表读向量是 O(全部条数×维度)，每次检索都付一遍
     for kind in ("experience", "cognition", "insight"):
-        for ref_id, blob in db.list_vec_blobs(kind).items():
+        wanted = [item[2] for item in selected if item[1] == kind]
+        if not wanted:
+            continue
+        for ref_id, blob in db.get_vec_blobs(kind, wanted).items():
             vector = _blob_to_vector(blob)
             if vector is not None:
                 vectors[(kind, int(ref_id))] = vector

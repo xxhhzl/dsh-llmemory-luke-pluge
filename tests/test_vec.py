@@ -133,6 +133,18 @@ class TestVecTables(VecCase):
         self.assertEqual(self.db.vec_status()["counts"]["experience"], 0,
                          "失效条目不该继续占 KNN 名额")
 
+    def test_get_vec_blobs_reads_only_requested(self):
+        first = self.add_experience("批量读向量甲")
+        second = self.add_experience("批量读向量乙")
+        third = self.add_experience("批量读向量丙")
+        for row_id in (first, second, third):
+            self.db.vec_upsert("experience", row_id, vec(row_id))
+        blobs = self.db.get_vec_blobs("experience", [first, third, 99999])
+        self.assertEqual(set(blobs), {first, third},
+                         "只返回存在的 id，不整表读")
+        self.assertEqual(self.db.get_vec_blobs("experience", []), {})
+        self.assertEqual(self.db.get_vec_blobs("event", [first]), {})
+
     def test_supersede_drops_vector(self):
         old = self.add_experience("旧做法")
         self.db.vec_upsert("experience", old, vec(6))

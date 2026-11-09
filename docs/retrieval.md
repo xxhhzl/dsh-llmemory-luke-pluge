@@ -59,6 +59,7 @@
 | 确信度 / 可靠性 | `confidence`；事件无此列，取中性 0.5（不再用 0.8 默认值白送分） |
 | 情境匹配（编码特异性） | 同项目 1、通用 0.5、跨项目 0 |
 | 联想来源（扩散激活） | 直接命中 1、扩展 0.5 |
+| 人工反馈（0.5.1） | `feedback_score` 截断到 ±3 后除以 3 → [−1, 1]；`useful` +1、`useless` −1 |
 
 **使用次数的字段名不同**：`event` 表是 `cnt`，`experience`/`cognition` 是 `use_count`，
 统一经 `_use_count(record, kind)` 读取。新近项统一读 `last_used_at`；三张表都已具备该列，
@@ -66,8 +67,12 @@
 
 ```
 Strength = 0.45·B̂ + 0.25·importance + 0.15·confidence
-         + 0.10·project_match + 0.05·assoc
+         + 0.10·project_match + 0.25·feedback + 0.05·assoc
 ```
+
+`Strength` 最后截断到 [0, 1]（反馈项可能把总分顶出 1）。反馈项**有界**：
+±3 次到饱和，避免长期使用后少数条目被反馈分彻底支配；`event` 没有
+`feedback_score`，反馈项恒为 0。
 
 权重在 `config.search.w_*`，`alpha` 控制相关性与记忆强度的占比（默认 0.6/0.4），
 所以**相关性权重始终高于热度**：cnt 高只会在同等相关性下占优，不会盖过更相关的条目。
@@ -87,8 +92,11 @@ AND (:scope = 'all' OR origin_project IS NULL OR origin_project = :current_proje
   它不是硬过滤——`scope=all` 时跨项目条目仍可被搜到，只是排序更靠后；开启前需用固定
   query 集做 A/B，避免直接改变打分分布；
 - `status` / `valid_to` 永不参与打分——过期就是排除；
-- 失效/被取代的 l3 会在**同一事务**内从 `memory_fts` 删除，不再占用召回名额
-  （检索层仍保留 `_eligible` 兜底，防止历史脏数据漏删）。
+- 事件表 0.5.1 起也有 `valid_to`：`outdated` / `wrong` 会置时间并摘掉全文索引，
+  因此事件和 l3 一样会退出召回（`_eligible` 只做兜底，不靠它过滤）；
+- 失效/被取代的 l3 会在**同一事务**内从 `memory_fts` 删除，并调用 `vec_unindex`
+  摘掉向量，不再占用召回名额；`Database.invalidate_l3` / `mark_l3_outdated` /
+  `retire_event` 是唯一入口，工具层不再自己拼 SQL。
 
 ## 4. 三个工具
 
@@ -110,7 +118,16 @@ AND (:scope = 'all' OR origin_project IS NULL OR origin_project = :current_proje
 - 时间比较走 SQLite `datetime()`，`+08:00` 与 `+00:00` 混存不会错 8 小时；
 - 参数非法（无法解析 / from > to）返回 `-32602`，不再是 `-32603` 内部错误。
 
-## 5. v1 / v2 / v3 / v4
+## 5. 读取侧语义去重（0.5.1 起只读选中条目）
+
+选完 top-k 后，对 l3（经验/认知/洞见）做一次余弦去重：同一件事被不同事件抽成
+多条时只保留分高的一条，其余丢弃并把数量记进 `meta.merged`（事件不参与）。
+
+旧实现每次检索都 `list_vec_blobs` 全量读三张向量表并解包（O(全部条数×维度)），
+库长大后会抵消 ANN 的收益；现在只按 `selected` 里的 `(kind, id)` 批量
+`WHERE ref_id IN (...)` 取需要的几条（`Database.get_vec_blobs`）。
+
+## 6. v1 / v2 / v3 / v4
 
 | 版本 | 召回 | 说明 |
 |---|---|---|
@@ -123,7 +140,7 @@ AND (:scope = 'all' OR origin_project IS NULL OR origin_project = :current_proje
 「边框粗细保持一致」）只能靠向量通道召回；`vec.reindex` 重建后
 `vec.status` 显示各表条数与 ANN 后端，检索结果里两路都命中的条目 RRF 分更高。
 
-## 6. 已知限制
+## 7. 已知限制
 
 - FTS5 `trigram` 要求查询 ≥3 字符，短查询走 `LIKE` 全表扫描（当前数据量下可接受）；
   短查询的 `%`/`_` 已转义，并按「标题命中优先、正文更短优先」排序，

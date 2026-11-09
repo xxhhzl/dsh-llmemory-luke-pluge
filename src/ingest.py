@@ -843,6 +843,9 @@ def ingest_request(data, q):
 
     accepted = bool(new_messages)
     frame.push(q, envelope, "ingest.receipt", {
+        # 回执带 job_id：外壳据此把这批消息记为「待确认」，直到收到
+        # ingest.completed 才从待确认队列里删（回执≠已落库）。
+        "job_id": job_id,
         "accepted": accepted,
         "new_messages": len(new_messages),
         "display": (f"正在写入 {len(new_messages)} 条新消息…" if accepted

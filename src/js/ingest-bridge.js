@@ -4,7 +4,15 @@
  * 只把「模型可见的表面事件」转成消息（user / assistant / tool），
  * 与内核 docs/e2e.md 的口径一致；system/developer 事件丢弃。
  * 每个会话按事件序号（seq）增量投递，避免重复入库。
+ *
+ * 可靠性口径：收到 `ingest.receipt` 只说明内核「接下了」，不等于已落库。
+ * 因此这批消息先进**待确认队列**（可选持久化到磁盘），只有收到
+ * `ingest.completed` 才删除；内核中途退出时，重启后由 `resumePending()`
+ * 对账补投（内核按 msg_id 判重，重发是安全的）。
  */
+
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import path from 'node:path'
 
 const SURFACE = new Map([
   ['user/message', 'user'],
@@ -36,7 +44,7 @@ export function contentToText(message) {
 export class IngestBridge {
   constructor(ctx, kernel, {
     agentId = '', debounceMs = 2500, timeoutMs = 60_000, logger = console,
-    trace = () => {},
+    trace = () => {}, pendingPath = '',
   } = {}) {
     this.trace = trace;
     this.ctx = ctx
@@ -45,7 +53,11 @@ export class IngestBridge {
     this.debounceMs = Math.max(200, Number(debounceMs) || 2500)
     this.timeoutMs = timeoutMs
     this.logger = logger
-    this.buffers = new Map()   // sessionId -> { messages: [], lastSeq: 0, timer }
+    this.buffers = new Map()   // sessionId -> { messages: [], lastSeq: null, timer }
+    // job_id -> { sessionId, messages }：已回执、尚未收到 completed
+    this.pending = new Map()
+    this.pendingPath = pendingPath || ''
+    this._loadPending()
     this.dispose = null
   }
 
@@ -119,10 +131,7 @@ export class IngestBridge {
     const messages = buffer.messages.splice(0, buffer.messages.length)
     this.trace?.(`flush session=${sessionId} n=${messages.length}`)
     try {
-      const result = await this.kernel.request('ingest.request', {
-        messages,
-        cursor: { last_seq: messages[0].seq - 1 },
-      }, { sessionId, agentId: this.agentId, timeoutMs: this.timeoutMs })
+      const result = await this.#deliver(sessionId, messages)
       this.trace?.(`flush ok session=${sessionId} accepted=${result?.accepted}`)
       return result
     } catch (error) {
@@ -131,6 +140,100 @@ export class IngestBridge {
       buffer.messages.unshift(...messages)
       this.trace?.(`flush retry session=${sessionId} n=${messages.length}: ${error?.message ?? error}`)
       throw error
+    }
+  }
+
+  /**
+   * 发一次 ingest.request。
+   * 回执 accepted 时把这批消息记为待确认——回执不等于落库。
+   */
+  async #deliver(sessionId, messages) {
+    const result = await this.kernel.request('ingest.request', {
+      messages,
+      cursor: { last_seq: messages[0].seq - 1 },
+    }, { sessionId, agentId: this.agentId, timeoutMs: this.timeoutMs })
+    if (result?.accepted && result?.job_id) {
+      this.pending.set(result.job_id, { sessionId, messages })
+      this._savePending()
+    }
+    return result
+  }
+
+  /** 内核确认已落库（ingest.completed）：从待确认队列移除。 */
+  onCommitted(jobId) {
+    if (!jobId) return false
+    const removed = this.pending.delete(jobId)
+    if (removed) this._savePending()
+    return removed
+  }
+
+  /**
+   * 重启对账：把上次没等到 completed 的批次重投一遍。
+   * 内核按 msg_id 判重，重复投递不会产生重复正文。
+   */
+  async resumePending() {
+    if (this.pending.size === 0) return 0
+    let resumed = 0
+    for (const [jobId, item] of [...this.pending]) {
+      try {
+        this.pending.delete(jobId)
+        const result = await this.#deliver(item.sessionId, item.messages)
+        resumed += 1
+        this.trace?.(`resume ok job=${jobId} accepted=${result?.accepted}`)
+      } catch (error) {
+        // 重投失败：留在待确认队列里等下次，不能丢
+        this.pending.set(jobId, item)
+        this.trace?.(`resume retry job=${jobId}: ${error?.message ?? error}`)
+      }
+    }
+    this._savePending()
+    return resumed
+  }
+
+  /** 待确认条数（诊断用）。 */
+  get pendingCount() {
+    return this.pending.size
+  }
+
+  _loadPending() {
+    if (!this.pendingPath) return
+    try {
+      const raw = readFileSync(this.pendingPath, 'utf8')
+      const parsed = JSON.parse(raw)
+      for (const item of parsed?.pending ?? []) {
+        if (item?.job_id && Array.isArray(item.messages) && item.messages.length) {
+          this.pending.set(item.job_id, {
+            sessionId: item.sessionId ?? '', messages: item.messages,
+          })
+        }
+      }
+      if (this.pending.size) {
+        this.trace?.(`pending restored: ${this.pending.size}`)
+      }
+    } catch (error) {
+      // 文件不存在 / 内容坏了：当作空队列，绝不因此阻止启动
+      if (error?.code !== 'ENOENT') {
+        this.logger.warn(`[longmemory] 待确认队列读取失败: ${error.message}`)
+      }
+    }
+  }
+
+  _savePending() {
+    if (!this.pendingPath) return
+    const payload = {
+      version: 1,
+      pending: [...this.pending.entries()].map(([jobId, item]) => ({
+        job_id: jobId, sessionId: item.sessionId, messages: item.messages,
+      })),
+    }
+    try {
+      mkdirSync(path.dirname(this.pendingPath), { recursive: true })
+      const tmp = `${this.pendingPath}.tmp`
+      // 先写临时文件再改名：崩在写一半时不会留下坏 JSON
+      writeFileSync(tmp, JSON.stringify(payload), 'utf8')
+      renameSync(tmp, this.pendingPath)
+    } catch (error) {
+      this.logger.warn(`[longmemory] 待确认队列写入失败: ${error.message}`)
     }
   }
 

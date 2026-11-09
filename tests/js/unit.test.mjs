@@ -7,6 +7,7 @@
  */
 import assert from 'node:assert/strict'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -333,6 +334,62 @@ test('重复投递同一 seq 仍然去重', () => {
   const buffer = bridge.buffers.get('s5')
   assert.equal(buffer.messages.length, 1, '同一 seq 不能重复入缓冲')
   if (buffer.timer) clearTimeout(buffer.timer)
+})
+
+test('回执只说明「接下了」：要等 completed 才从待确认里删', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'lm-pending-'))
+  const pendingPath = path.join(dir, 'pending.json')
+  try {
+    const bridge = new IngestBridge({}, {
+      request: async () => ({ accepted: true, job_id: 'job_1' }),
+    }, { trace: () => {}, pendingPath })
+    bridge.buffers.set('s1', {
+      messages: [{ msg_id: 'm1', seq: 3, content: 'a' }],
+      lastSeq: 3, timer: null,
+    })
+
+    await bridge.flush('s1')
+    assert.equal(bridge.pendingCount, 1, '回执后必须留在待确认里')
+    assert.ok(readFileSync(pendingPath, 'utf8').includes('job_1'), '待确认要落盘')
+
+    assert.equal(bridge.onCommitted('job_1'), true)
+    assert.equal(bridge.pendingCount, 0, '收到 completed 才删')
+    assert.equal(bridge.onCommitted('job_1'), false, '重复确认是幂等的')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('内核在回执后退出：重启从磁盘对账并补投', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'lm-resume-'))
+  const pendingPath = path.join(dir, 'pending.json')
+  try {
+    const first = new IngestBridge({}, {
+      request: async () => ({ accepted: true, job_id: 'job_1' }),
+    }, { trace: () => {}, pendingPath })
+    first.buffers.set('s1', {
+      messages: [{ msg_id: 'm1', seq: 3, content: 'a' }],
+      lastSeq: 3, timer: null,
+    })
+    await first.flush('s1')
+
+    // 模拟外壳重启：内存状态全丢，只剩磁盘上的待确认
+    const sent = []
+    const second = new IngestBridge({}, {
+      request: async (type, payload) => {
+        sent.push(payload.messages.map(item => item.msg_id))
+        return { accepted: true, job_id: 'job_2' }
+      },
+    }, { trace: () => {}, pendingPath })
+    assert.equal(second.pendingCount, 1, '重启后要能从磁盘恢复待确认')
+
+    const resumed = await second.resumePending()
+    assert.equal(resumed, 1)
+    assert.deepEqual(sent, [['m1']], '重启后必须补投同一批')
+    assert.equal(second.pendingCount, 1, '补投后换成新 job 继续等确认')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })
 
 test('准入判定：路由层真的拒掉外来 Origin（不是只测函数）', async () => {

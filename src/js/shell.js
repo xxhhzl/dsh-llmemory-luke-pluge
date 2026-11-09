@@ -94,6 +94,8 @@ export function createShell(ctx, config = {}, {
     timeoutMs: config.requestTimeoutMs ?? 30000,
     logger: console,
     trace,
+    // 待确认队列落盘：内核在「已回执、未落库」之间退出时，重启后据此补投
+    pendingPath: path.join(dataDir, 'ingest-pending.json'),
   })
   // 核心记忆注入：设置的自我/核心规则 → 系统提示词段；自述 → 动态上下文
   const corePrompt = new CorePrompt(ctx, kernel, {
@@ -213,6 +215,8 @@ export function createShell(ctx, config = {}, {
       return
     }
     if (frame?.type !== 'ingest.completed') return
+    // 落库确认：这批消息可以从待确认队列删掉了
+    bridge.onCommitted(frame?.job_id ?? frame?.data?.job_id)
     corePrompt.refresh().catch(error => {
       trace(`core refresh failed: ${error?.message ?? error}`)
     })
@@ -242,6 +246,12 @@ export function createShell(ctx, config = {}, {
     }))
     if (disposed) return { tools: toolDisposers.length }
     bridge.attach()
+    // 上次没等到 completed 的批次先补投：内核按 msg_id 判重，重发安全
+    try {
+      await bridge.resumePending()
+    } catch (error) {
+      trace(`resume pending failed: ${error?.message ?? error}`)
+    }
     kernel.on('frame', onKernelFrame)
     // 附加能力（命令 / 统计路由）各自隔离：任一失败都不影响工具与会话投递
     for (const [label, register] of [

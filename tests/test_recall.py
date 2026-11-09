@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import config
 import core
 import database
+import retrieval
 from database import Cognition, Database, Message
 
 BASE_TMP = Path(__file__).resolve().parents[1] / ".tmp" / "test_recall"
@@ -137,6 +138,17 @@ class TestRecall(RecallCase):
             after = core.last_recall()
         self.assertTrue(payload["recall_skipped"])
         self.assertEqual(after, before)
+
+    def test_query_vector_reaches_retrieval(self):
+        '''外壳算好的向量必须真的交给检索层，否则被动召回仍只走字面命中。'''
+        self._seed()
+        sentinel = [0.125, -0.5, 0.75]
+        with self._with_recall():
+            with mock.patch.object(retrieval, "search",
+                                   wraps=retrieval.search) as spy:
+                core._build_recall(self.db, S1, "装插件之前先说明",
+                                   query_vector=sentinel)
+        self.assertEqual(spy.call_args.kwargs.get("query_vector"), sentinel)
 
 
 if __name__ == "__main__":

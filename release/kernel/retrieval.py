@@ -222,7 +222,28 @@ def _candidates(db: database.Database, query: str, origin_project: str | None,
                     sorted(distances.items(), key=lambda item: item[1])):
                 vec_rank[(kind, ref_id)] = rank
 
-    keys = set(fts_rank) | set(vec_rank)
+    # 原文命中：摘要没写到的编号/原话只有这里能搜到，命中后回连所属事件。
+    msg_rank: dict = {}
+    msg_excerpts: dict = {}
+    if "event" in wanted and hasattr(db, "search_message_fts"):
+        try:
+            for rank, item in enumerate(db.search_message_fts(
+                    query, limit=RECALL_LIMIT, origin_project=origin_project,
+                    restrict_project=(scope == "project"))):
+                event_id = item.get("event_id")
+                if event_id is None:
+                    continue
+                key = ("event", int(event_id))
+                if key in msg_rank:
+                    continue
+                msg_rank[key] = rank
+                if item.get("excerpt"):
+                    msg_excerpts[key] = item["excerpt"]
+        except Exception as exc:      # 老库/索引缺失不能让整条召回挂掉
+            base.log.warning("recall.message_fts_failed",
+                             error=type(exc).__name__)
+
+    keys = set(fts_rank) | set(vec_rank) | set(msg_rank)
     grouped: dict[str, list] = {}
     for kind, row_id in keys:
         grouped.setdefault(kind, []).append(row_id)
@@ -239,9 +260,12 @@ def _candidates(db: database.Database, query: str, origin_project: str | None,
                 score += 1.0 / (60 + fts_rank[(kind, row_id)])
             if (kind, row_id) in vec_rank:
                 score += 1.0 / (60 + vec_rank[(kind, row_id)])
+            if (kind, row_id) in msg_rank:
+                score += 1.0 / (60 + msg_rank[(kind, row_id)])
             found[(kind, row_id)] = {"row": row, "rel": score or 0.001,
                                      "assoc": 1.0,
-                                     "excerpt": excerpts.get((kind, row_id))}
+                                     "excerpt": (excerpts.get((kind, row_id))
+                                                 or msg_excerpts.get((kind, row_id)))}
 
     associated = 0
     for (kind, _row_id), entry in list(found.items()):
@@ -479,6 +503,7 @@ def _backfill_after_dedup(db, scored: list, selected: list, limit: int,
     if len(selected) >= limit:
         return selected
     threshold = float(weights.get("dedup_similarity", DEFAULT_DEDUP_SIM))
+    max_per_cluster = max(1, weights["max_per_cluster"])
     kept_keys = {(item[1], item[2]) for item in selected}
     remaining = [item for item in scored
                  if (item[1], item[2]) not in kept_keys]
@@ -497,18 +522,50 @@ def _backfill_after_dedup(db, scored: list, selected: list, limit: int,
                 if vector is not None:
                     vectors[(kind, int(ref_id))] = vector
 
+    def too_similar(item) -> bool:
+        '''和已保留条目语义重复时跳过：补位不能把刚去掉的重复又捞回来。'''
+        if threshold <= 0 or item[1] == "event":
+            return False
+        vector = vectors.get((item[1], item[2]))
+        if vector is None:
+            return False
+        for anchor in selected:
+            if anchor[1] == "event":
+                continue
+            anchor_vector = vectors.get((anchor[1], anchor[2]))
+            if anchor_vector is not None and _cosine(vector, anchor_vector) >= threshold:
+                return True
+        return False
+
+    # 簇计数从已选结果接着算：补位同样要守住簇上限，否则 _select 刚保证的
+    # 多样性会在这一轮被同源条目填回去。
+    counts = {}
+    for item in selected:
+        cluster = _cluster_of(item[1], item[3])
+        counts[cluster] = counts.get(cluster, 0) + 1
+
+    deferred = []
     for item in remaining:
         if len(selected) >= limit:
             break
-        key = (item[1], item[2])
-        vector = vectors.get(key)
-        if (threshold > 0 and item[1] != "event" and vector is not None
-                and any(_cosine(vector, vectors[(anchor[1], anchor[2])]) >= threshold
-                        for anchor in selected
-                        if anchor[1] != "event"
-                        and (anchor[1], anchor[2]) in vectors)):
+        cluster = _cluster_of(item[1], item[3])
+        if counts.get(cluster, 0) >= max_per_cluster:
+            deferred.append(item)      # 簇满：先记下，空位不够时再放宽
+            continue
+        if too_similar(item):
             continue
         selected.append(item)
+        counts[cluster] = counts.get(cluster, 0) + 1
+
+    # 簇上限的目的是「别让同源刷屏」，不该让结果欠填：
+    # 还有空位就放宽簇上限，语义去重仍然生效。
+    if len(selected) < limit:
+        for item in deferred:
+            if len(selected) >= limit:
+                break
+            if too_similar(item):
+                continue
+            selected.append(item)
     return selected
 
 

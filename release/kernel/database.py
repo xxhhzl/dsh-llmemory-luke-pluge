@@ -193,6 +193,16 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
   session_id     UNINDEXED,     -- 事件来源会话（l3 为 origin_session）
   tokenize='trigram'
 );
+
+-- 原文索引：摘要常漏掉合同号、编号、原话，这些细节必须另有检索入口。
+-- 独立成表而不并进 memory_fts：事件 body 会被反复重写，原文只写一次；
+-- 检索命中后经 memory(event_id) 回连到所属事件。
+CREATE VIRTUAL TABLE IF NOT EXISTS message_fts USING fts5(
+  session_id UNINDEXED,
+  message_id UNINDEXED,
+  body,
+  tokenize='trigram'
+);
 """
 
 # list_events 的排序白名单：列名直接拼 SQL，必须是固定常量
@@ -866,9 +876,45 @@ class Database:
         self._ensure_l3_feedback_column()
         self._ensure_supersede_indexes()
         self._ensure_fts_scope_columns()
+        self._ensure_message_fts()
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
         if version < 1:
             self._normalize_timestamps()
+
+    def _ensure_message_fts(self):
+        '''
+        老库补原文索引：message_fts 是后加的表，已有消息需要一次性回灌，
+        否则升级后「搜编号」仍然只能搜到摘要。
+        '''
+        indexed = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM message_fts").fetchone()["n"]
+        if int(indexed) > 0:
+            return
+        total = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM message").fetchone()["n"]
+        if int(total) == 0:
+            return
+        with self.transaction() as conn:
+            counts = self._reindex_message_fts_conn(conn)
+        # 参数名不能直接用 "message"：与 LogRecord 内置字段冲突会抛 KeyError
+        base.log.info("db.message_fts_backfilled", indexed=counts["message"])
+
+    def _reindex_message_fts_conn(self, conn) -> dict:
+        '''只回灌原文索引（不动 memory_fts），供老库迁移复用。'''
+        counts = {"message": 0}
+        conn.execute("DELETE FROM message_fts")
+        for row in conn.execute(
+                "SELECT msg.session_id, msg.message_id, msg.content "
+                "FROM message msg "
+                "JOIN memory m ON m.session_id = msg.session_id "
+                "AND m.message_id = msg.message_id "
+                "WHERE m.event_id IS NOT NULL").fetchall():
+            conn.execute(
+                "INSERT INTO message_fts (session_id, message_id, body) "
+                "VALUES (?, ?, ?)",
+                (row["session_id"], row["message_id"], row["content"]))
+            counts["message"] += 1
+        return counts
 
     def _ensure_l3_feedback_column(self):
         '''l3 三张表补 feedback_score（老库）：反馈分用于降权，不删条目。'''
@@ -985,7 +1031,10 @@ class Database:
                 "origin_project UNINDEXED, session_id UNINDEXED, "
                 "tokenize='trigram')")
             counts = self._reindex_fts_conn(conn)
-        base.log.info("db.fts_reindexed", **counts)
+        # 键名加后缀：message 与 LogRecord 内置字段同名，直接展开会抛 KeyError
+        base.log.info("db.fts_reindexed",
+                      **{f"{name}_count": value
+                         for name, value in counts.items()})
 
     def reindex_fts(self) -> dict:
         '''从源表重建全文索引，返回各类型重建条数。'''
@@ -994,8 +1043,9 @@ class Database:
 
     def _reindex_fts_conn(self, conn) -> dict:
         '''reindex 的实际动作；接收连接是为了能并入调用方的事务。'''
-        counts = {"event": 0, "experience": 0, "cognition": 0}
+        counts = {"event": 0, "experience": 0, "cognition": 0, "message": 0}
         conn.execute("DELETE FROM memory_fts")
+        conn.execute("DELETE FROM message_fts")
         for row in conn.execute(
                 "SELECT id, title, summary, origin_project, session_id FROM event"
         ).fetchall():
@@ -1017,6 +1067,8 @@ class Database:
                     (table, row["id"], row["content"],
                      row["origin_project"], row["origin_session"]))
                 counts[table] += 1
+        # 原文索引单独回灌：只回已绑定事件的消息，未分段的还没归属可讲。
+        counts.update(self._reindex_message_fts_conn(conn))
         return counts
 
     def _rollback_to(self, name: str):
@@ -1916,6 +1968,99 @@ class Database:
             rows = like(mode_and=True)
         if not rows and len(tokens) > 1:
             rows = like(mode_and=False)
+        result = [dict(row) for row in rows]
+        for item in result:
+            item["excerpt"] = _excerpt(item.get("body") or "", tokens)
+        return result
+
+    def index_message_fts(self, session_id: str, message_id: str, body: str) -> None:
+        '''
+        给一条原始消息建全文索引（先删同键再插，幂等）。
+
+        索引与正文分开维护：message 表只存正文，索引随时可回灌重建，
+        所以正文写失败的批次不会留下「索引里有、库里没有」的孤儿行。
+        '''
+        text = str(body or "")
+        if not session_id or not message_id or not text:
+            return
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM message_fts WHERE session_id = ? AND message_id = ?",
+                (session_id, message_id))
+            self._conn.execute(
+                "INSERT INTO message_fts (session_id, message_id, body) "
+                "VALUES (?, ?, ?)", (session_id, message_id, text))
+
+    def search_message_fts(self, query: str, limit: int = 20, *,
+                           origin_project: str | None = None,
+                           restrict_project: bool = False,
+                           session_id: str | None = None) -> list[dict]:
+        '''
+        在**原始消息**里检索，返回其所属事件（摘要没写到的编号/原话靠这条兜住）。
+
+        只返回已绑定事件的消息：还没分段归属的原文无法说明「这是哪件事」。
+        查询级联与 search_fts 一致（长词 AND → 长词 OR → 三元组 OR → LIKE）。
+
+        :return: [{event_id, session_id, message_id, body, rank, excerpt}]
+        '''
+        q = (query or "").strip()
+        if not q:
+            return []
+        clauses, params = [], []
+        if restrict_project:
+            clauses.append("(e.origin_project IS NULL OR e.origin_project = ?)")
+            params.append(origin_project)
+        if session_id is not None:
+            clauses.append("message_fts.session_id = ?")
+            params.append(session_id)
+        extra = (" AND " + " AND ".join(clauses)) if clauses else ""
+        select = ("SELECT m.event_id, message_fts.session_id, "
+                  "message_fts.message_id, message_fts.body, ")
+        joins = (" FROM message_fts "
+                 "JOIN memory m ON m.session_id = message_fts.session_id "
+                 "AND m.message_id = message_fts.message_id "
+                 "JOIN event e ON e.id = m.event_id ")
+        tokens = q.split() or [q]
+        long_tokens = [token for token in tokens if len(token) >= 3]
+
+        def fts(match: str):
+            try:
+                return self._conn.execute(
+                    select + "bm25(message_fts) AS rank" + joins +
+                    "WHERE message_fts MATCH ?" + extra +
+                    " ORDER BY rank LIMIT ?",
+                    [match, *params, limit]).fetchall()
+            except sqlite3.OperationalError:
+                return []
+
+        def like():
+            conditions, flat = [], []
+            for token in tokens:
+                conditions.append("message_fts.body LIKE ? ESCAPE '\\'")
+                flat.append(f"%{_like_escape(token)}%")
+            return self._conn.execute(
+                select + "0.0 AS rank" + joins +
+                "WHERE " + " AND ".join(conditions) + extra +
+                " ORDER BY length(message_fts.body) ASC LIMIT ?",
+                [*flat, *params, limit]).fetchall()
+
+        quoted = ['"' + token.replace('"', '""') + '"' for token in long_tokens]
+        rows = fts(" AND ".join(quoted)) if quoted else []
+        if not rows and len(quoted) > 1:
+            rows = fts(" OR ".join(quoted))
+        longest = max(tokens, key=len) if tokens else ""
+        if not rows and len(longest) >= 6:
+            grams, seen_grams = [], set()
+            for index in range(len(longest) - 2):
+                gram = longest[index:index + 3]
+                if gram in seen_grams:
+                    continue
+                seen_grams.add(gram)
+                grams.append('"' + gram.replace('"', '""') + '"')
+            if grams:
+                rows = fts(" OR ".join(grams[:16]))
+        if not rows:
+            rows = like()
         result = [dict(row) for row in rows]
         for item in result:
             item["excerpt"] = _excerpt(item.get("body") or "", tokens)

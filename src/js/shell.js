@@ -97,19 +97,33 @@ export function createShell(ctx, config = {}, {
     // 待确认队列落盘：内核在「已回执、未落库」之间退出时，重启后据此补投
     pendingPath: path.join(dataDir, 'ingest-pending.json'),
   })
-  // 核心记忆注入：设置的自我/核心规则 → 系统提示词段；自述 → 动态上下文
-  const corePrompt = new CorePrompt(ctx, kernel, {
-    order: config.coreSectionOrder ?? -2000,
-    contextOrder: config.coreContextOrder ?? 850,
-    timeoutMs: config.requestTimeoutMs ?? 15000,
-    trace,
-  })
   // 三槽模型配置（JEV / 提取 / Embedding）；默认继承宿主
   let modelSettings = defaultSettings(config)
   const refreshSettings = async () => {
     modelSettings = await loadSettings(kernel, config)
     return modelSettings
   }
+  // 被动召回的查询向量：沿用宿主 embedding；没配就返回 null（退回字面召回）
+  const embedForRecall = async text => {
+    try {
+      const profile = modelSettings?.embedding
+      if (!profile?.model || !text) return null
+      const [vector] = await embedTexts(profile, [text])
+      return Array.isArray(vector) && vector.length ? vector : null
+    } catch (error) {
+      trace(`recall embed failed: ${error?.message ?? error}`)
+      return null
+    }
+  }
+  // 核心记忆注入：设置的自我/核心规则 → 系统提示词段；自述 → 动态上下文
+  const corePrompt = new CorePrompt(ctx, kernel, {
+    order: config.coreSectionOrder ?? -2000,
+    contextOrder: config.coreContextOrder ?? 850,
+    timeoutMs: config.requestTimeoutMs ?? 15000,
+    trace,
+    // 配上向量后，「换个说法提旧事」也能被动召回（0.5.3）
+    embedQueryFn: config.recallEmbed === false ? null : embedForRecall,
+  })
 
   const toolDisposers = []
   const extraDisposers = []

@@ -503,6 +503,7 @@ def _backfill_after_dedup(db, scored: list, selected: list, limit: int,
     if len(selected) >= limit:
         return selected
     threshold = float(weights.get("dedup_similarity", DEFAULT_DEDUP_SIM))
+    max_per_cluster = max(1, weights["max_per_cluster"])
     kept_keys = {(item[1], item[2]) for item in selected}
     remaining = [item for item in scored
                  if (item[1], item[2]) not in kept_keys]
@@ -521,18 +522,50 @@ def _backfill_after_dedup(db, scored: list, selected: list, limit: int,
                 if vector is not None:
                     vectors[(kind, int(ref_id))] = vector
 
+    def too_similar(item) -> bool:
+        '''和已保留条目语义重复时跳过：补位不能把刚去掉的重复又捞回来。'''
+        if threshold <= 0 or item[1] == "event":
+            return False
+        vector = vectors.get((item[1], item[2]))
+        if vector is None:
+            return False
+        for anchor in selected:
+            if anchor[1] == "event":
+                continue
+            anchor_vector = vectors.get((anchor[1], anchor[2]))
+            if anchor_vector is not None and _cosine(vector, anchor_vector) >= threshold:
+                return True
+        return False
+
+    # 簇计数从已选结果接着算：补位同样要守住簇上限，否则 _select 刚保证的
+    # 多样性会在这一轮被同源条目填回去。
+    counts = {}
+    for item in selected:
+        cluster = _cluster_of(item[1], item[3])
+        counts[cluster] = counts.get(cluster, 0) + 1
+
+    deferred = []
     for item in remaining:
         if len(selected) >= limit:
             break
-        key = (item[1], item[2])
-        vector = vectors.get(key)
-        if (threshold > 0 and item[1] != "event" and vector is not None
-                and any(_cosine(vector, vectors[(anchor[1], anchor[2])]) >= threshold
-                        for anchor in selected
-                        if anchor[1] != "event"
-                        and (anchor[1], anchor[2]) in vectors)):
+        cluster = _cluster_of(item[1], item[3])
+        if counts.get(cluster, 0) >= max_per_cluster:
+            deferred.append(item)      # 簇满：先记下，空位不够时再放宽
+            continue
+        if too_similar(item):
             continue
         selected.append(item)
+        counts[cluster] = counts.get(cluster, 0) + 1
+
+    # 簇上限的目的是「别让同源刷屏」，不该让结果欠填：
+    # 还有空位就放宽簇上限，语义去重仍然生效。
+    if len(selected) < limit:
+        for item in deferred:
+            if len(selected) >= limit:
+                break
+            if too_similar(item):
+                continue
+            selected.append(item)
     return selected
 
 

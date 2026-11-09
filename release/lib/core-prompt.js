@@ -63,6 +63,7 @@ export class CorePrompt {
   constructor(ctx, kernel, {
     order = -2000, contextOrder = 850, timeoutMs = 15000,
     recallWaitMs = RECALL_WAIT_MS, trace = () => {},
+    embedQueryFn = null,
   } = {}) {
     this.ctx = ctx
     this.kernel = kernel
@@ -71,6 +72,9 @@ export class CorePrompt {
     this.timeoutMs = timeoutMs
     this.recallWaitMs = recallWaitMs
     this.trace = trace
+    // 可选：给本轮用户输入算向量，让被动召回也能走向量通道
+    // （只靠字面命中时，换个说法提旧事就召不回）。
+    this.embedQueryFn = embedQueryFn
     this.text = ''
     this.version = ''
     this.notesText = ''
@@ -154,10 +158,23 @@ export class CorePrompt {
       this.activeSession = sessionId
       const queryHint = lastUserText(payload?.messages)
       try {
-        await Promise.race([
-          this.refresh({
+        // 算向量与请求一起受 recallWaitMs 限时：慢就给上一轮快照，不拖慢本轮。
+        const work = (async () => {
+          let queryVector = null
+          if (this.embedQueryFn && queryHint) {
+            try {
+              queryVector = await this.embedQueryFn(queryHint)
+            } catch (error) {
+              this.trace(`recall embed failed: ${error?.message ?? error}`)
+            }
+          }
+          await this.refresh({
             sessionId, queryHint, recall: true, advanceTurn: true,
-          }),
+            queryVector,
+          })
+        })()
+        await Promise.race([
+          work,
           new Promise(resolve => {
             const timer = setTimeout(resolve, this.recallWaitMs)
             timer.unref?.()
@@ -180,9 +197,11 @@ export class CorePrompt {
    * @param {string} [options.queryHint] 当前用户输入；缺省让内核用最近几条消息
    * @param {boolean} [options.recall]  是否重编召回（默认否：后台刷新只编核心文本）
    * @param {boolean} [options.advanceTurn] 是否推进召回冷却（只有步骤为 true）
+   * @param {number[]} [options.queryVector] 当前输入的向量；有它召回才走向量通道
    */
   async refresh({
     sessionId = '', queryHint = '', recall = false, advanceTurn = false,
+    queryVector = null,
   } = {}) {
     if (!this.kernel) return null
     const target = sessionId || this.activeSession || ''
@@ -195,6 +214,8 @@ export class CorePrompt {
         query_hint: queryHint || null,
         recall: Boolean(recall),
         advance_turn: Boolean(advanceTurn),
+        query_vector: Array.isArray(queryVector) && queryVector.length
+          ? queryVector : null,
       },
       { timeoutMs: this.timeoutMs, sessionId: target },
     )

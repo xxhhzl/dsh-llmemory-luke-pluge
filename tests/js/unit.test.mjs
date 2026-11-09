@@ -1024,6 +1024,51 @@ test('pre-step 没有会话 ID 时清空兜底，不复用上一次的召回', a
   assert.equal(prompt.currentRecall(), '')
 })
 
+test('pre-step 把当前输入的向量随 core.get 传给内核', async () => {
+  const calls = []
+  const embedded = []
+  const kernel = {
+    request: async (type, data, options) => {
+      calls.push({ type, data, options })
+      return { enabled: true, version: 'v', text: '', notes_version: '',
+               notes_text: '', recall_text: '', recall_items: [] }
+    },
+  }
+  let handler
+  const ctx = { on: (name, fn) => { handler = fn; return () => {} } }
+  const prompt = new CorePrompt(ctx, kernel, {
+    trace: () => {},
+    embedQueryFn: async text => { embedded.push(text); return [0.1, 0.2, 0.3] },
+  })
+  prompt.bindStep()
+  await handler(
+    { agent: { session: { id: 's-emb' } },
+      messages: [{ role: 'user', content: '换个说法提旧事' }] },
+    async () => ({ kind: 'enter' }))
+
+  assert.deepEqual(embedded, ['换个说法提旧事'], '只给本轮输入算一次向量')
+  assert.deepEqual(calls[0].data.query_vector, [0.1, 0.2, 0.3],
+    '向量要随 core.get 下发，被动召回才能走向量通道')
+})
+
+test('后台刷新不算向量：只有用户步骤才付这份延迟', async () => {
+  const embedded = []
+  const calls = []
+  const kernel = {
+    request: async (type, data) => {
+      calls.push(data)
+      return { enabled: true, version: '', text: '', notes_version: '', notes_text: '' }
+    },
+  }
+  const prompt = new CorePrompt({}, kernel, {
+    trace: () => {},
+    embedQueryFn: async text => { embedded.push(text); return [1] },
+  })
+  await prompt.refresh({ sessionId: 's1', queryHint: '后台', recall: false })
+  assert.equal(embedded.length, 0, '后台刷新不该算向量')
+  assert.equal(calls[0].query_vector, null)
+})
+
 test('memory_note：用 content 算向量并随调用传给内核', async () => {
   const requests = []
   const entry = await executeMemoryNote({

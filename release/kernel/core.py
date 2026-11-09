@@ -137,17 +137,19 @@ def _commit_recall(session_id: str | None, text: str, items: list) -> None:
 
 
 def _build_recall(db, session_id: str | None, query_hint: str | None,
-                  advance_turn: bool = True) -> dict:
+                  advance_turn: bool = True,
+                  query_vector: list | None = None) -> dict:
     '''
     被动回想：按当前对话捞几条相关记忆，组装 <recall> 块。
 
-    四条硬约束：
+    五条硬约束：
     - `touch=False`：注入不算「被使用」，否则每轮都加热度，越召回越热；
     - 冷却：同一条记忆在同一会话里 N 轮内不重复注入，避免看第二遍就当背景；
     - **必须绑定会话**：没有 session_id 就不召回。旧实现退回「最近有消息的
       会话」，多会话场景会把别的会话的记忆注入当前提示词（0.5.1 修）；
     - **只有用户步骤推进冷却**：后台刷新（写入完成/设置变更）只重编核心文本，
-      调 `advance_turn=False` 时既不推进轮次、也不改快照（0.5.2 修）。
+      调 `advance_turn=False` 时既不推进轮次、也不改快照（0.5.2 修）；
+    - **有向量就用**：只靠字面命中时，换个说法提旧事就召不回（0.5.3 修）。
     '''
     cfg = config.get_config().get("recall", {}) or {}
     session_id = (session_id or "").strip() or None
@@ -188,7 +190,8 @@ def _build_recall(db, session_id: str | None, query_hint: str | None,
         turn = state["turn"]
 
     try:
-        hits = retrieval.search(db, query, limit=limit, scope="all", touch=False)
+        hits = retrieval.search(db, query, limit=limit, scope="all",
+                                touch=False, query_vector=query_vector)
     except Exception as exc:                      # 召回失败不能拖垮上下文编译
         base.log.warning("recall.search_failed", error=type(exc).__name__)
         return finish("", [])
@@ -230,13 +233,15 @@ def compile_core(db: database.Database, cfg: dict | None = None,
                  session_id: str | None = None,
                  query_hint: str | None = None,
                  advance_turn: bool = True,
-                 use_recall: bool = True) -> dict:
+                 use_recall: bool = True,
+                 query_vector: list | None = None) -> dict:
     '''
     编译注入文本；返回核心块、自述与召回。
 
     :param advance_turn: 是否推进召回冷却轮次。只有用户步骤（pre-step）为 True；
                          后台刷新传 False，避免 9 次写入就把 10 轮冷却耗光。
     :param use_recall: 是否编译召回。后台刷新只需核心文本，传 False 时不动召回快照。
+    :param query_vector: 当前输入的向量（外壳算好随帧传）；有它召回才走向量通道。
     '''
     core_cfg = cfg if cfg is not None else config.get_config().get("core", {})
     enabled = bool(core_cfg.get("enabled", True))
@@ -280,7 +285,9 @@ def compile_core(db: database.Database, cfg: dict | None = None,
     text, stats = _build_text(configured, insights, experiences, cognitions, budget)
     notes_text = _notes_text(notes)
     if use_recall:
-        recall = _build_recall(db, session_id, query_hint, advance_turn=advance_turn)
+        recall = _build_recall(db, session_id, query_hint,
+                               advance_turn=advance_turn,
+                               query_vector=query_vector)
     else:
         recall = {"text": "", "items": [], "skipped": True}
     return {
@@ -301,13 +308,22 @@ def compile_core(db: database.Database, cfg: dict | None = None,
 
 
 def get_core(data, q: base.message_queue, db=None):
-    '''协议入口：返回核心记忆与自述快照；召回按需编译（advance_turn 控制冷却）。'''
+    '''协议入口：返回核心记忆与自述快照；召回按需编译（advance_turn 控制冷却）。
+
+    业务参数在**帧的 `data`** 里（与 tools.calls / admin / ingest.request 一致），
+    只有 `request_id`/`session_id`/`agent_id` 在信封顶层。外壳用
+    `kernel.request('core.get', {query_hint, recall, advance_turn}, {sessionId})`
+    发帧，所以 session_id 取 data 优先、信封兜底——只读顶层会让 query_hint 与
+    两个开关全部落回默认值（0.5.3 修）。
+    '''
     if db is None:
         import tools                                # 复用共享连接（勿关闭）
         db = tools._db()
-    payload = compile_core(
-        db, session_id=data.get("session_id"),
-        query_hint=data.get("query_hint"),
-        advance_turn=bool(data.get("advance_turn", True)),
-        use_recall=bool(data.get("recall", True)))
-    frame.push(q, data, "core", payload)
+    payload = data.get("data") or {}
+    result = compile_core(
+        db, session_id=payload.get("session_id") or data.get("session_id"),
+        query_hint=payload.get("query_hint"),
+        advance_turn=bool(payload.get("advance_turn", True)),
+        use_recall=bool(payload.get("recall", True)),
+        query_vector=payload.get("query_vector"))
+    frame.push(q, data, "core", result)

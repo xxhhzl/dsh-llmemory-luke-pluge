@@ -285,6 +285,36 @@ class TestSemanticDedup(RetrievalCase):
         kept = [hit for hit in hits if hit.kind == "event"]
         self.assertEqual(len(kept), 2, "事件不做语义去重")
 
+    def test_backfill_respects_cluster_cap(self):
+        '''
+        去重腾出的名额由补位填上，但补位必须继续守簇上限；
+        否则 _select 刚挡掉的同源条目会在这一轮全部填回来。
+        '''
+        event = self.add_event("drawio 边框", "边框 1px")
+        for index in range(6):
+            item = self.add_experience(f"drawio 经验 {index}", cues=("drawio",))
+            # 同簇但彼此不同义：验证要挡的是「同源刷屏」，不是语义去重
+            head = [0.0] * index + [1.0]
+            self.db.vec_upsert("experience", item, self._vec(*head))
+            with self.db.transaction() as conn:
+                conn.execute(
+                    "UPDATE experience SET source_event_id = ? WHERE id = ?",
+                    (event, item))
+        # 3 条同义认知会被合并成 1 条，逼出补位
+        duplicate = self._vec(1.0)
+        for text in ("drawio 改插件要先说明风险",
+                     "drawio 动配置之前先讲清会写哪些文件",
+                     "drawio 装脚本前先报备风险与路径"):
+            item = self.add_cognition(text, subject="用户")
+            self.db.vec_upsert("cognition", item, duplicate)
+        for index in range(5):
+            self.add_cognition(f"drawio 独立主题 {index}", subject=f"用户{index}")
+
+        hits = retrieval.search(self.db, "drawio", limit=6, touch=False)
+        experiences = [hit for hit in hits if hit.kind == "experience"]
+        self.assertLessEqual(len(experiences), 2, "补位必须继续守簇上限")
+        self.assertEqual(len(hits), 6, "同时也不能欠填")
+
 
 if __name__ == "__main__":
     unittest.main()

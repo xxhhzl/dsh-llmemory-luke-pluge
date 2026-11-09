@@ -7,6 +7,9 @@
  */
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import test from 'node:test'
 
 import { DEFAULT_RESTART_DELAYS, createRestartPolicy, restartDelay }
@@ -45,14 +48,14 @@ function fakeKernel() {
   return kernel
 }
 
-function makeShell(options = {}) {
+function makeShell(options = {}, config = {}) {
   const kernel = fakeKernel()
   const ctx = { on: () => () => {}, off: () => {} }
   const hostHandlers = {
     registerKernelTools: () => [],
     handleLlmRequest: async () => ({ ok: true }),
   }
-  const shell = createShell(ctx, { dbPath: 'unused.db' }, {
+  const shell = createShell(ctx, { dbPath: 'unused.db', ...config }, {
     kernel, restartDelays: [5], trace: () => {}, hostHandlers, ...options,
   })
   return { shell, kernel }
@@ -144,4 +147,41 @@ test('dispose 之后不再响应内核退出（不重启）', async () => {
   kernel.emit('exit', { code: 1, signal: null })
   await sleep(40)
   assert.equal(kernel.calls.filter(item => item === 'start').length, 1)
+})
+
+test('先订阅完成帧再补投：补投期间的 completed 不能丢', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'lm-order-'))
+  const pendingPath = path.join(dir, 'pending.json')
+  await writeFile(pendingPath, JSON.stringify({
+    version: 2,
+    pending: [{
+      job_id: 'job_old', sessionId: 's1',
+      messages: [{ msg_id: 'm1', seq: 3, role: 'user', content: 'a' }],
+    }],
+    unsent: {},
+  }))
+
+  const { shell, kernel } = makeShell({}, {
+    dbPath: path.join(dir, 'memory.db'), pendingPath,
+  })
+  const order = []
+  const realOn = kernel.on
+  const realRequest = kernel.request
+  kernel.on = (event, handler) => {
+    if (event === 'frame') order.push('subscribe')
+    return realOn(event, handler)
+  }
+  kernel.request = async (type, ...rest) => {
+    if (type === 'ingest.request') order.push('deliver')
+    return realRequest(type, ...rest)
+  }
+
+  try {
+    await shell.start()
+    assert.deepEqual(order.slice(0, 2), ['subscribe', 'deliver'],
+      '补投前必须先注册完成帧监听，否则这批 completed 收不到')
+  } finally {
+    await shell.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
 })

@@ -95,7 +95,7 @@ export function createShell(ctx, config = {}, {
     logger: console,
     trace,
     // 待确认队列落盘：内核在「已回执、未落库」之间退出时，重启后据此补投
-    pendingPath: path.join(dataDir, 'ingest-pending.json'),
+    pendingPath: config.pendingPath || path.join(dataDir, 'ingest-pending.json'),
   })
   // 三槽模型配置（JEV / 提取 / Embedding）；默认继承宿主
   let modelSettings = defaultSettings(config)
@@ -260,13 +260,21 @@ export function createShell(ctx, config = {}, {
     }))
     if (disposed) return { tools: toolDisposers.length }
     bridge.attach()
-    // 上次没等到 completed 的批次先补投：内核按 msg_id 判重，重发安全
+    // **先订阅**再补投：补投的 ingest.completed 可能马上就回来，
+    // 订阅晚一步这条确认就丢了，待确认队列会一直留着这批消息。
+    kernel.on('frame', onKernelFrame)
+    // 上次没等到 completed 的批次补投：内核按 msg_id 判重，重发安全
     try {
       await bridge.resumePending()
     } catch (error) {
       trace(`resume pending failed: ${error?.message ?? error}`)
     }
-    kernel.on('frame', onKernelFrame)
+    // 上次来不及发出去的去抖缓冲（被强杀时保存在磁盘）继续投递
+    try {
+      await bridge.flushAll()
+    } catch (error) {
+      trace(`flush restored buffers failed: ${error?.message ?? error}`)
+    }
     // 附加能力（命令 / 统计路由）各自隔离：任一失败都不影响工具与会话投递
     for (const [label, register] of [
       ['command:/memory', () => registerMemoryCommand(ctx, {

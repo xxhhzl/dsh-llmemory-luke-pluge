@@ -392,6 +392,40 @@ test('内核在回执后退出：重启从磁盘对账并补投', async () => {
   }
 })
 
+test('去抖缓冲也落盘：外壳被强杀后重启能继续投递', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'lm-unsent-'))
+  const pendingPath = path.join(dir, 'pending.json')
+  try {
+    let handler
+    const first = new IngestBridge(
+      { on: (name, fn) => { handler = fn; return () => {} } },
+      { request: async () => ({ accepted: true, job_id: 'job_x' }) },
+      { trace: () => {}, pendingPath })
+    first.attach()
+    handler({ id: 's1' }, {
+      type: 'user/message', seq: 3,
+      data: { id: 'm1', content: [{ type: 'text', text: '还没发出去' }] },
+    })
+    const buffer = first.buffers.get('s1')
+    if (buffer.timer) clearTimeout(buffer.timer)   // 模拟还没到去抖时间就被强杀
+
+    // 新实例内存全空，只能从磁盘恢复
+    const sent = []
+    const second = new IngestBridge({}, {
+      request: async (type, payload) => {
+        sent.push(payload.messages.map(item => item.msg_id))
+        return { accepted: true, job_id: 'job_y' }
+      },
+    }, { trace: () => {}, pendingPath })
+    assert.equal(second.buffers.get('s1')?.messages.length, 1,
+      '重启要恢复还没发出去的缓冲')
+    await second.flushAll()
+    assert.deepEqual(sent, [['m1']], '恢复的缓冲要继续投递')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('准入判定：路由层真的拒掉外来 Origin（不是只测函数）', async () => {
   let route
   const ctx = { webServer: { register: (r) => { route = r; return () => {} } } }

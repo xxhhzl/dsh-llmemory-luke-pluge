@@ -57,7 +57,7 @@ export class IngestBridge {
     // job_id -> { sessionId, messages }：已回执、尚未收到 completed
     this.pending = new Map()
     this.pendingPath = pendingPath || ''
-    this._loadPending()
+    this._loadQueue()
     this.dispose = null
   }
 
@@ -113,6 +113,8 @@ export class IngestBridge {
       ts: new Date().toISOString(),
     })
     buffer.lastSeq = seq
+    // 去抖缓冲也落盘：外壳被强杀时，这里是这批消息唯一的副本
+    this._saveQueue()
 
     if (buffer.timer) clearTimeout(buffer.timer)
     buffer.timer = setTimeout(() => {
@@ -132,12 +134,14 @@ export class IngestBridge {
     this.trace?.(`flush session=${sessionId} n=${messages.length}`)
     try {
       const result = await this.#deliver(sessionId, messages)
+      this._saveQueue()
       this.trace?.(`flush ok session=${sessionId} accepted=${result?.accepted}`)
       return result
     } catch (error) {
       // 已经答应过回执的这批消息还没落库：放回队首等下次投递，
       // 否则一次超时就永久丢消息（内核按 msg_id 去重，重发是安全的）。
       buffer.messages.unshift(...messages)
+      this._saveQueue()
       this.trace?.(`flush retry session=${sessionId} n=${messages.length}: ${error?.message ?? error}`)
       throw error
     }
@@ -154,7 +158,7 @@ export class IngestBridge {
     }, { sessionId, agentId: this.agentId, timeoutMs: this.timeoutMs })
     if (result?.accepted && result?.job_id) {
       this.pending.set(result.job_id, { sessionId, messages })
-      this._savePending()
+      this._saveQueue()
     }
     return result
   }
@@ -163,7 +167,7 @@ export class IngestBridge {
   onCommitted(jobId) {
     if (!jobId) return false
     const removed = this.pending.delete(jobId)
-    if (removed) this._savePending()
+    if (removed) this._saveQueue()
     return removed
   }
 
@@ -186,7 +190,7 @@ export class IngestBridge {
         this.trace?.(`resume retry job=${jobId}: ${error?.message ?? error}`)
       }
     }
-    this._savePending()
+    this._saveQueue()
     return resumed
   }
 
@@ -195,7 +199,7 @@ export class IngestBridge {
     return this.pending.size
   }
 
-  _loadPending() {
+  _loadQueue() {
     if (!this.pendingPath) return
     try {
       const raw = readFileSync(this.pendingPath, 'utf8')
@@ -207,8 +211,17 @@ export class IngestBridge {
           })
         }
       }
-      if (this.pending.size) {
-        this.trace?.(`pending restored: ${this.pending.size}`)
+      // 还没发出去的去抖缓冲：外壳被强杀时它们是唯一的副本
+      for (const [sessionId, item] of Object.entries(parsed?.unsent ?? {})) {
+        if (!sessionId || !Array.isArray(item?.messages) || !item.messages.length) continue
+        this.buffers.set(sessionId, {
+          messages: item.messages,
+          lastSeq: Number.isFinite(item.lastSeq) ? item.lastSeq : null,
+          timer: null,
+        })
+      }
+      if (this.pending.size || this.buffers.size) {
+        this.trace?.(`queue restored: pending=${this.pending.size} unsent=${this.buffers.size}`)
       }
     } catch (error) {
       // 文件不存在 / 内容坏了：当作空队列，绝不因此阻止启动
@@ -218,13 +231,19 @@ export class IngestBridge {
     }
   }
 
-  _savePending() {
+  _saveQueue() {
     if (!this.pendingPath) return
+    const unsent = {}
+    for (const [sessionId, buffer] of this.buffers) {
+      if (!buffer.messages.length) continue
+      unsent[sessionId] = { messages: buffer.messages, lastSeq: buffer.lastSeq }
+    }
     const payload = {
-      version: 1,
+      version: 2,
       pending: [...this.pending.entries()].map(([jobId, item]) => ({
         job_id: jobId, sessionId: item.sessionId, messages: item.messages,
       })),
+      unsent,
     }
     try {
       mkdirSync(path.dirname(this.pendingPath), { recursive: true })

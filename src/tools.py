@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import difflib
 import inspect
 import threading
 from typing import Literal
@@ -243,28 +244,96 @@ class memory_report_args(BaseModel):
 
 @tool(memory_report_args)
 def memory_report(id, kind="event", reason=""):
-    '''上报一条记忆有问题：事件置「待复核」，经验/认知/洞见置为 invalid（不再参与召回）。只标状态，不改内容。'''
-    db = _db()
+    '''（兼容别名）等价于 memory_feedback(signal="wrong")：报告一条记忆有问题。'''
     note = (reason or "").strip()[:120] or "reported"
+    result = memory_feedback([int(id)], kind=kind, signal="wrong", note=note)
+    if not result["items"][0]["ok"]:
+        raise ToolError(CODE_NOT_FOUND, f"找不到 {kind} #{int(id)}")
     if kind == "event":
-        if not db.set_event_review(int(id), True, note):
-            raise ToolError(CODE_NOT_FOUND, f"找不到 event #{id}")
         return {"kind": "event", "id": int(id), "needs_review": True,
                 "reason": note}
-    if kind in ("experience", "cognition", "insight"):
-        # 错条目：置 invalid 并摘掉索引，避免继续被召回；正文保留可追溯
-        with db.transaction() as conn:
-            cur = conn.execute(
-                f"UPDATE {kind} SET status = 'invalid', invalid_reason = ? "
-                f"WHERE id = ?", (note, int(id)))
-            if cur.rowcount != 1:
-                raise ToolError(CODE_NOT_FOUND, f"找不到 {kind} #{id}")
-            conn.execute(
-                "DELETE FROM memory_fts WHERE ref_kind = ? AND ref_id = ?",
-                (kind, int(id)))
-        return {"kind": kind, "id": int(id), "status": "invalid",
-                "reason": note}
-    raise ToolError(-32602, f"未知 kind: {kind!r}")
+    return {"kind": kind, "id": int(id), "status": "invalid", "reason": note}
+
+
+class memory_feedback_args(BaseModel):
+    ids: list[int] = Field(description=(
+        "要标记的条目 id，可一次传多条（来自 memory_search 的 items[].id）"))
+    kind: Literal["event", "experience", "cognition", "insight"] = Field(
+        default="cognition",
+        description="这些 id 的类型，必须与来源一致：event / experience / cognition / insight")
+    signal: Literal["useful", "useless", "outdated", "wrong"] = Field(
+        description=("useful=这次真帮上了（加权）；useless=召回了但没用（降权）；"
+                     "outdated=内容已过时（退出召回）；wrong=与事实不符（置无效）"))
+    note: str | None = Field(
+        default=None, description="为什么这么标，≤120 字，便于审计")
+
+
+@tool(memory_feedback_args)
+def memory_feedback(ids, kind="cognition", signal="useful", note=None, *,
+                    session_id=None, origin_project=None):
+    '''给召回的记忆打分或改状态：useful/useless 只调权，outdated/wrong 会让它退出召回。'''
+    targets = [int(item) for item in (ids or [])]
+    if not targets:
+        raise ToolError(-32602, "ids 不能为空")
+    if kind not in ("event", "experience", "cognition", "insight"):
+        raise ToolError(-32602, f"未知 kind: {kind!r}")
+    if signal not in ("useful", "useless", "outdated", "wrong"):
+        raise ToolError(-32602, f"未知 signal: {signal!r}")
+
+    db = _db()
+    note_text = (note or "").strip()[:120]
+    now = base.get_cur_time()
+    items = []
+    with db.transaction() as conn:
+        for item_id in targets:
+            row = conn.execute(f"SELECT id FROM {kind} WHERE id = ?",
+                               (item_id,)).fetchone()
+            if row is None:
+                items.append({"id": item_id, "ok": False, "reason": "not_found"})
+                continue
+            if kind == "event":
+                # 事件表没有 feedback_score：用 cnt 和复核标记表达同样语义
+                if signal == "useful":
+                    conn.execute("UPDATE event SET cnt = cnt + 1, "
+                                 "last_used_at = ? WHERE id = ?", (now, item_id))
+                elif signal == "useless":
+                    conn.execute("UPDATE event SET cnt = MAX(cnt - 1, 0) "
+                                 "WHERE id = ?", (item_id,))
+                else:
+                    conn.execute("UPDATE event SET needs_review = 1, "
+                                 "review_reason = ? WHERE id = ?",
+                                 (note_text or signal, item_id))
+                items.append({"id": item_id, "ok": True, "signal": signal})
+                continue
+
+            if signal == "useful":
+                conn.execute(
+                    f"UPDATE {kind} SET use_count = use_count + 1, "
+                    f"feedback_score = feedback_score + 1, last_used_at = ? "
+                    f"WHERE id = ?", (now, item_id))
+            elif signal == "useless":
+                conn.execute(
+                    f"UPDATE {kind} SET feedback_score = feedback_score - 1 "
+                    f"WHERE id = ?", (item_id,))
+            elif signal == "outdated":
+                conn.execute(
+                    f"UPDATE {kind} SET valid_to = ?, "
+                    f"feedback_score = feedback_score - 1 WHERE id = ?",
+                    (now, item_id))
+                conn.execute("DELETE FROM memory_fts WHERE ref_kind = ? "
+                             "AND ref_id = ?", (kind, item_id))
+            else:
+                conn.execute(
+                    f"UPDATE {kind} SET status = 'invalid', "
+                    f"invalid_reason = ? WHERE id = ?",
+                    (note_text or "wrong", item_id))
+                conn.execute("DELETE FROM memory_fts WHERE ref_kind = ? "
+                             "AND ref_id = ?", (kind, item_id))
+            items.append({"id": item_id, "ok": True, "signal": signal})
+
+    updated = sum(1 for item in items if item["ok"])
+    base.log.info("feedback", kind=kind, signal=signal, updated=updated)
+    return {"kind": kind, "signal": signal, "updated": updated, "items": items}
 
 
 class memory_self_write_args(BaseModel):
@@ -303,6 +372,135 @@ def memory_self_write(content, kind="behavior", reason=None, *,
     return {"id": new_id, "kind": kind, "revision": revision,
             "limit": limit, "content": text,
             "reason": (str(reason or "").strip()[:120])}
+
+
+# ---------------- 写入：经验 / 认知 / 洞见 ----------------
+
+_NOTE_MERGE_SIM = 0.90      # 向量余弦 ≥ 此值：判为重复，不新增
+_NOTE_HINT_SIM = 0.82       # ≥ 此值：返回候选，由模型自己判断
+_NOTE_LITERAL_HINT = 0.80   # 没有向量时的字面兜底：只提示，不拦
+# 写入比读取严一档：读取时判定重复只是少显示一条，写入时误判就再也写不进去了
+
+
+def _l3_record(db, kind: str, item_id: int):
+    '''按 kind 取一条 l3 记录；不存在返回 None。'''
+    if kind == "experience":
+        return db.get_experience(item_id)
+    if kind == "cognition":
+        return db.get_cognition(item_id)
+    return db.get_insight(item_id)
+
+
+class memory_note_args(BaseModel):
+    content: str = Field(description=(
+        "一句话，第一人称，≤300 字。experience 写做法/技巧/坑；"
+        "cognition 写关于用户、项目、工具的稳定事实；insight 写归纳出的通用规则"))
+    kind: Literal["experience", "cognition", "insight"] = Field(
+        default="experience",
+        description="experience=怎么做；cognition=是什么（必须给 subject）；insight=归纳层规则")
+    subject: str | None = Field(
+        default=None,
+        description="仅 cognition 必填，≤40 字；写清这是谁的事（用户 / 项目名 / 工具名 / 助手自己）")
+    confidence: float = Field(default=0.55, ge=0.0, le=1.0,
+                              description="你有多确定；被验证过一次再往上调")
+    importance: int = Field(default=3, ge=1, le=5,
+                            description="1–5；≥4 才会进每轮固定注入")
+    cues: list[str] | None = Field(
+        default=None, description="检索线索，2–5 个短词，后续靠它被联想起来")
+    source_event_ids: list[int] | None = Field(
+        default=None, description="这条由哪次事件得出；没有就不传")
+    reason: str | None = Field(default=None, description="为什么写这条，≤120 字，便于审计")
+
+
+@tool(memory_note_args)
+def memory_note(content, kind="experience", subject=None, confidence=0.55,
+                importance=3, cues=None, source_event_ids=None, reason=None,
+                *, session_id=None, origin_project=None, query_vector=None):
+    '''给自己写一条经验/认知/洞见：写前先查重，同义的不再新增一条。'''
+    text = str(content or "").strip()
+    if not text:
+        raise ToolError(-32602, "content 不能为空")
+    if len(text) > 300:
+        raise ToolError(-32602, "content 超过 300 字")
+    if kind not in ("experience", "cognition", "insight"):
+        raise ToolError(-32602, f"未知 kind: {kind!r}")
+    subject = str(subject or "").strip()
+    if kind == "cognition":
+        if not subject:
+            raise ToolError(-32602, "cognition 必须给 subject：写清这是谁的事")
+        if len(subject) > 40:
+            raise ToolError(-32602, "subject 超过 40 字")
+
+    db = _db()
+    # 查重：优先向量（中文同义改写字面对不上），没有向量再退回字面
+    best = None                      # (kind, id, content, similarity)
+    if query_vector:
+        for table_kind in ("experience", "cognition", "insight"):
+            for ref_id, distance in db.vec_search(
+                    table_kind, query_vector, k=3, scope="all").items():
+                similarity = 1.0 - float(distance)
+                if best is None or similarity > best[3]:
+                    best = (table_kind, int(ref_id), "", similarity)
+        if best is not None:
+            record = _l3_record(db, best[0], best[1])
+            if record is not None:
+                best = (best[0], best[1],
+                        getattr(record, "content", "") or "", best[3])
+    else:
+        for hit in retrieval.search(db, text, limit=5, scope="all", touch=False,
+                                    kinds=("experience", "cognition", "insight")):
+            ratio = difflib.SequenceMatcher(None, text, hit.text or "").ratio()
+            if best is None or ratio > best[3]:
+                best = (hit.kind, hit.id, hit.text or "", ratio)
+
+    if best is not None and best[3] >= _NOTE_MERGE_SIM:
+        base.log.info("note.duplicate", kind=best[0], id=best[1],
+                      similarity=round(best[3], 3))
+        return {"action": "duplicate", "kind": best[0], "id": best[1],
+                "similarity": round(best[3], 3), "content": best[2],
+                "hint": "已有同义条目，未新增。要改正文请到设置页处理，或用 memory_feedback 标掉旧的"}
+    if best is not None and best[3] >= _NOTE_HINT_SIM:
+        return {"action": "candidate", "kind": best[0], "id": best[1],
+                "similarity": round(best[3], 3), "content": best[2],
+                "hint": "疑似重复，未新增。确认是两件事再改写后重试"}
+    if best is not None and not query_vector and best[3] >= _NOTE_LITERAL_HINT:
+        return {"action": "candidate", "kind": best[0], "id": best[1],
+                "similarity": round(best[3], 3), "content": best[2],
+                "hint": "字面相近（未算向量），未新增。确认不同再改写后重试"}
+
+    # 三张表的 source_event_id 是 NOT NULL：手工写入没有来源事件时记 0
+    event_id = int(source_event_ids[0]) if source_event_ids else 0
+    cue_tuple = tuple(str(c).strip() for c in (cues or []) if str(c).strip())
+    now = base.get_cur_time()
+    if kind == "experience":
+        new_id = db.insert_experience(database.Experience(
+            context=None, content=text, kind="technique",
+            confidence=float(confidence), importance=int(importance),
+            origin_session=session_id, origin_project=origin_project,
+            scope="project", source_event_id=event_id,
+            cues=cue_tuple, created_at=now))
+    elif kind == "cognition":
+        new_id = db.insert_cognition(database.Cognition(
+            subject=subject, content=text, kind="fact",
+            confidence=float(confidence), importance=int(importance),
+            origin_session=session_id, origin_project=origin_project,
+            source_event_id=event_id, cues=cue_tuple, created_at=now))
+    else:
+        new_id = db.insert_insight(database.Insight(
+            content=text, scope="global", confidence=float(confidence),
+            importance=int(importance), origin_session=session_id,
+            origin_project=origin_project, cues=cue_tuple, created_at=now))
+    # 插入不会自动进全文索引与向量表：不补这两步，新条目搜不到
+    db.index_fts(kind, new_id,
+                 title=(subject if kind == "cognition" else ""),
+                 body=text, origin_project=origin_project,
+                 session_id=session_id)
+    if query_vector:
+        db.vec_upsert(kind, new_id, query_vector,
+                      origin_project=origin_project)
+    base.log.info("note.insert", kind=kind, id=new_id)
+    return {"action": "created", "kind": kind, "id": new_id,
+            "content": text, "reason": str(reason or "").strip()[:120]}
 
 
 # ---------------- 运行状态 ----------------

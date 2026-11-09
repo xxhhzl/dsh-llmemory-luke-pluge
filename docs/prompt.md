@@ -388,7 +388,7 @@ id 来自 memory_search 的 items[].id（先搜再读，不要猜 id）；看原
 **工具描述（description）**
 
 ```text
-上报一条记忆有问题：事件置「待复核」，经验/认知/洞见置为 invalid（不再参与召回）。只标状态，不改内容。
+（兼容别名）等价于 memory_feedback(signal="wrong")：报告一条记忆有问题。
 ```
 
 **参数**
@@ -396,6 +396,23 @@ id 来自 memory_search 的 items[].id（先搜再读，不要猜 id）；看原
 - `id`（必填）：要上报的条目 id（来自 memory_search 的 items[].id）
 - `kind`（选填, 默认 "event"）：id 的类型，必须与来源一致：event / experience / cognition / insight
 - `reason`（必填）：哪里不对：与事实不符、已过时、张冠李戴等，一句话
+
+### 提示词来源：`src/tools.py` — `memory_feedback` 工具定义（）
+
+模型看到的是 `description` + 每个参数的 `description`，它们直接决定调用姿势。
+
+**工具描述（description）**
+
+```text
+给召回的记忆打分或改状态：useful/useless 只调权，outdated/wrong 会让它退出召回。
+```
+
+**参数**
+
+- `ids`（必填）：要标记的条目 id，可一次传多条（来自 memory_search 的 items[].id）
+- `kind`（选填, 默认 "cognition"）：这些 id 的类型，必须与来源一致：event / experience / cognition / insight
+- `signal`（必填）：useful=这次真帮上了（加权）；useless=召回了但没用（降权）；outdated=内容已过时（退出召回）；wrong=与事实不符（置无效）
+- `note`（选填, 默认 null）：为什么这么标，≤120 字，便于审计
 
 ### 提示词来源：`src/tools.py` — `memory_self_write` 工具定义（）
 
@@ -412,6 +429,27 @@ id 来自 memory_search 的 items[].id（先搜再读，不要猜 id）；看原
 - `content`（必填）：一句话自我认知（第一人称，≤300 字），写你自己的教训/行为准则/边界/目标；不要写用户或项目的事实——那些由系统自动提取
 - `kind`（选填, 默认 "behavior"）：identity=身份、behavior=行为准则、limitation=能力边界、goal=目标
 - `reason`（选填, 默认 null）：为什么写这条（可选，≤120 字，便于日后审计）
+
+### 提示词来源：`src/tools.py` — `memory_note` 工具定义（）
+
+模型看到的是 `description` + 每个参数的 `description`，它们直接决定调用姿势。
+
+**工具描述（description）**
+
+```text
+给自己写一条经验/认知/洞见：写前先查重，同义的不再新增一条。
+```
+
+**参数**
+
+- `content`（必填）：一句话，第一人称，≤300 字。experience 写做法/技巧/坑；cognition 写关于用户、项目、工具的稳定事实；insight 写归纳出的通用规则
+- `kind`（选填, 默认 "experience"）：experience=怎么做；cognition=是什么（必须给 subject）；insight=归纳层规则
+- `subject`（选填, 默认 null）：仅 cognition 必填，≤40 字；写清这是谁的事（用户 / 项目名 / 工具名 / 助手自己）
+- `confidence`（选填, 默认 0.55）：你有多确定；被验证过一次再往上调
+- `importance`（选填, 默认 3）：1–5；≥4 才会进每轮固定注入
+- `cues`（选填, 默认 null）：检索线索，2–5 个短词，后续靠它被联想起来
+- `source_event_ids`（选填, 默认 null）：这条由哪次事件得出；没有就不传
+- `reason`（选填, 默认 null）：为什么写这条，≤120 字，便于审计
 
 ---
 

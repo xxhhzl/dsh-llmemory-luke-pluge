@@ -815,22 +815,75 @@ test('core.get 必须带当前会话与查询；召回按会话缓存', async ()
     },
   }
   const prompt = new CorePrompt({}, kernel, { trace: () => {} })
-  await prompt.refresh({ sessionId: 'sA', queryHint: '装插件' })
+  await prompt.refresh({ sessionId: 'sA', queryHint: '装插件',
+                         recall: true, advanceTurn: true })
   assert.equal(seen[0].type, 'core.get')
   assert.equal(seen[0].options.sessionId, 'sA')
   assert.equal(seen[0].data.query_hint, '装插件')
-  assert.match(prompt.currentRecall(), /sA:装插件/)
+  assert.equal(seen[0].data.recall, true)
+  assert.equal(seen[0].data.advance_turn, true)
+  const ctxA = { agent: { session: { id: 'sA' } } }
+  const ctxB = { agent: { session: { id: 'sB' } } }
+  assert.match(prompt.recallFor(ctxA), /sA:装插件/)
 
-  await prompt.refresh({ sessionId: 'sB', queryHint: '查资料' })
-  assert.match(prompt.currentRecall(), /sA:装插件/,
-    '直接刷新别的会话不能顶掉当前会话')
-  prompt.activeSession = 'sB'
-  assert.match(prompt.currentRecall(), /sB:查资料/)
+  await prompt.refresh({ sessionId: 'sB', queryHint: '查资料',
+                         recall: true, advanceTurn: true })
+  assert.match(prompt.recallFor(ctxA), /sA:装插件/, 'A 的文本不被 B 覆盖')
+  assert.match(prompt.recallFor(ctxB), /sB:查资料/)
+  assert.equal(prompt.currentRecall(), '',
+    '没经过 pre-step 时没有「当前会话」，不猜')
+})
 
-  prompt.activeSession = 'sA'
-  assert.match(prompt.currentRecall(), /sA:装插件/, 'A 的召回不能被 B 覆盖')
-  prompt.activeSession = 'sC'
-  assert.equal(prompt.currentRecall(), '', '没有编译过的会话不借别人的召回')
+test('后台刷新默认只编核心文本：不碰召回、不推进冷却', async () => {
+  const seen = []
+  const kernel = {
+    request: async (type, data, options) => {
+      seen.push({ data, options })
+      return { enabled: true, version: 'v', text: '<core/>' ,
+               notes_version: '', notes_text: '',
+               recall_text: '<recall>不该出现</recall>', recall_items: [] }
+    },
+  }
+  const prompt = new CorePrompt({}, kernel, { trace: () => {} })
+  await prompt.refresh()
+  assert.equal(seen[0].data.recall, false)
+  assert.equal(seen[0].data.advance_turn, false)
+  assert.equal(prompt.currentRecall(), '', '后台刷新不能写入召回缓存')
+})
+
+test('召回按组装 context 的会话取文本，两个会话互不串', async () => {
+  const kernel = {
+    request: async (type, data, options) => ({
+      enabled: true, version: 'v', text: '', notes_version: '', notes_text: '',
+      recall_text: `<recall>${options?.sessionId}</recall>`,
+      recall_items: [], recall_version: 'r',
+    }),
+  }
+  const prompt = new CorePrompt({}, kernel, { trace: () => {} })
+  await prompt.refresh({ sessionId: 'A', recall: true, advanceTurn: true })
+  await prompt.refresh({ sessionId: 'B', recall: true, advanceTurn: true })
+  const ctxA = { agent: { session: { id: 'A' } } }
+  const ctxB = { agent: { session: { id: 'B' } } }
+  assert.match(prompt.recallFor(ctxA), /<recall>A<\/recall>/)
+  assert.match(prompt.recallFor(ctxB), /<recall>B<\/recall>/)
+  assert.equal(prompt.recallFor({}), '', '没有会话 context 时不借别的会话')
+})
+
+test('同一会话晚到的旧响应不覆盖新召回', async () => {
+  const deferred = []
+  const kernel = { request: () => new Promise(resolve => deferred.push(resolve)) }
+  const prompt = new CorePrompt({}, kernel, { trace: () => {} })
+  const oldCall = prompt.refresh({ sessionId: 'S', recall: true, advanceTurn: true })
+  const newCall = prompt.refresh({ sessionId: 'S', recall: true, advanceTurn: true })
+  const reply = text => ({ enabled: true, version: 'v', text: '',
+                           notes_version: '', notes_text: '',
+                           recall_text: text, recall_items: [], recall_version: text })
+  deferred[1](reply('<recall>NEW</recall>'))
+  await newCall
+  deferred[0](reply('<recall>OLD</recall>'))
+  await oldCall
+  assert.match(prompt.recallFor({ agent: { session: { id: 'S' } } }), /NEW/,
+    '旧请求晚到不能把新召回覆盖回 OLD')
 })
 
 test('agent/pre-step：在组装前用本步会话与用户输入刷新召回，并原样返回 next', async () => {
@@ -853,7 +906,21 @@ test('agent/pre-step：在组装前用本步会话与用户输入刷新召回，
   assert.equal(result, decision, 'waterfall 必须原样返回 next() 的结果')
   assert.equal(calls[0].options.sessionId, 'sess-1')
   assert.equal(calls[0].data.query_hint, '上次那个插件怎么装的')
+  assert.equal(calls[0].data.recall, true)
+  assert.equal(calls[0].data.advance_turn, true)
   assert.match(prompt.currentRecall(), /<recall>/)
+})
+
+test('pre-step 没有会话 ID 时清空兜底，不复用上一次的召回', async () => {
+  let handler
+  const ctx = { on: (name, fn) => { handler = fn; return () => {} } }
+  const prompt = new CorePrompt(ctx, { request: async () => ({}) }, { trace: () => {} })
+  prompt.bindStep()
+  prompt.activeSession = 'old-session'
+  prompt.recallBySession.set('old-session', { text: '<recall>OLD</recall>', items: [] })
+  await handler({ messages: [{ role: 'user', content: '无会话' }] }, async () => ({ kind: 'enter' }))
+  assert.equal(prompt.activeSession, '')
+  assert.equal(prompt.currentRecall(), '')
 })
 
 test('memory_note：用 content 算向量并随调用传给内核', async () => {

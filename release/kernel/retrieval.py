@@ -468,6 +468,50 @@ def _dedup_semantic(db, selected: list, weights: dict) -> tuple:
     return kept, merged
 
 
+def _backfill_after_dedup(db, scored: list, selected: list, limit: int,
+                          weights: dict) -> list:
+    '''
+    去重会删条，但空出来的名额应由**不同内容**的候选补上。
+
+    旧实现先选满再删重复，limit=2 只剩 1 条时不会再看后面的候选；
+    这里按原分数顺序补位，补入的条目同样要和已保留条目做一次语义比较。
+    '''
+    if len(selected) >= limit:
+        return selected
+    threshold = float(weights.get("dedup_similarity", DEFAULT_DEDUP_SIM))
+    kept_keys = {(item[1], item[2]) for item in selected}
+    remaining = [item for item in scored
+                 if (item[1], item[2]) not in kept_keys]
+    if not remaining:
+        return selected
+
+    vectors = {}
+    if threshold > 0:
+        for kind in ("experience", "cognition", "insight"):
+            wanted = {item[2] for item in selected + remaining
+                      if item[1] == kind}
+            if not wanted:
+                continue
+            for ref_id, blob in db.get_vec_blobs(kind, wanted).items():
+                vector = _blob_to_vector(blob)
+                if vector is not None:
+                    vectors[(kind, int(ref_id))] = vector
+
+    for item in remaining:
+        if len(selected) >= limit:
+            break
+        key = (item[1], item[2])
+        vector = vectors.get(key)
+        if (threshold > 0 and item[1] != "event" and vector is not None
+                and any(_cosine(vector, vectors[(anchor[1], anchor[2])]) >= threshold
+                        for anchor in selected
+                        if anchor[1] != "event"
+                        and (anchor[1], anchor[2]) in vectors)):
+            continue
+        selected.append(item)
+    return selected
+
+
 def search(db: database.Database, query: str, *, origin_project: str | None = None,
            scope: str | None = None, limit: int = 10,
            kinds: Iterable[str] = ("event", "experience", "cognition", "insight"),
@@ -495,6 +539,7 @@ def search(db: database.Database, query: str, *, origin_project: str | None = No
     scored = _score(found, weights, origin_project)
     selected = _select(scored, limit, weights)
     selected, merged_map = _dedup_semantic(db, selected, weights)
+    selected = _backfill_after_dedup(db, scored, selected, limit, weights)
 
     hits = []
     for total, kind, row_id, record, assoc, excerpt in selected:

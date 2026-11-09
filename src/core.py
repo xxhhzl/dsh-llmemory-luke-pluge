@@ -136,27 +136,33 @@ def _commit_recall(session_id: str | None, text: str, items: list) -> None:
         _last_recall["session_id"] = session_id
 
 
-def _build_recall(db, session_id: str | None, query_hint: str | None) -> dict:
+def _build_recall(db, session_id: str | None, query_hint: str | None,
+                  advance_turn: bool = True) -> dict:
     '''
     被动回想：按当前对话捞几条相关记忆，组装 <recall> 块。
 
-    三条硬约束：
+    四条硬约束：
     - `touch=False`：注入不算「被使用」，否则每轮都加热度，越召回越热；
     - 冷却：同一条记忆在同一会话里 N 轮内不重复注入，避免看第二遍就当背景；
     - **必须绑定会话**：没有 session_id 就不召回。旧实现退回「最近有消息的
-      会话」，多会话场景会把别的会话的记忆注入当前提示词（0.5.1 修）。
+      会话」，多会话场景会把别的会话的记忆注入当前提示词（0.5.1 修）；
+    - **只有用户步骤推进冷却**：后台刷新（写入完成/设置变更）只重编核心文本，
+      调 `advance_turn=False` 时既不推进轮次、也不改快照（0.5.2 修）。
     '''
     cfg = config.get_config().get("recall", {}) or {}
     session_id = (session_id or "").strip() or None
 
-    def finish(text: str, items: list) -> dict:
-        _commit_recall(session_id, text, items)
-        return {"text": text, "items": items}
+    def finish(text: str, items: list, skipped: bool = False) -> dict:
+        if not skipped:
+            _commit_recall(session_id, text, items)
+        return {"text": text, "items": items, "skipped": skipped}
 
     if not cfg.get("enabled", True):
         return finish("", [])
     if not session_id:
         return finish("", [])
+    if not advance_turn:
+        return finish("", [], skipped=True)
 
     query = (query_hint or "").strip() or _recent_query(db, session_id, cfg)
     query = query[:int(cfg.get("query_chars", 500))]
@@ -173,6 +179,10 @@ def _build_recall(db, session_id: str | None, query_hint: str | None) -> dict:
 
     key = session_id
     with _recall_lock:
+        if key not in _recall_state and len(_recall_state) >= 200:
+            # 长期运行：会话状态有上限，淘汰轮次最旧的会话
+            oldest = min(_recall_state, key=lambda name: _recall_state[name]["turn"])
+            _recall_state.pop(oldest, None)
         state = _recall_state.setdefault(key, {"turn": 0, "seen": {}})
         state["turn"] += 1
         turn = state["turn"]
@@ -218,14 +228,23 @@ def _build_recall(db, session_id: str | None, query_hint: str | None) -> dict:
 
 def compile_core(db: database.Database, cfg: dict | None = None,
                  session_id: str | None = None,
-                 query_hint: str | None = None) -> dict:
-    '''编译注入文本；返回 {enabled, version, text, notes_version, notes_text, stats}。'''
+                 query_hint: str | None = None,
+                 advance_turn: bool = True,
+                 use_recall: bool = True) -> dict:
+    '''
+    编译注入文本；返回核心块、自述与召回。
+
+    :param advance_turn: 是否推进召回冷却轮次。只有用户步骤（pre-step）为 True；
+                         后台刷新传 False，避免 9 次写入就把 10 轮冷却耗光。
+    :param use_recall: 是否编译召回。后台刷新只需核心文本，传 False 时不动召回快照。
+    '''
     core_cfg = cfg if cfg is not None else config.get_config().get("core", {})
     enabled = bool(core_cfg.get("enabled", True))
     if not enabled:
         return {"enabled": False, "version": "", "text": "",
                 "notes_version": "", "notes_text": "",
                 "recall_version": "", "recall_text": "", "recall_items": [],
+                "recall_skipped": True,
                 "stats": {"self_configured": 0, "self_notes": 0,
                           "insight": 0, "experience": 0, "cognition": 0,
                           "recall": 0}}
@@ -260,7 +279,10 @@ def compile_core(db: database.Database, cfg: dict | None = None,
 
     text, stats = _build_text(configured, insights, experiences, cognitions, budget)
     notes_text = _notes_text(notes)
-    recall = _build_recall(db, session_id, query_hint)
+    if use_recall:
+        recall = _build_recall(db, session_id, query_hint, advance_turn=advance_turn)
+    else:
+        recall = {"text": "", "items": [], "skipped": True}
     return {
         "enabled": True,
         "version": _hash(text) if text else "",
@@ -270,6 +292,7 @@ def compile_core(db: database.Database, cfg: dict | None = None,
         "recall_version": _hash(recall["text"]) if recall["text"] else "",
         "recall_text": recall["text"],
         "recall_items": recall["items"],
+        "recall_skipped": bool(recall.get("skipped")),
         "stats": {"self_configured": stats["self"], "self_notes": len(notes),
                   "insight": stats["insight"], "experience": stats["experience"],
                   "cognition": stats["cognition"],
@@ -278,10 +301,13 @@ def compile_core(db: database.Database, cfg: dict | None = None,
 
 
 def get_core(data, q: base.message_queue, db=None):
-    '''协议入口：返回当前核心记忆与自述快照（外壳注册 section/context 用）。'''
+    '''协议入口：返回核心记忆与自述快照；召回按需编译（advance_turn 控制冷却）。'''
     if db is None:
         import tools                                # 复用共享连接（勿关闭）
         db = tools._db()
-    payload = compile_core(db, session_id=data.get("session_id"),
-                           query_hint=data.get("query_hint"))
+    payload = compile_core(
+        db, session_id=data.get("session_id"),
+        query_hint=data.get("query_hint"),
+        advance_turn=bool(data.get("advance_turn", True)),
+        use_recall=bool(data.get("recall", True)))
     frame.push(q, data, "core", payload)

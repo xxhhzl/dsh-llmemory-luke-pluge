@@ -8,10 +8,13 @@
  * 文本由内核 `core.get` 编译（带 `<long_term_memory>` / `<self_notes>` / `<recall>` 标签），
  * 这里只做缓存与注册；版本不变就不更新，避免无谓击穿系统提示词前缀缓存。
  *
- * 会话隔离（0.5.1）：
- * - 每次编译都带上当前 `session_id`，内核不再用「最近有消息的会话」兜底；
- * - 召回缓存按会话存；`agent/pre-step` 在提示词组装前把当前会话与当前用户输入
- *   交给内核，因此注入的是**本轮**的回忆，而不是上一轮 ingest 之后的结果。
+ * 会话隔离（0.5.2）：
+ * - 宿主 `systemPrompt` 的 `text` 回调会收到**本次组装**的 context
+ *   （`{ agent, scope, signal }`，`agent.session.id` 即会话 id），召回按它取文本，
+ *   不再依赖一个全局「当前会话」指针——两个步骤交错时也不会串；
+ * - 每轮召回由 `agent/pre-step` 触发（提示词组装之前），带当前用户输入；
+ * - `refresh()` 默认只重编核心文本（`recall:false`），后台刷新不推进冷却轮次；
+ * - 同一会话的刷新带递增序号，晚到的旧响应不会覆盖新结果。
  */
 
 export const CORE_SECTION = 'dsh-longmemory:core'
@@ -20,6 +23,15 @@ export const RECALL_CONTEXT = 'dsh-longmemory:recall'
 
 /** pre-step 里最多等召回这么久；超时就先用上一轮快照，不拖慢本轮请求。 */
 export const RECALL_WAIT_MS = 1500
+
+/** 从 prompt 组装 context 里取会话 id（宿主 shape：context.agent.session.id）。 */
+export function assembleSessionId(context) {
+  return context?.agent?.session?.id
+    || context?.agent?.id
+    || context?.session?.id
+    || context?.sessionId
+    || ''
+}
 
 /** 从 user 消息数组里取最后一条非空文本（内容块只取 text）。 */
 export function lastUserText(messages) {
@@ -64,16 +76,25 @@ export class CorePrompt {
     this.notesText = ''
     this.notesVersion = ''
     this.recallBySession = new Map()   // session_id -> { text, items, version }
-    this.activeSession = ''
+    this.recallSeq = new Map()         // session_id -> 最近一次刷新序号
+    this.activeSession = ''            // 只用于诊断/无 context 的兜底读取
     this.stepDisposer = null
     this.disposers = []
     this.attached = false
   }
 
-  /** 当前会话的召回文本；没有会话时为空（绝不回退到别的会话）。 */
+  /** 取某个会话的召回文本；没有会话就返回空（绝不借别的会话）。 */
+  recallFor(context) {
+    const sessionId = assembleSessionId(context) || this.activeSession
+    if (!sessionId) return ''
+    return this.recallBySession.get(sessionId)?.text || ''
+  }
+
+  /** 最近一轮步骤的召回文本（对应会话）；没有就为空。 */
   currentRecall() {
-    if (!this.activeSession) return ''
-    return this.recallBySession.get(this.activeSession)?.text || ''
+    return this.activeSession
+      ? (this.recallBySession.get(this.activeSession)?.text || '')
+      : ''
   }
 
   /** 注册 section 与 context；宿主没有 systemPrompt 时安全跳过。 */
@@ -102,11 +123,11 @@ export class CorePrompt {
         text: () => this.notesText,
         interpolate: false,
       }), 'longmemory.selfNotes.context'))
-      // 被动回想：每轮按当前对话捞几条相关记忆，排在自述之后（更靠近对话）
+      // 被动回想：text 收到本次组装的 context，按它的会话取文本（请求级隔离）
       this.disposers.push(effect(() => prompt.context({
         name: RECALL_CONTEXT,
         order: this.contextOrder + 10,
-        text: () => this.currentRecall(),
+        text: context => this.recallFor(context),
         interpolate: false,
       }), 'longmemory.recall.context'))
     } else {
@@ -125,21 +146,25 @@ export class CorePrompt {
     if (typeof this.ctx?.on !== 'function') return null
     const handler = async (payload, next) => {
       const sessionId = payload?.agent?.session?.id
-        || payload?.agent?.session?.header?.id || ''
-      if (sessionId) {
-        const queryHint = lastUserText(payload?.messages)
-        this.activeSession = sessionId
-        try {
-          await Promise.race([
-            this.refresh({ sessionId, queryHint }),
-            new Promise(resolve => {
-              const timer = setTimeout(resolve, this.recallWaitMs)
-              timer.unref?.()
-            }),
-          ])
-        } catch (error) {
-          this.trace(`recall pre-step failed: ${error?.message ?? error}`)
-        }
+        || payload?.agent?.id || ''
+      if (!sessionId) {
+        this.activeSession = ''      // 没有会话：清掉兜底，绝不复用上一次
+        return next()
+      }
+      this.activeSession = sessionId
+      const queryHint = lastUserText(payload?.messages)
+      try {
+        await Promise.race([
+          this.refresh({
+            sessionId, queryHint, recall: true, advanceTurn: true,
+          }),
+          new Promise(resolve => {
+            const timer = setTimeout(resolve, this.recallWaitMs)
+            timer.unref?.()
+          }),
+        ])
+      } catch (error) {
+        this.trace(`recall pre-step failed: ${error?.message ?? error}`)
       }
       return next()
     }
@@ -148,18 +173,29 @@ export class CorePrompt {
   }
 
   /**
-   * 从内核取编译结果；核心块/自述按版本号更新，召回按会话覆盖（文本不变就不动）。
+   * 从内核取编译结果。
    *
    * @param {object} options
-   * @param {string} [options.sessionId] 会话 id；缺省用 pre-step 记下的当前会话
+   * @param {string} [options.sessionId] 会话 id；缺省用最近一次步骤的会话
    * @param {string} [options.queryHint] 当前用户输入；缺省让内核用最近几条消息
+   * @param {boolean} [options.recall]  是否重编召回（默认否：后台刷新只编核心文本）
+   * @param {boolean} [options.advanceTurn] 是否推进召回冷却（只有步骤为 true）
    */
-  async refresh({ sessionId = '', queryHint = '' } = {}) {
+  async refresh({
+    sessionId = '', queryHint = '', recall = false, advanceTurn = false,
+  } = {}) {
     if (!this.kernel) return null
     const target = sessionId || this.activeSession || ''
+    const seq = (this.recallSeq.get(target) || 0) + 1
+    this.recallSeq.set(target, seq)
+
     const payload = await this.kernel.request(
       'core.get',
-      { query_hint: queryHint || null },
+      {
+        query_hint: queryHint || null,
+        recall: Boolean(recall),
+        advance_turn: Boolean(advanceTurn),
+      },
       { timeoutMs: this.timeoutMs, sessionId: target },
     )
     if (!payload || payload.enabled === false) {
@@ -180,20 +216,25 @@ export class CorePrompt {
       this.notesText = payload.notes_text || ''
       this.trace(`self notes updated version=${this.notesVersion} chars=${this.notesText.length}`)
     }
-    // 召回按会话存：A 会话的刷新不能覆盖 B 会话的文本
-    const key = target
-    if (key) {
+    // 召回：按会话存；晚到的旧响应（序号已过期）不落缓存
+    if (recall && target && !payload.recall_skipped
+        && this.recallSeq.get(target) === seq) {
       const text = payload.recall_text || ''
-      const existing = this.recallBySession.get(key)
+      const existing = this.recallBySession.get(target)
       if (!existing || existing.text !== text) {
-        this.recallBySession.set(key, {
+        this.recallBySession.set(target, {
           text,
           items: payload.recall_items || [],
           version: payload.recall_version || '',
         })
-        this.trace(`recall updated session=${key} items=${(payload.recall_items || []).length}`)
+        // 会话 Map 有上限：长期运行时不无限增长，淘汰最久未更新的会话
+        while (this.recallBySession.size > 50) {
+          const oldest = this.recallBySession.keys().next().value
+          if (oldest === target) break
+          this.recallBySession.delete(oldest)
+        }
+        this.trace(`recall updated session=${target} items=${(payload.recall_items || []).length}`)
       }
-      if (key === this.activeSession || !this.activeSession) this.activeSession = key
     }
     return payload
   }

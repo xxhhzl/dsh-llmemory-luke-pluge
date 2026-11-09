@@ -127,6 +127,10 @@ AND (:scope = 'all' OR origin_project IS NULL OR origin_project = :current_proje
 库长大后会抵消 ANN 的收益；现在只按 `selected` 里的 `(kind, id)` 批量
 `WHERE ref_id IN (...)` 取需要的几条（`Database.get_vec_blobs`）。
 
+去重会删条：删完腾出的名额由 `_backfill_after_dedup` 按原分数顺序从剩余候选
+补回（补入项同样要与已保留条目比一次余弦），所以 `limit=2` 不会因为两条同义
+只剩 1 条。补位不重新召回、不改变已选条目的分数。
+
 ## 6. v1 / v2 / v3 / v4
 
 | 版本 | 召回 | 说明 |

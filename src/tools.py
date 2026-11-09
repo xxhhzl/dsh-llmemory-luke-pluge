@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import difflib
 import inspect
+import re
 import threading
 from typing import Literal
 
@@ -418,6 +419,43 @@ class memory_note_args(BaseModel):
     reason: str | None = Field(default=None, description="为什么写这条，≤120 字，便于审计")
 
 
+def _norm_text(text) -> str:
+    '''主体/正文归一：去空白、转小写；只用于「是不是同一主体」的比较。'''
+    return re.sub(r"\s+", "", str(text or "")).lower()
+
+
+def _subject_compatible(new_subject, row_subject) -> bool:
+    '''同一主体：写法相同或互为包含（与 `find_l3_candidates` 的双向包含一致）。'''
+    left, right = _norm_text(new_subject), _norm_text(row_subject)
+    if not left or not right:
+        return False
+    return left == right or left in right or right in left
+
+
+def _project_compatible(new_project, row_project) -> bool:
+    '''
+    适用范围兼容：目标全局只和全局比；目标项目可与「同项目 + 全局」比。
+
+    不同项目的同名事实是两件事（用户实测：「项目甲：默认中文回复」与
+    「项目乙：默认中文回复」被旧的跨项目查重误判成 duplicate）。
+    '''
+    row_project = row_project or None
+    if new_project is None:
+        return row_project is None
+    return row_project in (None, new_project)
+
+
+def _note_candidate_ok(kind: str, row, subject: str,
+                       origin_project: str | None) -> bool:
+    '''新条目能否与这条旧条目比较：同 kind、范围兼容，认知还要同主体。'''
+    if not _project_compatible(origin_project,
+                               getattr(row, "origin_project", None)):
+        return False
+    if kind == "cognition":
+        return _subject_compatible(subject, getattr(row, "subject", ""))
+    return True
+
+
 @tool(memory_note_args)
 def memory_note(content, kind="experience", subject=None, confidence=0.55,
                 importance=3, cues=None, source_event_ids=None, reason=None,
@@ -438,26 +476,30 @@ def memory_note(content, kind="experience", subject=None, confidence=0.55,
             raise ToolError(-32602, "subject 超过 40 字")
 
     db = _db()
-    # 查重：优先向量（中文同义改写字面对不上），没有向量再退回字面
+    # 查重：优先向量（中文同义改写字面对不上），没有向量再退回字面。
+    # 只在**同 kind、范围兼容**的候选里找；认知还要同主体（0.5.2 修：
+    # 旧实现跨三张表、跨项目取全局最高分，会把不同事误判成 duplicate）。
     best = None                      # (kind, id, content, similarity)
+    candidates = []
     if query_vector:
-        for table_kind in ("experience", "cognition", "insight"):
-            for ref_id, distance in db.vec_search(
-                    table_kind, query_vector, k=3, scope="all").items():
-                similarity = 1.0 - float(distance)
-                if best is None or similarity > best[3]:
-                    best = (table_kind, int(ref_id), "", similarity)
-        if best is not None:
-            record = _l3_record(db, best[0], best[1])
-            if record is not None:
-                best = (best[0], best[1],
-                        getattr(record, "content", "") or "", best[3])
+        for ref_id, distance in db.vec_search(kind, query_vector, k=8,
+                                              scope="all").items():
+            row = _l3_record(db, kind, int(ref_id))
+            if row is not None and _note_candidate_ok(
+                    kind, row, subject, origin_project):
+                candidates.append((1.0 - float(distance), row))
     else:
-        for hit in retrieval.search(db, text, limit=5, scope="all", touch=False,
-                                    kinds=("experience", "cognition", "insight")):
-            ratio = difflib.SequenceMatcher(None, text, hit.text or "").ratio()
-            if best is None or ratio > best[3]:
-                best = (hit.kind, hit.id, hit.text or "", ratio)
+        for hit in retrieval.search(db, text, limit=8, scope="all", touch=False,
+                                    kinds=(kind,)):
+            row = _l3_record(db, kind, hit.id)
+            if row is None or not _note_candidate_ok(
+                    kind, row, subject, origin_project):
+                continue
+            ratio = difflib.SequenceMatcher(None, text, row.content or "").ratio()
+            candidates.append((ratio, row))
+    for similarity, row in candidates:
+        if best is None or similarity > best[3]:
+            best = (kind, row.id, row.content or "", similarity)
 
     if best is not None and best[3] >= _NOTE_MERGE_SIM:
         base.log.info("note.duplicate", kind=best[0], id=best[1],

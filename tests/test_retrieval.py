@@ -260,6 +260,22 @@ class TestSemanticDedup(RetrievalCase):
         kept = [hit for hit in hits if hit.kind == "cognition"]
         self.assertEqual(len(kept), 2, "不同主题不该被折叠")
 
+    def test_backfill_after_dedup_keeps_limit(self):
+        '''去重腾出的名额要从剩余候选里补，不能少给一条。'''
+        duplicate = self._vec(1.0)
+        other = self._vec(0.0, 1.0)
+        for text in ("改插件要先说明风险", "动配置之前先讲清会写哪些文件",
+                     "装脚本前先报备风险与路径"):
+            item = self.add_cognition(text)
+            self.db.vec_upsert("cognition", item, duplicate)
+        distinct = self.add_cognition("改插件时的磁盘空间主题")
+        self.db.vec_upsert("cognition", distinct, other)
+
+        hits = retrieval.search(self.db, "改插件", limit=2, touch=False)
+        self.assertEqual(len(hits), 2, "limit=2 时不该只剩 1 条")
+        self.assertIn(distinct, [hit.id for hit in hits],
+                      "该补进来的是不同主题的候选")
+
     def test_events_are_not_deduped(self):
         a = self.add_event("同一件事 A", "改插件")
         b = self.add_event("同一件事 B", "改插件")

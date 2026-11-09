@@ -114,6 +114,30 @@ class TestRecall(RecallCase):
         self.assertEqual(snapshot["items"], [])
         self.assertEqual(snapshot["session_id"], "s_other")
 
+    def test_background_compile_does_not_consume_cooldown(self):
+        '''后台刷新（写入完成/设置变更）不能拨快冷却轮次。'''
+        self._seed()
+        with self._with_recall():
+            first = core.compile_core(self.db, session_id=S1)
+            self.assertTrue(first["recall_items"])
+            for _ in range(9):
+                core.compile_core(self.db, session_id=S1, advance_turn=False)
+            second = core.compile_core(self.db, session_id=S1)
+        self.assertEqual(second["recall_items"], [],
+                         "冷却按用户步骤算，9 次后台编译不应把它耗光")
+
+    def test_background_compile_keeps_snapshot(self):
+        '''不编召回的后台刷新不覆盖最近一次召回快照。'''
+        self._seed()
+        with self._with_recall():
+            core.compile_core(self.db, session_id=S1)
+            before = core.last_recall()
+            payload = core.compile_core(self.db, session_id=S1,
+                                        advance_turn=False, use_recall=False)
+            after = core.last_recall()
+        self.assertTrue(payload["recall_skipped"])
+        self.assertEqual(after, before)
+
 
 if __name__ == "__main__":
     unittest.main()

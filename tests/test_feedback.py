@@ -176,5 +176,56 @@ class TestFeedbackActuallyScores(FeedbackCase):
                          "失效条目必须同时摘掉向量，否则白占 KNN 名额")
 
 
+class TestNoteDedupScope(FeedbackCase):
+    '''memory_note 查重必须限定：同 kind、范围兼容、认知同主体（0.5.2）。'''
+
+    def test_same_kind_same_project_is_duplicate(self):
+        first = tools.memory_note("默认采用中文回复", kind="cognition",
+                                  subject="项目甲", origin_project="proj_a")
+        second = tools.memory_note("默认采用中文回复", kind="cognition",
+                                   subject="项目甲", origin_project="proj_a")
+        self.assertEqual(first["action"], "created")
+        self.assertEqual(second["action"], "duplicate")
+        self.assertEqual(self.db.count_l3("cognition"), 1)
+
+    def test_different_project_is_not_duplicate(self):
+        first = tools.memory_note("默认采用中文回复", kind="cognition",
+                                  subject="项目甲", origin_project="proj_a")
+        second = tools.memory_note("默认采用中文回复", kind="cognition",
+                                   subject="项目甲", origin_project="proj_b")
+        self.assertEqual(first["action"], "created")
+        self.assertEqual(second["action"], "created",
+                         "不同项目的同名事实是两件事")
+        self.assertEqual(self.db.count_l3("cognition"), 2)
+
+    def test_different_subject_is_not_duplicate(self):
+        tools.memory_note("默认采用中文回复", kind="cognition",
+                          subject="项目甲", origin_project="proj_a")
+        second = tools.memory_note("默认采用中文回复", kind="cognition",
+                                   subject="项目乙", origin_project="proj_a")
+        self.assertEqual(second["action"], "created",
+                         "同一项目里的不同主体不能合并")
+
+    def test_different_kind_is_not_duplicate(self):
+        tools.memory_note("默认采用中文回复", kind="experience",
+                          origin_project="proj_a")
+        second = tools.memory_note("默认采用中文回复", kind="cognition",
+                                   subject="项目甲", origin_project="proj_a")
+        self.assertEqual(second["action"], "created",
+                         "经验与认知是两类记忆，不互相判重")
+        self.assertEqual(self.db.count_l3("experience"), 1)
+        self.assertEqual(self.db.count_l3("cognition"), 1)
+
+    def test_project_duplicate_of_global_is_not_created(self):
+        '''全局条目对本项目可见，再写一条项目内同名经验属于重复。'''
+        first = tools.memory_note("导出前统一线宽", kind="experience",
+                                  origin_project=None)
+        second = tools.memory_note("导出前统一线宽", kind="experience",
+                                   origin_project="proj_a")
+        self.assertEqual(first["action"], "created")
+        self.assertEqual(second["action"], "duplicate")
+        self.assertEqual(self.db.count_l3("experience"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -222,7 +222,28 @@ def _candidates(db: database.Database, query: str, origin_project: str | None,
                     sorted(distances.items(), key=lambda item: item[1])):
                 vec_rank[(kind, ref_id)] = rank
 
-    keys = set(fts_rank) | set(vec_rank)
+    # 原文命中：摘要没写到的编号/原话只有这里能搜到，命中后回连所属事件。
+    msg_rank: dict = {}
+    msg_excerpts: dict = {}
+    if "event" in wanted and hasattr(db, "search_message_fts"):
+        try:
+            for rank, item in enumerate(db.search_message_fts(
+                    query, limit=RECALL_LIMIT, origin_project=origin_project,
+                    restrict_project=(scope == "project"))):
+                event_id = item.get("event_id")
+                if event_id is None:
+                    continue
+                key = ("event", int(event_id))
+                if key in msg_rank:
+                    continue
+                msg_rank[key] = rank
+                if item.get("excerpt"):
+                    msg_excerpts[key] = item["excerpt"]
+        except Exception as exc:      # 老库/索引缺失不能让整条召回挂掉
+            base.log.warning("recall.message_fts_failed",
+                             error=type(exc).__name__)
+
+    keys = set(fts_rank) | set(vec_rank) | set(msg_rank)
     grouped: dict[str, list] = {}
     for kind, row_id in keys:
         grouped.setdefault(kind, []).append(row_id)
@@ -239,9 +260,12 @@ def _candidates(db: database.Database, query: str, origin_project: str | None,
                 score += 1.0 / (60 + fts_rank[(kind, row_id)])
             if (kind, row_id) in vec_rank:
                 score += 1.0 / (60 + vec_rank[(kind, row_id)])
+            if (kind, row_id) in msg_rank:
+                score += 1.0 / (60 + msg_rank[(kind, row_id)])
             found[(kind, row_id)] = {"row": row, "rel": score or 0.001,
                                      "assoc": 1.0,
-                                     "excerpt": excerpts.get((kind, row_id))}
+                                     "excerpt": (excerpts.get((kind, row_id))
+                                                 or msg_excerpts.get((kind, row_id)))}
 
     associated = 0
     for (kind, _row_id), entry in list(found.items()):

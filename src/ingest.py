@@ -549,6 +549,9 @@ class IngestWorker:
                     session_id=job["session_id"], message_id=msg_id,
                     owner=job.get("agent_id") or "", seq=seq,
                     occur_at=occur, created_at=now))
+                # 原文索引与正文同事务：摘要常漏掉编号/原话，这些细节要能搜到。
+                db.index_message_fts(job["session_id"], msg_id,
+                                     message.content)
         return inserted, duplicates, conflicts
 
     def _segment(self, db, job):

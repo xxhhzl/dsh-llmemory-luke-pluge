@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import math
+import struct
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Iterable
@@ -23,6 +24,10 @@ import database
 DEFAULT_ALPHA = 0.6
 DEFAULT_EXPLORE_RATIO = 0.1
 DEFAULT_MAX_PER_CLUSTER = 2
+DEFAULT_DEDUP_SIM = 0.85   # l3 之间余弦 ≥ 此值：判为同义，只留分高的
+                           # 实测（2026-11-09，148 条 cognition）：
+                           #   同义组两两 0.915–0.983；随机对 p99 仅 0.77
+                           # 取 0.85 既覆盖同义组，又几乎不误杀
 RECALL_LIMIT = 50
 MAX_ASSOCIATIONS = 20      # 联想扩展的总量上限（防止 50 次命中各触发一次查询）
 
@@ -154,6 +159,7 @@ def _meta(row, kind: str, extra: dict | None = None) -> dict:
         "confidence": getattr(row, "confidence", None),
         "origin_project": getattr(row, "origin_project", None),
         "use_count": _use_count(row, kind),
+        "created_at": getattr(row, "created_at", None),
     }
     if kind == "event":
         meta["session_id"] = row.session_id
@@ -177,6 +183,7 @@ def _weights() -> dict:
         "explore_ratio": float(search.get("explore_ratio", DEFAULT_EXPLORE_RATIO)),
         "max_per_cluster": int(search.get("max_per_cluster", DEFAULT_MAX_PER_CLUSTER)),
         "cross_project_penalty": float(search.get("cross_project_penalty", 0.0)),
+        "dedup_similarity": float(search.get("dedup_similarity", DEFAULT_DEDUP_SIM)),
     }
 
 
@@ -362,6 +369,7 @@ def _select(scored: list, limit: int, weights: dict) -> list:
 
     # 回填：簇上限只用来“别让同源条目刷屏”，不该让结果欠填。
     # 前面两轮被上限挡掉的候选，在还有空位时按分数补回来。
+    # 重复由 _dedup_semantic 在选完之后统一收掉，这里不做二次限制。
     if len(selected) < min(limit, len(scored)):
         for item in scored:
             if len(selected) >= limit:
@@ -372,6 +380,66 @@ def _select(scored: list, limit: int, weights: dict) -> list:
             selected.append(item)
             keys.add(key)
     return selected
+
+
+def _blob_to_vector(blob) -> list | None:
+    '''vec0 存的 float32 blob → 向量；长度不是 4 的倍数时返回 None。'''
+    if not blob or len(blob) % 4:
+        return None
+    return list(struct.unpack(f"<{len(blob) // 4}f", blob))
+
+
+def _cosine(a, b) -> float:
+    '''余弦相似度；任一侧接近零向量时返回 0。'''
+    if len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    if na <= 1e-12 or nb <= 1e-12:
+        return 0.0
+    return dot / (na * nb)
+
+
+def _dedup_semantic(db, selected: list, weights: dict) -> tuple:
+    '''
+    读取侧语义去重：只对 l3（经验 / 认知 / 洞见）。
+
+    同一件事常被不同事件抽成多条，字面完全不同、向量却几乎一样；
+    这里按分数从高到低保留第一条，其余丢弃，并把数量记进 `merged`。
+    事件不参与：两次相似的对话是两件事，合并会丢细节。
+    '''
+    threshold = float(weights.get("dedup_similarity", DEFAULT_DEDUP_SIM))
+    if threshold <= 0:
+        return selected, {}
+    if sum(1 for item in selected if item[1] != "event") < 2:
+        return selected, {}
+
+    vectors = {}
+    for kind in ("experience", "cognition", "insight"):
+        for ref_id, blob in db.list_vec_blobs(kind).items():
+            vector = _blob_to_vector(blob)
+            if vector is not None:
+                vectors[(kind, int(ref_id))] = vector
+
+    kept, merged = [], {}
+    for item in selected:
+        key = (item[1], item[2])
+        vector = vectors.get(key)
+        if vector is not None:
+            duplicate_of = None
+            for anchor in kept:
+                other = vectors.get((anchor[1], anchor[2]))
+                if other is None:
+                    continue
+                if _cosine(vector, other) >= threshold:
+                    duplicate_of = (anchor[1], anchor[2])
+                    break
+            if duplicate_of is not None:
+                merged[duplicate_of] = merged.get(duplicate_of, 0) + 1
+                continue
+        kept.append(item)
+    return kept, merged
 
 
 def search(db: database.Database, query: str, *, origin_project: str | None = None,
@@ -400,10 +468,14 @@ def search(db: database.Database, query: str, *, origin_project: str | None = No
         return []
     scored = _score(found, weights, origin_project)
     selected = _select(scored, limit, weights)
+    selected, merged_map = _dedup_semantic(db, selected, weights)
 
     hits = []
     for total, kind, row_id, record, assoc, excerpt in selected:
         meta = _meta(record, kind, {"assoc": assoc})
+        merged_count = merged_map.get((kind, row_id))
+        if merged_count:
+            meta["merged"] = merged_count
         if excerpt:
             # FTS 命中片段：确认「有没有聊到 X」通常不必再读全文。
             # 仅向量/联想召回的条目不伪造摘录。

@@ -226,7 +226,48 @@ class TestTools(RetrievalCase):
         frame = json.loads(q.recv())
         names = [item["name"] for item in frame["data"]]
         self.assertEqual(names, ["memory_search", "memory_get", "memory_recent",
-                                 "memory_report", "memory_self_write"])
+                                 "memory_report", "memory_feedback",
+                                 "memory_self_write", "memory_note"])
+
+
+class TestSemanticDedup(RetrievalCase):
+    def _vec(self, *head):
+        dim = self.db.vec_status().get("dim") or 0
+        if not dim:
+            self.skipTest("向量不可用")
+        values = [0.0] * dim
+        for index, value in enumerate(head):
+            values[index] = float(value)
+        return values
+
+    def test_same_meaning_collapses(self):
+        vector = self._vec(1.0)
+        for text in ("改插件要先说明风险", "动配置之前先讲清会写哪些文件",
+                     "装脚本前先报备风险与路径"):
+            item = self.add_cognition(text)
+            self.db.vec_upsert("cognition", item, vector)
+        hits = retrieval.search(self.db, "改插件", limit=10, touch=False)
+        kept = [hit for hit in hits if hit.kind == "cognition"]
+        self.assertEqual(len(kept), 1, "同义条目应折叠成一条")
+        self.assertGreaterEqual(kept[0].meta.get("merged", 0), 2)
+
+    def test_distinct_meaning_kept(self):
+        first = self.add_cognition("改插件要先说明风险")
+        self.db.vec_upsert("cognition", first, self._vec(1.0))
+        second = self.add_cognition("用户英文不好")
+        self.db.vec_upsert("cognition", second, self._vec(0.0, 1.0))
+        hits = retrieval.search(self.db, "用户", limit=10, touch=False)
+        kept = [hit for hit in hits if hit.kind == "cognition"]
+        self.assertEqual(len(kept), 2, "不同主题不该被折叠")
+
+    def test_events_are_not_deduped(self):
+        a = self.add_event("同一件事 A", "改插件")
+        b = self.add_event("同一件事 B", "改插件")
+        self.db.vec_upsert("event", a, self._vec(1.0))
+        self.db.vec_upsert("event", b, self._vec(1.0))
+        hits = retrieval.search(self.db, "改插件", limit=10, touch=False)
+        kept = [hit for hit in hits if hit.kind == "event"]
+        self.assertEqual(len(kept), 2, "事件不做语义去重")
 
 
 if __name__ == "__main__":

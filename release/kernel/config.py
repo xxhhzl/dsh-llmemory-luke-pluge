@@ -8,7 +8,7 @@ import time
 import base
 
 PROTOCOL_VERSION = "1.0" # 协议版本
-PLUGIN_VERSION = "0.4.2" # 插件版本
+PLUGIN_VERSION = "0.5.0" # 插件版本
 
 # 检查协议版本
 def is_format(protocol_version: str) -> bool:
@@ -134,6 +134,15 @@ DEFAULT_CONFIG = {
     "embedding": {
         "dim": 1024,                   # bge-m3 维度；换模型需重建向量表
     },
+    "recall": {
+        "enabled": True,               # 被动回想：每轮按当前对话捞几条相关记忆
+        "max_items": 2,                # 默认每轮注入条数
+        "max_items_strong": 5,         # 命中「上次/之前/昨晚」这类指代时放宽
+        "min_score": 0.55,             # 低于此分不注入
+        "query_messages": 4,           # 用最近几条消息拼检索语句
+        "query_chars": 500,            # 检索语句截断长度
+        "same_id_cooldown": 10,        # 同一会话内，同一条记忆多少轮内不重复注入
+    },
     "log": {"level": "info"},           # debug / info / warn / error
 }
 
@@ -155,6 +164,13 @@ _LEAF_SPEC = {
     "search.explore_ratio": {"type": float, "min": 0.0, "max": 1.0},
     "search.max_per_cluster": {"type": int, "min": 1, "max": 20},
     "search.cross_project_penalty": {"type": float, "min": 0.0, "max": 1.0},
+    "recall.enabled": {"type": bool},
+    "recall.max_items": {"type": int, "min": 0, "max": 20},
+    "recall.max_items_strong": {"type": int, "min": 0, "max": 20},
+    "recall.min_score": {"type": float, "min": 0.0, "max": 1.0},
+    "recall.query_messages": {"type": int, "min": 1, "max": 20},
+    "recall.query_chars": {"type": int, "min": 50, "max": 4000},
+    "recall.same_id_cooldown": {"type": int, "min": 0, "max": 100},
     "store.db_path": {"type": str, "min_len": 1},
     "store.busy_timeout_ms": {"type": int, "min": 0, "max": 600000},
     "store.queue_max": {"type": int, "min": 1, "max": 1000000},

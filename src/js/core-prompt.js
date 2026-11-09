@@ -10,6 +10,7 @@
 
 export const CORE_SECTION = 'dsh-longmemory:core'
 export const SELF_NOTES_CONTEXT = 'dsh-longmemory:self-notes'
+export const RECALL_CONTEXT = 'dsh-longmemory:recall'
 
 export class CorePrompt {
   /**
@@ -29,6 +30,9 @@ export class CorePrompt {
     this.version = ''
     this.notesText = ''
     this.notesVersion = ''
+    this.recallText = ''
+    this.recallVersion = ''
+    this.recallItems = []
     this.disposers = []
     this.attached = false
   }
@@ -59,6 +63,13 @@ export class CorePrompt {
         text: () => this.notesText,
         interpolate: false,
       }), 'longmemory.selfNotes.context'))
+      // 被动回想：每轮按当前对话捞几条相关记忆，排在自述之后（更靠近对话）
+      this.disposers.push(effect(() => prompt.context({
+        name: RECALL_CONTEXT,
+        order: this.contextOrder + 10,
+        text: () => this.recallText,
+        interpolate: false,
+      }), 'longmemory.recall.context'))
     } else {
       this.trace('systemPrompt.context unavailable: 自述不注入')
     }
@@ -75,6 +86,9 @@ export class CorePrompt {
       this.text = ''
       this.notesVersion = ''
       this.notesText = ''
+      this.recallVersion = ''
+      this.recallText = ''
+      this.recallItems = []
       return payload
     }
     if ((payload.version || '') !== this.version) {
@@ -86,6 +100,14 @@ export class CorePrompt {
       this.notesVersion = payload.notes_version || ''
       this.notesText = payload.notes_text || ''
       this.trace(`self notes updated version=${this.notesVersion} chars=${this.notesText.length}`)
+    }
+    // 召回每轮都可能变，不用版本号做闸门：文本相同就当没变
+    const recallText = payload.recall_text || ''
+    if (recallText !== this.recallText) {
+      this.recallVersion = payload.recall_version || ''
+      this.recallText = recallText
+      this.recallItems = payload.recall_items || []
+      this.trace(`recall updated items=${this.recallItems.length} chars=${recallText.length}`)
     }
     return payload
   }

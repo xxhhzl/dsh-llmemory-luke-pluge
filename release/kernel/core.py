@@ -25,14 +25,35 @@
 from __future__ import annotations
 
 import hashlib
+import threading
 from html import escape
 
 import base
 import config
 import database
 import frame
+import retrieval
 
 SELF_SOURCES = ("configured", "agent")
+
+# 「上次/之前」这类指代出现时，说明用户在回指旧事，召回放宽
+STRONG_HINTS = ("上次", "之前", "昨晚", "刚才", "那天", "前天", "最后一次",
+                "你忘了", "记不记得", "我们说过")
+
+# 会话 -> {turn, seen{(kind, id): turn}}；进程内，重启即重置
+_recall_state: dict = {}
+_recall_lock = threading.Lock()
+
+# 最近一次编译产出的召回条目：管理页只读它，不重算（重算会拨快冷却计数）
+_last_recall = {"text": "", "items": [], "session_id": None}
+
+
+def last_recall() -> dict:
+    '''最近一次召回的快照（只读）。'''
+    with _recall_lock:
+        return {"text": _last_recall["text"],
+                "items": [dict(item) for item in _last_recall["items"]],
+                "session_id": _last_recall["session_id"]}
 
 
 def _hash(text: str) -> str:
@@ -98,15 +119,107 @@ def _notes_text(rows) -> str:
             + "\n".join(items) + "\n</self_notes>")
 
 
-def compile_core(db: database.Database, cfg: dict | None = None) -> dict:
+def _recent_query(db, session_id: str | None, cfg: dict) -> str:
+    '''用最近几条消息拼检索语句：被动回想的输入就是「现在在聊什么」。'''
+    if not session_id:
+        return ""
+    messages = db.recent_messages(session_id, int(cfg.get("query_messages", 4)))
+    text = " ".join((message.content or "").strip() for message in messages)
+    return text[:int(cfg.get("query_chars", 500))]
+
+
+def _build_recall(db, session_id: str | None, query_hint: str | None) -> dict:
+    '''
+    被动回想：按当前对话捞几条相关记忆，组装 <recall> 块。
+
+    两条硬约束：
+    - `touch=False`：注入不算「被使用」，否则每轮都加热度，越召回越热；
+    - 冷却：同一条记忆在同一会话里 N 轮内不重复注入，避免看第二遍就当背景。
+    '''
+    cfg = config.get_config().get("recall", {}) or {}
+    empty = {"text": "", "items": []}
+    if not cfg.get("enabled", True):
+        return empty
+    # 外壳的 core.get 不带 session_id：退回「最近有消息的会话」，否则召回恒为空
+    if not session_id:
+        try:
+            session_id = db.latest_session_id()
+        except Exception:
+            session_id = None
+    query = (query_hint or "").strip() or _recent_query(db, session_id, cfg)
+    if not query:
+        return empty
+
+    limit = int(cfg.get("max_items", 2))
+    if any(word in query for word in STRONG_HINTS):
+        limit = int(cfg.get("max_items_strong", 5))
+    if limit <= 0:
+        return empty
+    min_score = float(cfg.get("min_score", 0.55))
+    cooldown = int(cfg.get("same_id_cooldown", 10))
+
+    key = session_id or ""
+    with _recall_lock:
+        state = _recall_state.setdefault(key, {"turn": 0, "seen": {}})
+        state["turn"] += 1
+        turn = state["turn"]
+
+    try:
+        hits = retrieval.search(db, query, limit=limit, scope="all", touch=False)
+    except Exception as exc:                      # 召回失败不能拖垮上下文编译
+        base.log.warning("recall.search_failed", error=type(exc).__name__)
+        return empty
+
+    # 先按分数取前 limit 条，再滤冷却：宁可不注入，也不拿低分条目硬凑
+    candidates = [hit for hit in hits if hit.score >= min_score][:limit]
+    picked = []
+    with _recall_lock:
+        state = _recall_state.setdefault(key, {"turn": turn, "seen": {}})
+        for hit in candidates:
+            mark = (hit.kind, hit.id)
+            last = state["seen"].get(mark)
+            if last is not None and turn - last < cooldown:
+                continue
+            state["seen"][mark] = turn
+            picked.append(hit)
+        if len(state["seen"]) > 500:              # 防止长期运行无限增长
+            cutoff = turn - cooldown
+            state["seen"] = {k: v for k, v in state["seen"].items() if v > cutoff}
+
+    if not picked:
+        return empty
+
+    lines = ['<recall note="回忆，可能过时；与现场证据冲突时以现场为准">']
+    items = []
+    for hit in picked:
+        stamp = str(hit.meta.get("created_at") or "")[:10]
+        # 注入的是线索不是全文：每条截断，避免一条长摘要吃掉上下文
+        brief = (hit.text or "").strip().replace("\n", " ")[:160]
+        lines.append(f'  <item kind="{_escape(hit.kind)}" id="{hit.id}" '
+                     f'ts="{stamp}">{_escape(brief)}</item>')
+        items.append({"kind": hit.kind, "id": hit.id, "text": brief,
+                      "score": round(hit.score, 4), "created_at": stamp})
+    lines.append("</recall>")
+    with _recall_lock:
+        _last_recall["text"] = "\n".join(lines)
+        _last_recall["items"] = list(items)
+        _last_recall["session_id"] = session_id
+    return {"text": "\n".join(lines), "items": items}
+
+
+def compile_core(db: database.Database, cfg: dict | None = None,
+                 session_id: str | None = None,
+                 query_hint: str | None = None) -> dict:
     '''编译注入文本；返回 {enabled, version, text, notes_version, notes_text, stats}。'''
     core_cfg = cfg if cfg is not None else config.get_config().get("core", {})
     enabled = bool(core_cfg.get("enabled", True))
     if not enabled:
         return {"enabled": False, "version": "", "text": "",
                 "notes_version": "", "notes_text": "",
+                "recall_version": "", "recall_text": "", "recall_items": [],
                 "stats": {"self_configured": 0, "self_notes": 0,
-                          "insight": 0, "experience": 0, "cognition": 0}}
+                          "insight": 0, "experience": 0, "cognition": 0,
+                          "recall": 0}}
 
     budget = int(core_cfg.get("max_chars", 2000))
     configured = db.list_self_memory(
@@ -138,15 +251,20 @@ def compile_core(db: database.Database, cfg: dict | None = None) -> dict:
 
     text, stats = _build_text(configured, insights, experiences, cognitions, budget)
     notes_text = _notes_text(notes)
+    recall = _build_recall(db, session_id, query_hint)
     return {
         "enabled": True,
         "version": _hash(text) if text else "",
         "text": text,
         "notes_version": _hash(notes_text) if notes_text else "",
         "notes_text": notes_text,
+        "recall_version": _hash(recall["text"]) if recall["text"] else "",
+        "recall_text": recall["text"],
+        "recall_items": recall["items"],
         "stats": {"self_configured": stats["self"], "self_notes": len(notes),
                   "insight": stats["insight"], "experience": stats["experience"],
-                  "cognition": stats["cognition"]},
+                  "cognition": stats["cognition"],
+                  "recall": len(recall["items"])},
     }
 
 
@@ -155,5 +273,6 @@ def get_core(data, q: base.message_queue, db=None):
     if db is None:
         import tools                                # 复用共享连接（勿关闭）
         db = tools._db()
-    payload = compile_core(db)
+    payload = compile_core(db, session_id=data.get("session_id"),
+                           query_hint=data.get("query_hint"))
     frame.push(q, data, "core", payload)

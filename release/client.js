@@ -66,6 +66,26 @@ window.__ModuleLoader__.load({
   padding: 6px 2px 8px; color: var(--lm-text-dim); white-space: nowrap; }
 .lm-btn--tab:hover:not(:disabled) { background: transparent; color: var(--lm-text); }
 .lm-btn--tab[data-active="true"] { color: var(--lm-text); border-bottom-color: var(--lm-accent); }
+/* 胶囊 chip：与会话头部的「标准模式」同形（细边、圆角、小字号） */
+.lm-chip {
+  font: inherit; font-size: 12px; line-height: 1; cursor: pointer;
+  padding: 4px 10px; border-radius: 999px;
+  border: .5px solid var(--lm-border); background: transparent;
+  color: var(--lm-text-dim);
+  transition: background-color .12s ease, color .12s ease;
+}
+.lm-chip:hover { background: var(--lm-surface-2); color: var(--lm-text); }
+.lm-recall { position: relative; display: inline-flex; }
+.lm-recall__pop {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 30;
+  width: 320px; max-height: 300px; overflow: auto; padding: 8px;
+  border-radius: 8px; border: .5px solid var(--lm-border);
+  background: var(--lm-surface); color: var(--lm-text);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .18);
+}
+.lm-recall__row + .lm-recall__row { margin-top: 6px; }
+.lm-recall__head { font-size: 11px; color: var(--lm-text-dim); }
+.lm-recall__text { font-size: 12px; line-height: 1.5; }
 .lm-input, .lm-select, .lm-textarea {
   font: inherit; font-size: 13px; padding: 5px 8px; min-width: 0;
   border-radius: 6px; border: .5px solid var(--lm-border);
@@ -651,6 +671,7 @@ window.__ModuleLoader__.load({
 
     const BROWSER_KIND = 'longmemory-browser'
     const BROWSER_ID = 'longmemory-browser'
+    const RECALL_ID = 'longmemory-recall'
     const BROWSER_TABLES = [
       ['event', '事件'], ['experience', '经验'], ['cognition', '认知'], ['insight', '洞见'],
     ]
@@ -765,6 +786,47 @@ window.__ModuleLoader__.load({
 
     function MemoryHeaderButton({ open } = {}) {
       return Btn({ title: '打开长期记忆', onClick: () => open?.() }, '记忆')
+    }
+
+    /**
+     * 本轮召回 chip：显示「回忆 N」，点开列条目。
+     *
+     * 只读内核缓存的快照（recall.preview），不重算检索——重算会把冷却计数拨快，
+     * 让真正该召回的记忆被提前跳过。
+     */
+    function RecallChip() {
+      const [items, setItems] = React.useState([])
+      const [open, setOpen] = React.useState(false)
+      React.useEffect(() => {
+        let alive = true
+        const load = async () => {
+          try {
+            const result = await callApi({ op: 'recall.preview' })
+            if (alive) setItems(result?.items ?? [])
+          } catch {
+            /* 内核没起来时安静：chip 不显示即可 */
+          }
+        }
+        void load()
+        const timer = setInterval(load, 5000)
+        return () => { alive = false; clearInterval(timer) }
+      }, [])
+      if (!items.length) return null
+      return h('div', { className: 'lm-recall' },
+        h('button', {
+          type: 'button',
+          className: 'lm-chip',
+          title: '本轮召回的长期记忆（点击展开）',
+          onClick: () => setOpen(value => !value),
+        }, `回忆 ${items.length}`),
+        open && h('div', { className: 'lm-recall__pop' },
+          items.map(item => h('div', {
+            key: `${item.kind}:${item.id}`,
+            className: 'lm-recall__row',
+          },
+            h('div', { className: 'lm-recall__head' },
+              `${item.kind} #${item.id}${item.created_at ? ` · ${item.created_at}` : ''}`),
+            h('div', { className: 'lm-recall__text' }, item.text)))))
     }
 
     const SELF_KINDS = [
@@ -1319,6 +1381,14 @@ window.__ModuleLoader__.load({
           label: () => '长期记忆',
           inject: () => ({ open: openBrowser }),
         }, MemoryHeaderButton))
+        // 召回 chip 紧跟在「记忆」右边，与「标准模式」同一种胶囊样式
+        ctx.slots.inject('conversation.session.header.utilities', () => ctx.slots.register({
+          name: 'conversation.session.header.utilities',
+          id: RECALL_ID,
+          order: 31,
+          label: () => '回忆',
+          inject: () => ({}),
+        }, RecallChip))
       },
     }
   },

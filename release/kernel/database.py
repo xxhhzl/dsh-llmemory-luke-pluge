@@ -96,7 +96,8 @@ CREATE TABLE IF NOT EXISTS experience (
   status          TEXT    NOT NULL DEFAULT 'active',  -- active / superseded / invalid
   superseded_id   INTEGER,
   valid_to        TEXT,
-  invalid_reason  TEXT
+  invalid_reason  TEXT,
+  feedback_score  INTEGER NOT NULL DEFAULT 0   -- 反馈分：useless 累计降权，不删条目
 );
 
 -- 认知（语义记忆）：是什么
@@ -117,7 +118,8 @@ CREATE TABLE IF NOT EXISTS cognition (
   status          TEXT    NOT NULL DEFAULT 'active',
   superseded_id   INTEGER,
   valid_to        TEXT,
-  invalid_reason  TEXT
+  invalid_reason  TEXT,
+  feedback_score  INTEGER NOT NULL DEFAULT 0   -- 反馈分：useless 累计降权，不删条目
 );
 
 -- 洞见（归纳层）：由多条经验归纳出的通用规则，证据链在 source_experience_ids
@@ -137,7 +139,8 @@ CREATE TABLE IF NOT EXISTS insight (
   status               TEXT    NOT NULL DEFAULT 'active',
   superseded_id        INTEGER,
   valid_to             TEXT,
-  invalid_reason       TEXT
+  invalid_reason       TEXT,
+  feedback_score       INTEGER NOT NULL DEFAULT 0
 );
 
 -- 自我认知：configured（设置，进系统提示词）/ agent（自己写，进动态上下文）
@@ -821,11 +824,22 @@ class Database:
                 "ALTER TABLE experience ADD COLUMN scope TEXT NOT NULL DEFAULT 'project'")
             self._conn.execute(
                 "UPDATE experience SET scope = 'global' WHERE origin_project IS NULL")
+        self._ensure_l3_feedback_column()
         self._ensure_supersede_indexes()
         self._ensure_fts_scope_columns()
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
         if version < 1:
             self._normalize_timestamps()
+
+    def _ensure_l3_feedback_column(self):
+        '''l3 三张表补 feedback_score（老库）：反馈分用于降权，不删条目。'''
+        for table in ("experience", "cognition", "insight"):
+            columns = {row["name"] for row in self._conn.execute(
+                f"PRAGMA table_info({table})")}
+            if "feedback_score" not in columns:
+                self._conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN feedback_score "
+                    f"INTEGER NOT NULL DEFAULT 0")
 
     def _ensure_supersede_indexes(self):
         '''
@@ -1228,6 +1242,21 @@ class Database:
                 "SELECT * FROM message WHERE session_id = ? AND seq > ? "
                 "ORDER BY seq LIMIT ?", (session_id, after_seq, limit)).fetchall()
         return [Message.from_row(row) for row in rows]
+
+    def latest_session_id(self) -> str | None:
+        '''最近有消息的会话 id：外壳没带 session_id 时用它兜底。'''
+        row = self._conn.execute(
+            "SELECT session_id FROM message ORDER BY rowid DESC LIMIT 1").fetchone()
+        return row["session_id"] if row else None
+
+    def recent_messages(self, session_id: str, limit: int = 4) -> list[Message]:
+        '''取会话最近 N 条消息：先按 seq 倒序取，再翻回时间顺序。'''
+        if not session_id or limit <= 0:
+            return []
+        rows = self._conn.execute(
+            "SELECT * FROM message WHERE session_id = ? "
+            "ORDER BY seq DESC LIMIT ?", (session_id, int(limit))).fetchall()
+        return [Message.from_row(row) for row in reversed(rows)]
 
     def list_event_messages(self, event_id: int) -> list[Message]:
         '''取事件关联的全部消息，按 seq 升序（即事件正文）。'''
@@ -1781,6 +1810,20 @@ class Database:
         rows = fts(" AND ".join(quoted)) if quoted else []
         if not rows and len(quoted) > 1:
             rows = fts(" OR ".join(quoted))
+        longest = max(tokens, key=len) if tokens else ""
+        if not rows and len(longest) >= 6:
+            # 中文长句没有空格：整句当短语时，trigram 要求每三个字都连续出现，
+            # 自然语言查询因此必然召回 0（「装插件之前要先说明吗」对不上
+            # 「装插件之前先说明会改哪些文件」）。退化为 trigram OR，先保证能召回。
+            grams, seen_grams = [], set()
+            for index in range(len(longest) - 2):
+                gram = longest[index:index + 3]
+                if gram in seen_grams:
+                    continue
+                seen_grams.add(gram)
+                grams.append('"' + gram.replace('"', '""') + '"')
+            if grams:
+                rows = fts(" OR ".join(grams[:16]))
         if not rows:
             rows = like(mode_and=True)
         if not rows and len(tokens) > 1:

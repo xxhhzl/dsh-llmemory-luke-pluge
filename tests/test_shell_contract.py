@@ -127,10 +127,11 @@ class TestStartupSequence(ShellContractCase):
     def test_tools_schema_shape(self):
         frame = self.kernel.request("tools.schema", {})
         schemas = frame["data"]
-        self.assertEqual(len(schemas), 5)
+        self.assertEqual(len(schemas), 7)
         by_name = {item["name"]: item for item in schemas}
         self.assertEqual(set(by_name), {"memory_search", "memory_get", "memory_recent",
-                                        "memory_report", "memory_self_write"})
+                                        "memory_report", "memory_feedback",
+                                        "memory_self_write", "memory_note"})
         for item in schemas:
             self.assertIn("description", item)
             params = item["parameters"]

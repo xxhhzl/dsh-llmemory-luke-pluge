@@ -681,6 +681,8 @@ _OPS = {
     "event.resummarize": event_resummarize,
     "insight.induce": insight_induce,
     "core.preview": lambda db, data: core.compile_core(db),
+    # 管理页的 chip 只读最近一次召回的快照：重算会拨快冷却计数
+    "recall.preview": lambda db, data: core.last_recall(),
 }
 
 

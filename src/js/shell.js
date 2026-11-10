@@ -179,12 +179,17 @@ export function createShell(ctx, config = {}, {
   /**
    * 内核退出看护：按退避重启。工具/命令/路由都持有同一个 kernel 对象，
    * 重启后不需要重新注册；用尽预算就停在“未运行”，日志里留痕。
+   * 重启后必须重新补投：待确认批次和上次没发出的缓冲都还等着。
    */
   const restarter = createRestartPolicy({
     delays: Array.isArray(restartDelays) && restartDelays.length
       ? restartDelays : DEFAULT_RESTART_DELAYS,
     trace,
-    restart: connect,
+    restart: async () => {
+      await connect()
+      subscribeKernelFrames()
+      await resumeDelivery()
+    },
   })
 
   const onKernelExit = info => {
@@ -236,6 +241,34 @@ export function createShell(ctx, config = {}, {
     })
   }
 
+  /**
+   * frame 监听只挂一次：它挂在 kernel 对象上，重启后仍然有效。
+   * 重复注册会让同一帧被处理两遍。
+   */
+  let framesSubscribed = false
+  const subscribeKernelFrames = () => {
+    if (framesSubscribed) return
+    framesSubscribed = true
+    kernel.on('frame', onKernelFrame)
+  }
+
+  /**
+   * 把「没等到落库确认的批次」和「还没发出去的缓冲」补投出去。
+   * 首启与内核自动重启共用：只 connect 不补投，重启就白重启了。
+   */
+  const resumeDelivery = async () => {
+    try {
+      await bridge.resumePending()
+    } catch (error) {
+      trace(`resume pending failed: ${error?.message ?? error}`)
+    }
+    try {
+      await bridge.flushAll()
+    } catch (error) {
+      trace(`flush restored buffers failed: ${error?.message ?? error}`)
+    }
+  }
+
   const start = async () => {
     if (disposed) return { tools: 0 }     // 已被卸载：别再起进程
     trace(`start (kernel=${script})`)
@@ -262,19 +295,8 @@ export function createShell(ctx, config = {}, {
     bridge.attach()
     // **先订阅**再补投：补投的 ingest.completed 可能马上就回来，
     // 订阅晚一步这条确认就丢了，待确认队列会一直留着这批消息。
-    kernel.on('frame', onKernelFrame)
-    // 上次没等到 completed 的批次补投：内核按 msg_id 判重，重发安全
-    try {
-      await bridge.resumePending()
-    } catch (error) {
-      trace(`resume pending failed: ${error?.message ?? error}`)
-    }
-    // 上次来不及发出去的去抖缓冲（被强杀时保存在磁盘）继续投递
-    try {
-      await bridge.flushAll()
-    } catch (error) {
-      trace(`flush restored buffers failed: ${error?.message ?? error}`)
-    }
+    subscribeKernelFrames()
+    await resumeDelivery()
     // 附加能力（命令 / 统计路由）各自隔离：任一失败都不影响工具与会话投递
     for (const [label, register] of [
       ['command:/memory', () => registerMemoryCommand(ctx, {

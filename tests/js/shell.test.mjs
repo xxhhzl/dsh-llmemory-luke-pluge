@@ -34,10 +34,14 @@ function fakeKernel() {
       kernel.process = null
     },
     send(type) { calls.push(`send:${type}`) },
-    request(type) {
+    request(type, data) {
       calls.push(`req:${type}`)
       if (type === 'health') return Promise.resolve({ ok: true })
       if (type === 'tools.schema') return Promise.resolve([])
+      if (type === 'ingest.request') {
+        // 回显外壳带来的 job_id：与真实内核一致（外壳登记先于发送）
+        return Promise.resolve({ accepted: true, job_id: data?.job_id })
+      }
       return Promise.resolve({})
     },
     on(event, handler) { bus.on(event, handler); return kernel },
@@ -147,6 +151,37 @@ test('dispose 之后不再响应内核退出（不重启）', async () => {
   kernel.emit('exit', { code: 1, signal: null })
   await sleep(40)
   assert.equal(kernel.calls.filter(item => item === 'start').length, 1)
+})
+
+test('内核自动重启后要补投待确认任务', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'lm-restart-'))
+  const pendingPath = path.join(dir, 'pending.json')
+  await writeFile(pendingPath, JSON.stringify({
+    version: 2,
+    pending: [{
+      job_id: 'job_old', sessionId: 's1',
+      messages: [{ msg_id: 'm1', seq: 3, role: 'user', content: 'a' }],
+    }],
+    unsent: {},
+  }))
+
+  const { shell, kernel } = makeShell({}, {
+    dbPath: path.join(dir, 'memory.db'), pendingPath,
+  })
+  try {
+    await shell.start()
+    const delivered = () => kernel.calls.filter(item => item === 'req:ingest.request').length
+    const before = delivered()
+
+    kernel.emit('exit', { code: 1, signal: null })   // 内核退出，看护策略自动拉起
+    await sleep(120)
+
+    assert.ok(delivered() > before, '重启后必须补投，只重连会把消息留在队列里')
+    assert.equal(kernel.listeners('frame'), 1, '重启不能重复注册 frame 监听')
+  } finally {
+    await shell.dispose()
+    await rm(dir, { recursive: true, force: true })
+  }
 })
 
 test('先订阅完成帧再补投：补投期间的 completed 不能丢', async () => {

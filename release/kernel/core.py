@@ -229,6 +229,41 @@ def _build_recall(db, session_id: str | None, query_hint: str | None,
     return finish("\n".join(lines), items)
 
 
+def _release_recall_state(session_id: str | None) -> int:
+    '''
+    撤回「本轮算过、但没被用上」的召回标记。
+
+    外壳在 pre-step 等待超时时调用：那一轮提示词用的是上一轮快照，这批召回
+    并没有真的呈现给模型，不该白占一段冷却。
+
+    :return: 清掉的标记数
+    '''
+    key = (session_id or "").strip()
+    if not key:
+        return 0
+    with _recall_lock:
+        state = _recall_state.get(key)
+        if not state:
+            return 0
+        turn = int(state.get("turn", 0) or 0)
+        before = len(state["seen"])
+        # 本轮（turn）标记过的条目退回「没见过」；更早轮次的不动
+        state["seen"] = {mark: value for mark, value in state["seen"].items()
+                         if value != turn}
+        if turn > 0:
+            state["turn"] = turn - 1
+        return before - len(state["seen"])
+
+
+def release_recall(data, q: base.message_queue):
+    '''协议入口：撤掉超时未消费的召回冷却（外壳 pre-step 超时后调用）。'''
+    payload = data.get("data") or {}
+    session_id = payload.get("session_id") or data.get("session_id")
+    released = _release_recall_state(session_id)
+    frame.push(q, data, "core.released",
+               {"session_id": session_id or "", "released": released})
+
+
 def compile_core(db: database.Database, cfg: dict | None = None,
                  session_id: str | None = None,
                  query_hint: str | None = None,

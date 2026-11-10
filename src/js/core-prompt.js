@@ -173,13 +173,19 @@ export class CorePrompt {
             queryVector,
           })
         })()
-        await Promise.race([
-          work,
+        const timedOut = await Promise.race([
+          work.then(() => false),
           new Promise(resolve => {
-            const timer = setTimeout(resolve, this.recallWaitMs)
+            const timer = setTimeout(() => resolve(true), this.recallWaitMs)
             timer.unref?.()
           }),
         ])
+        if (timedOut) {
+          // 本轮提示词用的是上一轮快照，这批召回并没有真的呈现给模型；
+          // 让内核撤回冷却，否则它们白占一段冷却、下一轮也召不回。
+          this.kernel.request('core.release', { session_id: sessionId },
+            { timeoutMs: 2000, sessionId }).catch(() => {})
+        }
       } catch (error) {
         this.trace(`recall pre-step failed: ${error?.message ?? error}`)
       }

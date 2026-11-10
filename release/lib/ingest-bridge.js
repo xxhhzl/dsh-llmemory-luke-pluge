@@ -14,6 +14,8 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
+import { redactMessages } from './redact.js'
+
 const SURFACE = new Map([
   ['user/message', 'user'],
   ['assistant/message', 'assistant'],
@@ -44,7 +46,7 @@ export function contentToText(message) {
 export class IngestBridge {
   constructor(ctx, kernel, {
     agentId = '', debounceMs = 2500, timeoutMs = 60_000, logger = console,
-    trace = () => {}, pendingPath = '',
+    trace = () => {}, pendingPath = '', maxRetries = 5, retryBaseMs = 1000,
   } = {}) {
     this.trace = trace;
     this.ctx = ctx
@@ -52,6 +54,8 @@ export class IngestBridge {
     this.agentId = agentId
     this.debounceMs = Math.max(200, Number(debounceMs) || 2500)
     this.timeoutMs = timeoutMs
+    this.maxRetries = Math.max(0, Number(maxRetries) || 0)
+    this.retryBaseMs = Math.max(50, Number(retryBaseMs) || 1000)
     this.logger = logger
     this.buffers = new Map()   // sessionId -> { messages: [], lastSeq: null, timer }
     // job_id -> { sessionId, messages }：已回执、尚未收到 completed
@@ -130,10 +134,14 @@ export class IngestBridge {
   async flush(sessionId) {
     const buffer = this.buffers.get(sessionId)
     if (!buffer || buffer.messages.length === 0) return null
+    // 同一会话不并发冲刷：两次 flush 会把同一批消息发两遍
+    if (buffer.flushing) return null
+    buffer.flushing = true
     const messages = buffer.messages.splice(0, buffer.messages.length)
     this.trace?.(`flush session=${sessionId} n=${messages.length}`)
     try {
       const result = await this.#deliver(sessionId, messages)
+      buffer.retry = 0
       this._saveQueue()
       this.trace?.(`flush ok session=${sessionId} accepted=${result?.accepted}`)
       return result
@@ -142,25 +150,71 @@ export class IngestBridge {
       // 否则一次超时就永久丢消息（内核按 msg_id 去重，重发是安全的）。
       buffer.messages.unshift(...messages)
       this._saveQueue()
+      this.#scheduleRetry(sessionId, buffer)
       this.trace?.(`flush retry session=${sessionId} n=${messages.length}: ${error?.message ?? error}`)
       throw error
+    } finally {
+      buffer.flushing = false
     }
   }
 
   /**
+   * 投递失败后的退避重试：不重设定时器的话，这批消息要等新事件、
+   * 显式冲刷或重启才会再发，等于「把消息放着不管」。
+   */
+  #scheduleRetry(sessionId, buffer) {
+    buffer.retry = (buffer.retry || 0) + 1
+    if (buffer.retry > this.maxRetries) {
+      this.logger.warn(`[longmemory] 投递重试已达上限(${sessionId})，等下次事件或重启再试`)
+      return
+    }
+    if (buffer.timer) clearTimeout(buffer.timer)
+    const delay = Math.min(30_000, this.retryBaseMs * 2 ** (buffer.retry - 1))
+    buffer.timer = setTimeout(() => {
+      buffer.timer = null
+      this.flush(sessionId).catch(error => {
+        this.logger.warn(`[longmemory] 重试投递失败(${sessionId}): ${error.message}`)
+      })
+    }, delay)
+    buffer.timer.unref?.()
+    this.trace?.(`retry scheduled session=${sessionId} attempt=${buffer.retry} delay=${delay}`)
+  }
+
+  /**
    * 发一次 ingest.request。
-   * 回执 accepted 时把这批消息记为待确认——回执不等于落库。
+   *
+   * 任务 id 由**外壳**生成，并在发送**之前**登记为待确认：回执与完成帧的
+   * 到达顺序没有保证（内核可能先推 completed 再让回执 resolve），等回执
+   * 回来才登记会让早到的完成帧扑空，任务永久留在队列里。
    */
   async #deliver(sessionId, messages) {
-    const result = await this.kernel.request('ingest.request', {
-      messages,
-      cursor: { last_seq: messages[0].seq - 1 },
-    }, { sessionId, agentId: this.agentId, timeoutMs: this.timeoutMs })
-    if (result?.accepted && result?.job_id) {
-      this.pending.set(result.job_id, { sessionId, messages })
+    const jobId = this.#nextJobId()
+    this.pending.set(jobId, { sessionId, messages })
+    this._saveQueue()
+    try {
+      const result = await this.kernel.request('ingest.request', {
+        job_id: jobId,
+        messages,
+        cursor: { last_seq: messages[0].seq - 1 },
+      }, { sessionId, agentId: this.agentId, timeoutMs: this.timeoutMs })
+      if (!result?.accepted) {
+        // 没有新消息：内核不会推 completed，自己撤掉登记
+        this.pending.delete(jobId)
+        this._saveQueue()
+      }
+      return result
+    } catch (error) {
+      // 请求失败：撤掉登记，消息由 flush 放回缓冲后再重投
+      this.pending.delete(jobId)
       this._saveQueue()
+      throw error
     }
-    return result
+  }
+
+  /** 外壳侧的任务 id：进程内单调递增，便于重投时换新号。 */
+  #nextJobId() {
+    this._jobSeq = (this._jobSeq || 0) + 1
+    return `job_${Date.now().toString(36)}_${this._jobSeq}`
   }
 
   /** 内核确认已落库（ingest.completed）：从待确认队列移除。 */
@@ -236,12 +290,17 @@ export class IngestBridge {
     const unsent = {}
     for (const [sessionId, buffer] of this.buffers) {
       if (!buffer.messages.length) continue
-      unsent[sessionId] = { messages: buffer.messages, lastSeq: buffer.lastSeq }
+      // 落盘前脱敏：队列是磁盘明文副本，内核的脱敏要到入库才发生。
+      // 投递时用的是脱敏内容，内核再脱敏一次是幂等的，落库结果不变。
+      unsent[sessionId] = {
+        messages: redactMessages(buffer.messages), lastSeq: buffer.lastSeq,
+      }
     }
     const payload = {
       version: 2,
       pending: [...this.pending.entries()].map(([jobId, item]) => ({
-        job_id: jobId, sessionId: item.sessionId, messages: item.messages,
+        job_id: jobId, sessionId: item.sessionId,
+        messages: redactMessages(item.messages),
       })),
       unsent,
     }

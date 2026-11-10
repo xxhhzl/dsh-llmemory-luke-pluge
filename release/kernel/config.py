@@ -8,7 +8,7 @@ import time
 import base
 
 PROTOCOL_VERSION = "1.0" # 协议版本
-PLUGIN_VERSION = "0.5.4" # 插件版本
+PLUGIN_VERSION = "0.5.5" # 插件版本
 
 # 检查协议版本
 def is_format(protocol_version: str) -> bool:
@@ -28,7 +28,7 @@ FrameType = Literal[
     "llm.request", "llm.result",
     "embed.request", "embed.result",
     "error", "config.set", "config.get", "health", "shutdown", "stats", "admin",
-    "core.get", "core", "settings.raw",
+    "core.get", "core", "core.release", "core.released", "settings.raw",
 ]
 
 class Link_Json(BaseModel):

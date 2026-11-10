@@ -837,7 +837,10 @@ def ingest_request(data, q):
 
     new_messages = list(messages) if payload.get("full") else [
         item for item in messages if seq_of(item) > last_seq]
-    job_id = data.get("job_id") or f"job_{uuid.uuid4().hex[:8]}"
+    # 外壳会在发送前生成 job_id 并登记待确认：内核必须沿用它，
+    # 否则完成帧里的 id 与外壳登记的对不上，补投对账会失效。
+    job_id = (payload.get("job_id") or data.get("job_id")
+              or f"job_{uuid.uuid4().hex[:8]}")
     envelope = dict(data)
     envelope["job_id"] = job_id
 

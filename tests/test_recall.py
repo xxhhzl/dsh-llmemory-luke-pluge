@@ -2,6 +2,7 @@
 """被动回想（src/core.py 的 _build_recall）：注入、不加热度、冷却、可关闭。"""
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 import unittest
@@ -12,6 +13,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import base
 import config
 import core
 import database
@@ -138,6 +140,30 @@ class TestRecall(RecallCase):
             after = core.last_recall()
         self.assertTrue(payload["recall_skipped"])
         self.assertEqual(after, before)
+
+    def test_release_undoes_unconsumed_cooldown(self):
+        '''超时未消费的召回：释放后下一轮还能再召回，不白占冷却。'''
+        self._seed()
+        with self._with_recall():
+            first = core.compile_core(self.db, session_id=S1)
+            self.assertTrue(first["recall_items"])
+            released = core._release_recall_state(S1)
+            self.assertGreaterEqual(released, 1, "本轮标记应被撤掉")
+            second = core.compile_core(self.db, session_id=S1)
+        self.assertTrue(second["recall_items"], "释放后下一轮应能再召回同一条")
+
+    def test_release_frame_entry(self):
+        '''协议入口：外壳超时后按帧调用。'''
+        self._seed()
+        with self._with_recall():
+            core.compile_core(self.db, session_id=S1)
+            q = base.message_queue()
+            core.release_recall({"type": "core.release", "request_id": "r",
+                                 "data": {"session_id": S1}}, q)
+            frame = json.loads(q.recv())
+        self.assertEqual(frame["type"], "core.released")
+        self.assertEqual(frame["data"]["session_id"], S1)
+        self.assertGreaterEqual(frame["data"]["released"], 1)
 
     def test_query_vector_reaches_retrieval(self):
         '''外壳算好的向量必须真的交给检索层，否则被动召回仍只走字面命中。'''

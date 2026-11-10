@@ -57,6 +57,7 @@
 | `config.get` | 上（请求）/ 下（应答） | 读回当前生效配置与版本号，供面板显示与排障 | 请求：`{}`；应答：配置树 + `revision` | 外壳打开设置页或排障 |
 | `health` | 上（请求）/ 下（应答） | 探活，外壳据此判断内核是否存活或卡死 | 请求：`{}`；应答：`ok` / `revision` / `queue_depth` | 外壳定期探活 |
 | `core.get` | 上（请求）/ 下（应答） | 取核心记忆编译结果：系统提示词段（`<long_term_memory>`）与自述快照（`<self_notes>`） | 请求：`{}`；应答：`version` / `text` / `notes_version` / `notes_text` / `stats` | 外壳启动、内核重启、`ingest.completed` 后刷新 |
+| `core.release` | 上（请求）/ 下（应答） | 撤回「算过但没被用上」的召回冷却（pre-step 等待超时后调用），下一轮还能再召回 | 请求：`session_id`；应答：`session_id` / `released` | 外壳召回等待超时 |
 | `shutdown` | 上 | 请求优雅退出，给在途任务一个排空窗口（`drain_ms`） | `{"drain_ms": 3000}` | 用户退出 |
 
 ---

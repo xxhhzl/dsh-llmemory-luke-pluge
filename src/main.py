@@ -45,6 +45,8 @@ def routo_init(routo_table: routo.routo_register):
     routo_table.register("health", base.health)
     routo_table.register("stats", tools.stats)
     routo_table.register("core.get", core.get_core)
+    # 召回等待超时：外壳撤掉这一轮的冷却，下一轮还能再召回
+    routo_table.register("core.release", core.release_recall)
     routo_table.register("admin", admin.admin)
     routo_table.register("shutdown", base.shutdown)
     # 写入链路：立即回执，后台 worker 切分/摘要/落库

@@ -12,10 +12,12 @@ import unittest
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import base
+import config
 import retrieval
 import tools
 from database import Cognition, Database, Experience
@@ -121,12 +123,21 @@ class TestSearch(RetrievalCase):
                     (event, row.id))
         return event
 
+    def _with_search(self, **overrides):
+        '''钉住检索权重：探索位等配置漂移会让「簇上限」用例变得不稳定。'''
+        current = config.get_config()
+        search = {**current.get("search", {}), **overrides}
+        return mock.patch.object(config, "get_config",
+                                 return_value={**current, "search": search})
+
     def test_cluster_cap_keeps_diversity(self):
         # 同一事件有 6 条经验，另有 6 条独立认知：limit=6 时不能全被这一簇占满
         self._same_cluster_experiences(6)
         for index in range(6):
             self.add_cognition(f"drawio 认知 {index}", subject="用户")
-        hits = retrieval.search(self.db, "drawio", limit=6, touch=False)
+        with self._with_search(max_per_cluster=2, explore_ratio=0.0,
+                               dedup_similarity=0.0):
+            hits = retrieval.search(self.db, "drawio", limit=6, touch=False)
         self.assertLessEqual(len([h for h in hits if h.kind == "experience"]), 2,
                              "簇上限保证多样性")
         self.assertEqual(len(hits), 6, "但也不该欠填")
@@ -134,7 +145,9 @@ class TestSearch(RetrievalCase):
     def test_cluster_cap_backfills_when_candidates_run_out(self):
         # 全库只有这一簇：宁可放宽上限，也不要只回 2 条
         self._same_cluster_experiences(4)
-        hits = retrieval.search(self.db, "drawio", limit=10, touch=False)
+        with self._with_search(max_per_cluster=2, explore_ratio=0.0,
+                               dedup_similarity=0.0):
+            hits = retrieval.search(self.db, "drawio", limit=10, touch=False)
         self.assertEqual(len([h for h in hits if h.kind == "experience"]), 4)
 
     def test_touch_updates_usage(self):

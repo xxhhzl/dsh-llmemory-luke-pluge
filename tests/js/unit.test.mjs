@@ -350,11 +350,113 @@ test('回执只说明「接下了」：要等 completed 才从待确认里删', 
 
     await bridge.flush('s1')
     assert.equal(bridge.pendingCount, 1, '回执后必须留在待确认里')
-    assert.ok(readFileSync(pendingPath, 'utf8').includes('job_1'), '待确认要落盘')
+    const jobId = [...bridge.pending.keys()][0]
+    assert.ok(readFileSync(pendingPath, 'utf8').includes(jobId), '待确认要落盘')
 
-    assert.equal(bridge.onCommitted('job_1'), true)
+    assert.equal(bridge.onCommitted(jobId), true)
     assert.equal(bridge.pendingCount, 0, '收到 completed 才删')
-    assert.equal(bridge.onCommitted('job_1'), false, '重复确认是幂等的')
+    assert.equal(bridge.onCommitted(jobId), false, '重复确认是幂等的')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('完成帧早于回执：任务不能残留在待确认里', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'lm-race-'))
+  const pendingPath = path.join(dir, 'pending.json')
+  try {
+    const bridge = new IngestBridge({}, {
+      request: async (type, payload) => {
+        // 内核先推 completed（外壳的 frame 监听据此调 onCommitted），
+        // 之后才让回执 resolve——真实时序里完全可能如此。
+        bridge.onCommitted(payload.job_id)
+        return { accepted: true, job_id: payload.job_id }
+      },
+    }, { trace: () => {}, pendingPath })
+    bridge.buffers.set('s1', {
+      messages: [{ msg_id: 'm1', seq: 3, content: 'a' }],
+      lastSeq: 3, timer: null,
+    })
+
+    await bridge.flush('s1')
+    assert.equal(bridge.pendingCount, 0,
+      '登记必须先于发送，否则早到的完成帧扑空、任务永久残留')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('外壳自己生成 job_id，并在发送前就登记', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'lm-jobid-'))
+  const pendingPath = path.join(dir, 'pending.json')
+  try {
+    const sent = []
+    const bridge = new IngestBridge({}, {
+      request: async (type, payload) => {
+        sent.push(payload.job_id)
+        // 发送这一刻磁盘上就应该已经有这条登记
+        assert.equal(bridge.pendingCount, 1, '发送前必须已登记')
+        return { accepted: true, job_id: payload.job_id }
+      },
+    }, { trace: () => {}, pendingPath })
+    bridge.buffers.set('s1', {
+      messages: [{ msg_id: 'm1', seq: 3, content: 'a' }],
+      lastSeq: 3, timer: null,
+    })
+    await bridge.flush('s1')
+    assert.match(sent[0], /^job_/, '外壳要带上自己的任务 id')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('投递失败会退避重试，而不是放着不管', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'lm-retry-'))
+  const pendingPath = path.join(dir, 'pending.json')
+  try {
+    let attempts = 0
+    const bridge = new IngestBridge({}, {
+      request: async (type, payload) => {
+        attempts += 1
+        if (attempts === 1) throw new Error('内核应答超时: ingest.request')
+        return { accepted: true, job_id: payload.job_id }
+      },
+    }, { trace: () => {}, pendingPath, retryBaseMs: 10, maxRetries: 3 })
+    bridge.buffers.set('s1', {
+      messages: [{ msg_id: 'm1', seq: 3, content: 'a' }],
+      lastSeq: 3, timer: null,
+    })
+
+    await assert.rejects(() => bridge.flush('s1'), /超时/)
+    assert.equal(bridge.buffers.get('s1').messages.length, 1, '失败的批次要回到缓冲')
+
+    await new Promise(resolve => setTimeout(resolve, 90))
+    assert.equal(attempts, 2, '失败后要自己退避重试，不能等下一个事件')
+    assert.equal(bridge.buffers.get('s1').messages.length, 0, '重试成功后缓冲清空')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('队列落盘前脱敏：凭据不进明文文件', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'lm-redact-'))
+  const pendingPath = path.join(dir, 'pending.json')
+  try {
+    const bridge = new IngestBridge({}, {
+      request: async (type, payload) => ({ accepted: true, job_id: payload.job_id }),
+    }, { trace: () => {}, pendingPath })
+    bridge.buffers.set('s1', {
+      messages: [{
+        msg_id: 'm1', seq: 3,
+        content: 'DB password=hunter2hunter，另外 api_key: sk-abcdef0123456789',
+      }],
+      lastSeq: 3, timer: null,
+    })
+    bridge._saveQueue()
+    const raw = readFileSync(pendingPath, 'utf8')
+    assert.ok(!raw.includes('hunter2hunter'), '磁盘上不能留完整口令')
+    assert.ok(!raw.includes('sk-abcdef0123456789'), '磁盘上不能留完整密钥')
+    assert.ok(raw.includes('[REDACTED]'), '要留下遮盖标记')
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
@@ -1101,6 +1203,34 @@ test('后台刷新不算向量：只有用户步骤才付这份延迟', async ()
   await prompt.refresh({ sessionId: 's1', queryHint: '后台', recall: false })
   assert.equal(embedded.length, 0, '后台刷新不该算向量')
   assert.equal(calls[0].query_vector, null)
+})
+
+test('召回等待超时：让内核撤回这一轮的冷却', async () => {
+  const calls = []
+  const kernel = {
+    request: async (type, data) => {
+      calls.push({ type, data })
+      if (type === 'core.get') {
+        await new Promise(resolve => setTimeout(resolve, 60))
+        return { enabled: true, version: 'v', text: '', notes_version: '',
+                 notes_text: '', recall_text: '', recall_items: [] }
+      }
+      return {}
+    },
+  }
+  let handler
+  const ctx = { on: (name, fn) => { handler = fn; return () => {} } }
+  const prompt = new CorePrompt(ctx, kernel, { trace: () => {}, recallWaitMs: 10 })
+  prompt.bindStep()
+  await handler(
+    { agent: { session: { id: 's-slow' } },
+      messages: [{ role: 'user', content: '很慢的召回' }] },
+    async () => ({ kind: 'enter' }))
+
+  const release = calls.find(item => item.type === 'core.release')
+  assert.ok(release, '超时后必须撤回冷却，否则这批召回白占一段冷却')
+  assert.equal(release.data.session_id, 's-slow')
+  await new Promise(resolve => setTimeout(resolve, 80))   // 让慢请求自己收尾
 })
 
 test('memory_note：用 content 算向量并随调用传给内核', async () => {

@@ -44,6 +44,18 @@ class TestRedact(unittest.TestCase):
         for secret in ("sk-abcdef123456", "ghp_abcdefgh1234", "AKIAIOSFODNN7EXAMPLE"):
             self.assertEqual(sanitize.redact(secret), "[REDACTED]")
 
+    def test_json_and_basic_credentials(self):
+        import json
+        raw = '{"api_key":"customsecret123","nested":{"password":"mysecretvalue"}}'
+        masked = sanitize.redact(raw)
+        self.assertEqual(json.loads(masked), {
+            "api_key": "[REDACTED]", "nested": {"password": "[REDACTED]"}})
+        self.assertEqual(sanitize.redact("password=topsecret123"),
+                         "password=[REDACTED]")
+        self.assertEqual(sanitize.redact("Authorization: Basic dXNlcjpwYXNz"),
+                         "Authorization: [REDACTED]")
+        self.assertEqual(sanitize.redact(masked), masked, "重复脱敏必须幂等")
+
     def test_plain_text_untouched(self):
         text = "把 .env 里的 ZYM_PASS 读进环境变量，再跑部署脚本"
         self.assertEqual(sanitize.redact(text), text)

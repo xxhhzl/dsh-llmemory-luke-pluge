@@ -344,7 +344,7 @@ export function createShell(ctx, config = {}, {
     // 先排空再摘模型回调：反过来的话，最后一批消息触发的摘要没人应答，
     // flush 会白等到超时，那批记忆就丢了。
     try {
-      await bridge.flushAll()
+      await bridge.flushAll({ cancelTimers: true })
     } catch {
       /* 尽力而为：退出路径不抛 */
     }

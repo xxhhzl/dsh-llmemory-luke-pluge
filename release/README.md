@@ -2,7 +2,7 @@
 
 把 DSH 长期记忆内核接进 Harness：会话消息增量投递内核切分事件、蒸馏经验与认知，
 并向模型暴露 `memory_search` / `memory_get` / `memory_recent` / `memory_report` /
-`memory_self_write` 五把工具。
+`memory_feedback` / `memory_self_write` / `memory_note` 七把工具。
 
 ## 目录
 

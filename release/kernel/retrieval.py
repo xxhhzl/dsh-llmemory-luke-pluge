@@ -699,30 +699,45 @@ def get(db: database.Database, kind: str, item_id: int, *, touch: bool = True,
         event = db.get_event(item_id)
         if event is None:
             return {}
-        rows = db.list_event_messages(item_id)
-        total_chars = sum(len(row.content or "") for row in rows)
-        offset = max(0, min(int(msg_offset), len(rows)))
         budget = max(0, int(max_chars))
+        if budget:
+            count, total_chars = db.event_message_stats(item_id)
+            offset = max(0, min(int(msg_offset), count))
+        else:
+            # 显式要求全部正文时保留旧行为；普通分页只分批读取。
+            rows = db.list_event_messages(item_id)
+            count = len(rows)
+            total_chars = sum(len(row.content or "") for row in rows)
+            offset = max(0, min(int(msg_offset), count))
         messages = []
         used_chars = 0
         next_offset = offset
-        for index in range(offset, len(rows)):
-            row = rows[index]
-            content = row.content or ""
-            # 即使首条超长也至少返回一条；下一条从 next_offset 继续。
-            # 字符预算按完整消息计算，避免同一消息在分页里重复/漏字。
-            if messages and budget and used_chars + len(content) > budget:
+        while next_offset < count:
+            batch = (db.list_event_messages_page(item_id, offset=next_offset,
+                                                  limit=32) if budget
+                     else rows[next_offset:])
+            if not batch:
                 break
-            messages.append({"msg_id": row.message_id, "seq": row.seq,
-                             "role": row.role, "content": content,
-                             "occur_at": row.occur_at})
-            used_chars += len(content)
-            next_offset = index + 1
-            if budget and used_chars >= budget:
+            should_stop = False
+            for row in batch:
+                content = row.content or ""
+                # 即使首条超长也至少返回一条；按完整消息计算字符预算。
+                if messages and budget and used_chars + len(content) > budget:
+                    should_stop = True
+                    break
+                messages.append({"msg_id": row.message_id, "seq": row.seq,
+                                 "role": row.role, "content": content,
+                                 "occur_at": row.occur_at})
+                used_chars += len(content)
+                next_offset += 1
+                if budget and used_chars >= budget:
+                    should_stop = True
+                    break
+            if should_stop:
                 break
         if touch:
             db.bump_events([item_id])
-        truncated = next_offset < len(rows)
+        truncated = next_offset < count
         return {"kind": "event", "event": event.to_dict(),
                 "messages": messages, "msg_offset": offset,
                 "next_msg_offset": next_offset if truncated else None,

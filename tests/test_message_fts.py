@@ -110,6 +110,23 @@ class TestMessageFts(MessageFtsCase):
         self.assertEqual(self.db.search_fts("合同审批"), [],
                          "重建不能把失效事件加回事件索引")
 
+    def test_reindex_preserves_insight_and_excludes_expired_l3(self):
+        from database import Experience, Insight
+        old_id = self.db.insert_experience(Experience(
+            content="过期经验独特词", source_event_id=0, created_at=iso()))
+        self.db.index_fts("experience", old_id, "", "过期经验独特词")
+        self.assertTrue(self.db.mark_l3_outdated("experience", old_id, "过时"))
+        insight_id = self.db.insert_insight(Insight(
+            content="独特洞见关键词", created_at=iso()))
+        self.db.index_fts("insight", insight_id, "", "独特洞见关键词")
+
+        counts = self.db.reindex_fts()
+        self.assertEqual(counts["insight"], 1)
+        self.assertEqual(self.db.search_fts("过期经验独特词"), [])
+        self.assertEqual([(row["ref_kind"], row["ref_id"])
+                          for row in self.db.search_fts("独特洞见关键词")],
+                         [("insight", insight_id)])
+
     def test_busy_event_does_not_starve_others(self):
         '''单个事件命中几百条时，不能把别的事件挤出候选窗口。'''
         busy = self.db.create_event(S1, "热门事件", "反复提到同一个词")

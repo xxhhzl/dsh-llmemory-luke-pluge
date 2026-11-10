@@ -213,6 +213,31 @@ class TestGet(RetrievalCase):
         self.assertFalse(full["truncated"])
 
 
+    def test_page_does_not_load_whole_event(self):
+        event = self.add_event("大量消息", "摘要")
+        from database import Memory, Message
+        for index in range(100):
+            mid = f"long_{index}"
+            self.db.insert_message(Message(
+                session_id=S1, message_id=mid, owner="a", seq=index,
+                role="user", content="内容12345", occur_at=iso(), created_at=iso()))
+            self.db.insert_memory(Memory(
+                session_id=S1, message_id=mid, owner="a", seq=index,
+                occur_at=iso(), created_at=iso()))
+            self.db.bind_event(S1, mid, event)
+        with mock.patch.object(self.db, "list_event_messages",
+                               side_effect=AssertionError("不应全量读正文")):
+            with mock.patch.object(self.db, "list_event_messages_page",
+                                   wraps=self.db.list_event_messages_page) as paged:
+                first = retrieval.get(self.db, "event", event, max_chars=8,
+                                      touch=False)
+        self.assertEqual(len(first["messages"]), 1)
+        self.assertEqual(first["total_chars"], 700)
+        self.assertEqual(first["next_msg_offset"], 1)
+        self.assertEqual(paged.call_count, 1)
+        self.assertEqual(paged.call_args.kwargs["limit"], 32)
+
+
 class TestTools(RetrievalCase):
     def test_memory_search_tool(self):
         self.add_event("调 drawio 边框", "把边框改成 1px")

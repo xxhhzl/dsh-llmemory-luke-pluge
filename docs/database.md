@@ -1,3 +1,7 @@
+## 数据库结构
+
+建表 DDL 集中在 `src/longmemory_schema.py`，`src/database.py` 负责行模型、迁移与操作，并保留 `SCHEMA` 兼容导出。
+
 ## 记忆表（纯引用）
 
 ```sql

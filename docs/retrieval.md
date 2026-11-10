@@ -104,6 +104,8 @@ AND (:scope = 'all' OR origin_project IS NULL OR origin_project = :current_proje
 |---|---|
 | `memory_search(query, limit, kind?, scope?)` | 上面的检索，返回 `{items, count}`；FTS 命中的条目带 `meta.excerpt`，返回体带 `next_action_hint` |
 | `memory_get(id, kind, max_chars?, msg_offset?)` | 再认：event 返回事件 + 正文（默认 8000 字符分页，`next_msg_offset` 续读）；l3 返回整行；计一次使用 |
+
+事件正文分页先用 SQL 聚合获取条数/字符数，再按 32 条消息分批取正文；只有显式 `max_chars=0` 才完整加载。FTS 重建同时回灌洞见，并跳过过期 L3。
 | `memory_recent(session_id?, from_at, to_at, limit)` | 时间区间：事件按区间相交，l3 按 `created_at`（入库时间）；两类**独立配额**，l3 最多 3 条；**session_id 省略 = 跨会话回放**（0.4.0 起） |
 
 返回条目：`{kind, id, title, text, score, meta{importance, confidence, origin_project, use_count, ...}}`。

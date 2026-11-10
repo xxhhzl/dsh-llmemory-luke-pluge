@@ -17,6 +17,10 @@ import { DEFAULT_RESTART_DELAYS, createRestartPolicy, restartDelay }
 import { createShell } from '../../src/js/shell.js'
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+// 假内核的队列文件留在测试临时目录，避免污染项目根目录。
+const shellTempDir = await mkdtemp(path.join(tmpdir(), 'lm-shell-tests-'))
+let shellCounter = 0
+test.after(async () => { await rm(shellTempDir, { recursive: true, force: true }) })
 
 function fakeKernel() {
   const bus = new EventEmitter()
@@ -59,7 +63,11 @@ function makeShell(options = {}, config = {}) {
     registerKernelTools: () => [],
     handleLlmRequest: async () => ({ ok: true }),
   }
-  const shell = createShell(ctx, { dbPath: 'unused.db', ...config }, {
+  const shell = createShell(ctx, {
+    dbPath: 'unused.db',
+    pendingPath: path.join(shellTempDir, `pending-${++shellCounter}.json`),
+    ...config,
+  }, {
     kernel, restartDelays: [5], trace: () => {}, hostHandlers, ...options,
   })
   return { shell, kernel }

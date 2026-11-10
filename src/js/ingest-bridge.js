@@ -11,7 +11,7 @@
  * 对账补投（内核按 msg_id 判重，重发是安全的）。
  */
 
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
 import { redactMessages } from './redact.js'
@@ -57,8 +57,7 @@ export class IngestBridge {
     this.timeoutMs = timeoutMs
     this.maxRetries = Math.max(0, Number(maxRetries) || 0)
     this.retryBaseMs = Math.max(50, Number(retryBaseMs) || 1000)
-    // 落盘节流窗口：突发消息时合并写，单条消息仍立即写。代价是崩溃时
-    // 最多丢这个窗口内刚写入缓冲的消息（它们还没进内核）。
+    // 完整队列快照做节流；每条新消息另行追加到小日志，避免快照间隔内崩溃漏记。
     this.saveIntervalMs = Math.max(0, Number(saveIntervalMs) || 0)
     this._lastSaveAt = 0
     this._saveTimer = null
@@ -67,6 +66,8 @@ export class IngestBridge {
     // job_id -> { sessionId, messages }：已回执、尚未收到 completed
     this.pending = new Map()
     this.pendingPath = pendingPath || ''
+    this.journalPath = this.pendingPath ? `${this.pendingPath}.journal` : ''
+    this._journalSeq = 0
     this._loadQueue()
     this.dispose = null
   }
@@ -123,8 +124,8 @@ export class IngestBridge {
       ts: new Date().toISOString(),
     })
     buffer.lastSeq = seq
-    // 去抖缓冲也落盘：外壳被强杀时，这里是这批消息唯一的副本。
-    // 突发消息走节流写，避免每条都全量重序列化整个队列。
+    // 先追加小日志确保新消息可恢复，再节流合并完整队列快照。
+    this._appendUnsent(sessionId, buffer.messages.at(-1), buffer.lastSeq)
     this._saveQueueDeferred()
 
     if (buffer.timer) clearTimeout(buffer.timer)
@@ -146,6 +147,7 @@ export class IngestBridge {
     buffer.flushing = true
     const messages = buffer.messages.splice(0, buffer.messages.length)
     this.trace?.(`flush session=${sessionId} n=${messages.length}`)
+    let failed = false
     try {
       const result = await this.#deliver(sessionId, messages)
       buffer.retry = 0
@@ -153,6 +155,7 @@ export class IngestBridge {
       this.trace?.(`flush ok session=${sessionId} accepted=${result?.accepted}`)
       return result
     } catch (error) {
+      failed = true
       // 已经答应过回执的这批消息还没落库：放回队首等下次投递，
       // 否则一次超时就永久丢消息（内核按 msg_id 去重，重发是安全的）。
       buffer.messages.unshift(...messages)
@@ -164,7 +167,7 @@ export class IngestBridge {
       buffer.flushing = false
       // 投递期间又来了新消息：它的去抖定时器到期时会因为 flushing 直接返回，
       // 这里补一次投递，否则这批要等下一个事件或重启才会发。
-      if (buffer.messages.length && !buffer.timer) {
+      if (!failed && buffer.messages.length && !buffer.timer) {
         this.#scheduleFlush(sessionId, buffer, 0)
       }
     }
@@ -273,8 +276,8 @@ export class IngestBridge {
   _loadQueue() {
     if (!this.pendingPath) return
     try {
-      const raw = readFileSync(this.pendingPath, 'utf8')
-      const parsed = JSON.parse(raw)
+      const parsed = JSON.parse(readFileSync(this.pendingPath, 'utf8'))
+      this._journalSeq = Number(parsed?.journal_seq) || 0
       for (const item of parsed?.pending ?? []) {
         if (item?.job_id && Array.isArray(item.messages) && item.messages.length) {
           this.pending.set(item.job_id, {
@@ -282,7 +285,6 @@ export class IngestBridge {
           })
         }
       }
-      // 还没发出去的去抖缓冲：外壳被强杀时它们是唯一的副本
       for (const [sessionId, item] of Object.entries(parsed?.unsent ?? {})) {
         if (!sessionId || !Array.isArray(item?.messages) || !item.messages.length) continue
         this.buffers.set(sessionId, {
@@ -291,23 +293,57 @@ export class IngestBridge {
           timer: null,
         })
       }
-      if (this.pending.size || this.buffers.size) {
-        this.trace?.(`queue restored: pending=${this.pending.size} unsent=${this.buffers.size}`)
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        this.logger.warn(`[longmemory] 队列快照读取失败: ${error.message}`)
+      }
+    }
+    // 快照后追加的消息从小日志恢复；崩在快照替换与日志清空之间时，
+    // journal_seq 会跳过已包含在快照中的条目。
+    try {
+      for (const line of readFileSync(this.journalPath, 'utf8').split('\n')) {
+        if (!line.trim()) continue
+        let entry
+        try { entry = JSON.parse(line) } catch { continue } // 忽略崩溃时未写完的尾行
+        if (!Number.isSafeInteger(entry.seq) || entry.seq <= this._journalSeq
+            || !entry.sessionId || !entry.message) continue
+        const buffer = this.buffers.get(entry.sessionId)
+          ?? { messages: [], lastSeq: null, timer: null }
+        buffer.messages.push(entry.message)
+        buffer.lastSeq = entry.lastSeq
+        this.buffers.set(entry.sessionId, buffer)
+        this._journalSeq = entry.seq
       }
     } catch (error) {
-      // 文件不存在 / 内容坏了：当作空队列，绝不因此阻止启动
       if (error?.code !== 'ENOENT') {
-        this.logger.warn(`[longmemory] 待确认队列读取失败: ${error.message}`)
+        this.logger.warn(`[longmemory] 队列日志读取失败: ${error.message}`)
       }
+    }
+    if (this.pending.size || this.buffers.size) {
+      this.trace?.(`queue restored: pending=${this.pending.size} unsent=${this.buffers.size}`)
+    }
+  }
+
+  /** 每条新消息只追加一条脱敏记录；全量快照稍后批量合并。 */
+  _appendUnsent(sessionId, message, lastSeq) {
+    if (!this.journalPath) return
+    const seq = ++this._journalSeq
+    try {
+      mkdirSync(path.dirname(this.journalPath), { recursive: true })
+      appendFileSync(this.journalPath, `${JSON.stringify({
+        seq, sessionId, message: redactMessages([message])[0], lastSeq,
+      })}\n`, 'utf8')
+    } catch (error) {
+      this.logger.warn(`[longmemory] 队列日志写入失败: ${error.message}`)
+      this._saveQueue() // 写日志失败则退回完整快照
     }
   }
 
   /**
    * 节流写盘：距上次写盘足够久就立即写，否则合并成一次。
    *
-   * 单条消息仍然立即落盘；只有突发（工具连续产出、连发多条）才批量，
+   * 单条消息已由追加日志同步持久化；这里仅合并快照，
    * 减少「每条都全量重序列化整个队列」的事件循环阻塞。
-   * 崩溃窗口的上界就是这个节流间隔，且只影响还没发出去的新消息。
    */
   _saveQueueDeferred() {
     if (!this.pendingPath) return
@@ -338,6 +374,7 @@ export class IngestBridge {
     }
     const payload = {
       version: 2,
+      journal_seq: this._journalSeq,
       pending: [...this.pending.entries()].map(([jobId, item]) => ({
         job_id: jobId, sessionId: item.sessionId,
         messages: redactMessages(item.messages),
@@ -350,19 +387,26 @@ export class IngestBridge {
       // 先写临时文件再改名：崩在写一半时不会留下坏 JSON
       writeFileSync(tmp, JSON.stringify(payload), 'utf8')
       renameSync(tmp, this.pendingPath)
+      // 快照先替换，再清日志；中途崩溃可凭 journal_seq 幂等恢复。
+      writeFileSync(this.journalPath, '', 'utf8')
       this._lastSaveAt = Date.now()
     } catch (error) {
       this.logger.warn(`[longmemory] 待确认队列写入失败: ${error.message}`)
     }
   }
 
-  /** 投递所有会话并清理定时器（进程退出前调用）。 */
-  async flushAll() {
+  /** 全部尝试投递；仅真正退出时取消重试定时器。 */
+  async flushAll({ cancelTimers = false } = {}) {
     const ids = [...this.buffers.keys()]
     await Promise.allSettled(ids.map(id => this.flush(id)))
-    for (const buffer of this.buffers.values()) {
-      if (buffer.timer) clearTimeout(buffer.timer)
-      buffer.timer = null
+    if (cancelTimers) {
+      for (const buffer of this.buffers.values()) {
+        if (buffer.timer) clearTimeout(buffer.timer)
+        buffer.timer = null
+      }
+      if (this._saveTimer) clearTimeout(this._saveTimer)
+      this._saveTimer = null
+      this._saveQueue()
     }
   }
 }

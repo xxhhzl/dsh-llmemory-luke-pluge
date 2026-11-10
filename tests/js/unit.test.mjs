@@ -18,6 +18,7 @@ import { CorePrompt, CORE_SECTION, SELF_NOTES_CONTEXT, lastUserText }
 import { executeMemoryNote } from '../../src/js/note-call.js'
 import { buildFrame, decodeFrame, encodeFrame } from '../../src/js/frames.js'
 import { IngestBridge, contentToText } from '../../src/js/ingest-bridge.js'
+import { redact } from '../../src/js/redact.js'
 import { defaultSettings, mergeSettings, profileFor, chatCompletion, embedTexts }
   from '../../src/js/model-config.js'
 import { registerLongmemoryRoutes, isLoopback, authorizeRequest,
@@ -1300,4 +1301,58 @@ test('memory_note：embedding 失败时不带向量，仍照常调用', async ()
   }, { args: { content: '某条经验' } })
   assert.equal(call.name, 'memory_note')
   assert.equal('query_vector' in call, false)
+})
+
+// 新增边界：结构化凭据、队列小日志、启动恢复与退避重试。
+test('脱敏 JSON 和认证头保留结构且遮盖值', () => {
+  const value = '{"api_key":"customsecret123","nested":{"password":"mysecretvalue"}}'
+  const masked = redact(value)
+  assert.deepEqual(JSON.parse(masked), {
+    api_key: '[REDACTED]', nested: { password: '[REDACTED]' },
+  })
+  assert.equal(redact(masked), masked)
+  assert.equal(redact('Authorization: Basic dXNlcjpwYXNz'), 'Authorization: [REDACTED]')
+  assert.equal(redact('password=topsecret123'), 'password=[REDACTED]')
+})
+
+test('突发消息在完整快照间也可由追加日志恢复', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'lm-journal-'))
+  const pendingPath = path.join(dir, 'pending.json')
+  try {
+    let handler
+    const bridge = new IngestBridge({ on: (_name, fn) => { handler = fn; return () => {} } },
+      { request: async () => ({ accepted: true }) },
+      { pendingPath, saveIntervalMs: 10000 })
+    bridge.attach()
+    for (let seq = 1; seq <= 2; seq += 1) {
+      handler({ id: 's' }, { type: 'user/message', seq,
+        data: { id: `m${seq}`, content: `password=secret${seq}0000` } })
+    }
+    const restored = new IngestBridge({}, {}, { pendingPath })
+    assert.deepEqual(restored.buffers.get('s').messages.map(item => item.msg_id), ['m1', 'm2'])
+    assert.ok(!readFileSync(`${pendingPath}.journal`, 'utf8').includes('secret20000'))
+    // 快照替换后日志已清空，重启不能把第一条追加两次。
+    bridge._saveQueue()
+    const again = new IngestBridge({}, {}, { pendingPath })
+    assert.deepEqual(again.buffers.get('s').messages.map(item => item.msg_id), ['m1', 'm2'])
+    if (bridge.buffers.get('s').timer) clearTimeout(bridge.buffers.get('s').timer)
+    if (bridge._saveTimer) clearTimeout(bridge._saveTimer)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('启动 flushAll 失败不取消退避重试；达到上限不忙循环', async () => {
+  let attempts = 0
+  const bridge = new IngestBridge({}, {
+    request: async () => { attempts += 1; throw new Error('offline') },
+  }, { retryBaseMs: 50, maxRetries: 1, logger: { warn() {} } })
+  bridge.buffers.set('s', {
+    messages: [{ msg_id: 'm1', seq: 1, content: 'x' }], lastSeq: 1, timer: null,
+  })
+  await bridge.flushAll()
+  await new Promise(resolve => setTimeout(resolve, 190))
+  assert.equal(attempts, 2, '首次失败后应重试一次，但上限后不应再次投递')
+  assert.equal(bridge.buffers.get('s').timer, null)
+  assert.equal(bridge.buffers.get('s').messages.length, 1)
 })

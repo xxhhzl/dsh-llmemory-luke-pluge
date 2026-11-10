@@ -5,7 +5,7 @@
  * type / request_id / job_id / session_id / agent_id / ts / data。
  */
 export const PROTOCOL_VERSION = '1.0'
-export const PLUGIN_VERSION = '0.5.5'
+export const PLUGIN_VERSION = '0.5.6'
 
 let counter = 0
 

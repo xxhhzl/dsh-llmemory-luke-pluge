@@ -462,6 +462,39 @@ test('队列落盘前脱敏：凭据不进明文文件', async () => {
   }
 })
 
+test('投递中收到新消息：结束后自动补投，不留在缓冲里', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'lm-inflight-'))
+  const pendingPath = path.join(dir, 'pending.json')
+  try {
+    const sent = []
+    let open
+    const gate = new Promise(resolve => { open = resolve })
+    const bridge = new IngestBridge({}, {
+      request: async (type, payload) => {
+        sent.push(payload.messages.map(item => item.msg_id))
+        if (sent.length === 1) await gate       // 第一批卡住不返回
+        return { accepted: true, job_id: payload.job_id }
+      },
+    }, { trace: () => {}, pendingPath })
+    bridge.buffers.set('s1', {
+      messages: [{ msg_id: 'm1', seq: 1, content: 'a' }],
+      lastSeq: 1, timer: null,
+    })
+
+    const first = bridge.flush('s1')            // 不 await：模拟在途
+    // 第一批还没结束，新消息进来；它的去抖定时器到期会被 flushing 挡回
+    bridge.buffers.get('s1').messages.push({ msg_id: 'm2', seq: 2, content: 'b' })
+    open()
+    await first
+    await new Promise(resolve => setTimeout(resolve, 30))
+
+    assert.deepEqual(sent, [['m1'], ['m2']], '第二批必须在第一批结束后自动补投')
+    assert.equal(bridge.buffers.get('s1').messages.length, 0, '缓冲要清空')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('内核在回执后退出：重启从磁盘对账并补投', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'lm-resume-'))
   const pendingPath = path.join(dir, 'pending.json')
@@ -1205,15 +1238,20 @@ test('后台刷新不算向量：只有用户步骤才付这份延迟', async ()
   assert.equal(calls[0].query_vector, null)
 })
 
-test('召回等待超时：让内核撤回这一轮的冷却', async () => {
-  const calls = []
+test('召回等待超时：释放要等 core.get 落地，并带上同一张票', async () => {
+  const order = []
   const kernel = {
     request: async (type, data) => {
-      calls.push({ type, data })
       if (type === 'core.get') {
-        await new Promise(resolve => setTimeout(resolve, 60))
+        order.push('get:start')
+        await new Promise(resolve => setTimeout(resolve, 50))
+        order.push('get:done')
         return { enabled: true, version: 'v', text: '', notes_version: '',
                  notes_text: '', recall_text: '', recall_items: [] }
+      }
+      if (type === 'core.release') {
+        order.push(data.ticket ? 'release:ticket' : 'release:no-ticket')
+        return {}
       }
       return {}
     },
@@ -1227,10 +1265,10 @@ test('召回等待超时：让内核撤回这一轮的冷却', async () => {
       messages: [{ role: 'user', content: '很慢的召回' }] },
     async () => ({ kind: 'enter' }))
 
-  const release = calls.find(item => item.type === 'core.release')
-  assert.ok(release, '超时后必须撤回冷却，否则这批召回白占一段冷却')
-  assert.equal(release.data.session_id, 's-slow')
-  await new Promise(resolve => setTimeout(resolve, 80))   // 让慢请求自己收尾
+  await new Promise(resolve => setTimeout(resolve, 120))
+  assert.deepEqual(order.filter(item => item !== 'get:start'),
+    ['get:done', 'release:ticket'],
+    '释放必须在 core.get 之后发出，否则会撤掉上一轮的标记')
 })
 
 test('memory_note：用 content 算向量并随调用传给内核', async () => {

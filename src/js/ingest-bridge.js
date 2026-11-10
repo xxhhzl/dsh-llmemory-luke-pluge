@@ -47,6 +47,7 @@ export class IngestBridge {
   constructor(ctx, kernel, {
     agentId = '', debounceMs = 2500, timeoutMs = 60_000, logger = console,
     trace = () => {}, pendingPath = '', maxRetries = 5, retryBaseMs = 1000,
+    saveIntervalMs = 200,
   } = {}) {
     this.trace = trace;
     this.ctx = ctx
@@ -56,6 +57,11 @@ export class IngestBridge {
     this.timeoutMs = timeoutMs
     this.maxRetries = Math.max(0, Number(maxRetries) || 0)
     this.retryBaseMs = Math.max(50, Number(retryBaseMs) || 1000)
+    // 落盘节流窗口：突发消息时合并写，单条消息仍立即写。代价是崩溃时
+    // 最多丢这个窗口内刚写入缓冲的消息（它们还没进内核）。
+    this.saveIntervalMs = Math.max(0, Number(saveIntervalMs) || 0)
+    this._lastSaveAt = 0
+    this._saveTimer = null
     this.logger = logger
     this.buffers = new Map()   // sessionId -> { messages: [], lastSeq: null, timer }
     // job_id -> { sessionId, messages }：已回执、尚未收到 completed
@@ -117,8 +123,9 @@ export class IngestBridge {
       ts: new Date().toISOString(),
     })
     buffer.lastSeq = seq
-    // 去抖缓冲也落盘：外壳被强杀时，这里是这批消息唯一的副本
-    this._saveQueue()
+    // 去抖缓冲也落盘：外壳被强杀时，这里是这批消息唯一的副本。
+    // 突发消息走节流写，避免每条都全量重序列化整个队列。
+    this._saveQueueDeferred()
 
     if (buffer.timer) clearTimeout(buffer.timer)
     buffer.timer = setTimeout(() => {
@@ -155,7 +162,24 @@ export class IngestBridge {
       throw error
     } finally {
       buffer.flushing = false
+      // 投递期间又来了新消息：它的去抖定时器到期时会因为 flushing 直接返回，
+      // 这里补一次投递，否则这批要等下一个事件或重启才会发。
+      if (buffer.messages.length && !buffer.timer) {
+        this.#scheduleFlush(sessionId, buffer, 0)
+      }
     }
+  }
+
+  /** 安排一次投递；已有定时器时以新的为准。 */
+  #scheduleFlush(sessionId, buffer, delayMs) {
+    if (buffer.timer) clearTimeout(buffer.timer)
+    buffer.timer = setTimeout(() => {
+      buffer.timer = null
+      this.flush(sessionId).catch(error => {
+        this.logger.warn(`[longmemory] 投递失败(${sessionId}): ${error.message}`)
+      })
+    }, delayMs)
+    buffer.timer.unref?.()
   }
 
   /**
@@ -168,15 +192,8 @@ export class IngestBridge {
       this.logger.warn(`[longmemory] 投递重试已达上限(${sessionId})，等下次事件或重启再试`)
       return
     }
-    if (buffer.timer) clearTimeout(buffer.timer)
     const delay = Math.min(30_000, this.retryBaseMs * 2 ** (buffer.retry - 1))
-    buffer.timer = setTimeout(() => {
-      buffer.timer = null
-      this.flush(sessionId).catch(error => {
-        this.logger.warn(`[longmemory] 重试投递失败(${sessionId}): ${error.message}`)
-      })
-    }, delay)
-    buffer.timer.unref?.()
+    this.#scheduleFlush(sessionId, buffer, delay)
     this.trace?.(`retry scheduled session=${sessionId} attempt=${buffer.retry} delay=${delay}`)
   }
 
@@ -285,6 +302,29 @@ export class IngestBridge {
     }
   }
 
+  /**
+   * 节流写盘：距上次写盘足够久就立即写，否则合并成一次。
+   *
+   * 单条消息仍然立即落盘；只有突发（工具连续产出、连发多条）才批量，
+   * 减少「每条都全量重序列化整个队列」的事件循环阻塞。
+   * 崩溃窗口的上界就是这个节流间隔，且只影响还没发出去的新消息。
+   */
+  _saveQueueDeferred() {
+    if (!this.pendingPath) return
+    const now = Date.now()
+    const elapsed = now - (this._lastSaveAt || 0)
+    if (elapsed >= this.saveIntervalMs) {
+      this._saveQueue()
+      return
+    }
+    if (this._saveTimer) return
+    this._saveTimer = setTimeout(() => {
+      this._saveTimer = null
+      this._saveQueue()
+    }, Math.max(0, this.saveIntervalMs - elapsed))
+    this._saveTimer.unref?.()
+  }
+
   _saveQueue() {
     if (!this.pendingPath) return
     const unsent = {}
@@ -310,6 +350,7 @@ export class IngestBridge {
       // 先写临时文件再改名：崩在写一半时不会留下坏 JSON
       writeFileSync(tmp, JSON.stringify(payload), 'utf8')
       renameSync(tmp, this.pendingPath)
+      this._lastSaveAt = Date.now()
     } catch (error) {
       this.logger.warn(`[longmemory] 待确认队列写入失败: ${error.message}`)
     }

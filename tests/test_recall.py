@@ -152,6 +152,18 @@ class TestRecall(RecallCase):
             second = core.compile_core(self.db, session_id=S1)
         self.assertTrue(second["recall_items"], "释放后下一轮应能再召回同一条")
 
+    def test_release_requires_matching_ticket(self):
+        '''释放要凭本轮的票：抢在下一轮 core.get 前面到达时不能撤上一轮。'''
+        self._seed()
+        with self._with_recall():
+            first = core.compile_core(self.db, session_id=S1, recall_ticket="t1")
+            self.assertTrue(first["recall_items"])
+            # 旧票（上一轮/未来轮）不匹配：不做任何修改
+            self.assertEqual(core._release_recall_state(S1, "t0"), 0)
+            self.assertTrue(core._recall_state[S1]["seen"], "标记不能被误撤")
+            # 同票才生效
+            self.assertGreaterEqual(core._release_recall_state(S1, "t1"), 1)
+
     def test_release_frame_entry(self):
         '''协议入口：外壳超时后按帧调用。'''
         self._seed()

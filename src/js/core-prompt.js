@@ -157,6 +157,7 @@ export class CorePrompt {
       }
       this.activeSession = sessionId
       const queryHint = lastUserText(payload?.messages)
+      const ticket = this.#nextRecallTicket()
       try {
         // 算向量与请求一起受 recallWaitMs 限时：慢就给上一轮快照，不拖慢本轮。
         const work = (async () => {
@@ -170,7 +171,7 @@ export class CorePrompt {
           }
           await this.refresh({
             sessionId, queryHint, recall: true, advanceTurn: true,
-            queryVector,
+            queryVector, recallTicket: ticket,
           })
         })()
         const timedOut = await Promise.race([
@@ -181,10 +182,12 @@ export class CorePrompt {
           }),
         ])
         if (timedOut) {
-          // 本轮提示词用的是上一轮快照，这批召回并没有真的呈现给模型；
-          // 让内核撤回冷却，否则它们白占一段冷却、下一轮也召不回。
-          this.kernel.request('core.release', { session_id: sessionId },
-            { timeoutMs: 2000, sessionId }).catch(() => {})
+          // 本轮提示词用的是上一轮快照，这批召回并没有真的呈现给模型。
+          // 但要等这次请求**落地之后**再按票释放：抢在它前面发，
+          // 撤掉的可能正是上一轮真正呈现过的标记。
+          work
+            .then(() => this.#releaseRecall(sessionId, ticket))
+            .catch(() => {})
         }
       } catch (error) {
         this.trace(`recall pre-step failed: ${error?.message ?? error}`)
@@ -193,6 +196,23 @@ export class CorePrompt {
     }
     this.stepDisposer = this.ctx.on('agent/pre-step', handler)
     return this.stepDisposer
+  }
+
+  /** 本轮召回的票：内核按它把「算」与「释放」配对，防止错轮撤销。 */
+  #nextRecallTicket() {
+    this._ticketSeq = (this._ticketSeq || 0) + 1
+    return `rt_${Date.now().toString(36)}_${this._ticketSeq}`
+  }
+
+  /** 撤回一次未被消费的召回；内核只在票匹配时生效。 */
+  async #releaseRecall(sessionId, ticket) {
+    try {
+      return await this.kernel.request('core.release',
+        { session_id: sessionId, ticket },
+        { timeoutMs: 2000, sessionId })
+    } catch {
+      return null
+    }
   }
 
   /**
@@ -207,7 +227,7 @@ export class CorePrompt {
    */
   async refresh({
     sessionId = '', queryHint = '', recall = false, advanceTurn = false,
-    queryVector = null,
+    queryVector = null, recallTicket = '',
   } = {}) {
     if (!this.kernel) return null
     const target = sessionId || this.activeSession || ''
@@ -222,6 +242,8 @@ export class CorePrompt {
         advance_turn: Boolean(advanceTurn),
         query_vector: Array.isArray(queryVector) && queryVector.length
           ? queryVector : null,
+        // 本轮召回的票：内核记下它，release 时用同一张票配对
+        recall_ticket: recallTicket || null,
       },
       { timeoutMs: this.timeoutMs, sessionId: target },
     )

@@ -62,11 +62,11 @@ class RetrievalCase(unittest.TestCase):
         return item
 
     def add_cognition(self, content, *, subject="用户", importance=3,
-                      origin_project=None):
+                      origin_project=None, source_event_id=1):
         item = self.db.insert_cognition(Cognition(
             subject=subject, content=content, kind="preference",
             importance=importance, confidence=0.9, origin_project=origin_project,
-            source_event_id=1, created_at=iso(10)))
+            source_event_id=source_event_id, created_at=iso(10)))
         self.db.index_fts("cognition", item, "", content)
         return item
 
@@ -131,10 +131,13 @@ class TestSearch(RetrievalCase):
                                  return_value={**current, "search": search})
 
     def test_cluster_cap_keeps_diversity(self):
-        # 同一事件有 6 条经验，另有 6 条独立认知：limit=6 时不能全被这一簇占满
+        # 同一事件有 6 条经验，另有 6 条各属不同事件的认知：
+        # limit=6 时经验不能占满，也不能欠填
         self._same_cluster_experiences(6)
         for index in range(6):
-            self.add_cognition(f"drawio 认知 {index}", subject="用户")
+            # source_event_id 必须各不相同，否则认知自己也构成一个簇
+            self.add_cognition(f"drawio 认知 {index}", subject="用户",
+                               source_event_id=100 + index)
         with self._with_search(max_per_cluster=2, explore_ratio=0.0,
                                dedup_similarity=0.0):
             hits = retrieval.search(self.db, "drawio", limit=6, touch=False)
@@ -315,13 +318,15 @@ class TestSemanticDedup(RetrievalCase):
                     (event, item))
         # 3 条同义认知会被合并成 1 条，逼出补位
         duplicate = self._vec(1.0)
-        for text in ("drawio 改插件要先说明风险",
-                     "drawio 动配置之前先讲清会写哪些文件",
-                     "drawio 装脚本前先报备风险与路径"):
-            item = self.add_cognition(text, subject="用户")
+        for index, text in enumerate(("drawio 改插件要先说明风险",
+                                      "drawio 动配置之前先讲清会写哪些文件",
+                                      "drawio 装脚本前先报备风险与路径")):
+            item = self.add_cognition(text, subject="用户",
+                                      source_event_id=200 + index)
             self.db.vec_upsert("cognition", item, duplicate)
         for index in range(5):
-            self.add_cognition(f"drawio 独立主题 {index}", subject=f"用户{index}")
+            self.add_cognition(f"drawio 独立主题 {index}", subject=f"用户{index}",
+                               source_event_id=300 + index)
 
         hits = retrieval.search(self.db, "drawio", limit=6, touch=False)
         experiences = [hit for hit in hits if hit.kind == "experience"]

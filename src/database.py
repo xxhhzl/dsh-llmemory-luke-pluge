@@ -903,12 +903,16 @@ class Database:
         '''只回灌原文索引（不动 memory_fts），供老库迁移复用。'''
         counts = {"message": 0}
         conn.execute("DELETE FROM message_fts")
+        # 失效事件的消息同样不再进索引：与日常失效语义保持一致
+        now = base.get_cur_time()
         for row in conn.execute(
                 "SELECT msg.session_id, msg.message_id, msg.content "
                 "FROM message msg "
                 "JOIN memory m ON m.session_id = msg.session_id "
                 "AND m.message_id = msg.message_id "
-                "WHERE m.event_id IS NOT NULL").fetchall():
+                "JOIN event e ON e.id = m.event_id "
+                "WHERE m.event_id IS NOT NULL "
+                "AND (e.valid_to IS NULL OR e.valid_to > ?)", (now,)).fetchall():
             conn.execute(
                 "INSERT INTO message_fts (session_id, message_id, body) "
                 "VALUES (?, ?, ?)",
@@ -1046,9 +1050,12 @@ class Database:
         counts = {"event": 0, "experience": 0, "cognition": 0, "message": 0}
         conn.execute("DELETE FROM memory_fts")
         conn.execute("DELETE FROM message_fts")
+        # 只回灌仍有效的事件：失效时它的 FTS 行已被删掉，全量回灌会把
+        # 失效事件重新塞回候选窗口，占掉检索前的 top-k 名额。
+        now = base.get_cur_time()
         for row in conn.execute(
-                "SELECT id, title, summary, origin_project, session_id FROM event"
-        ).fetchall():
+                "SELECT id, title, summary, origin_project, session_id FROM event "
+                "WHERE valid_to IS NULL OR valid_to > ?", (now,)).fetchall():
             conn.execute(
                 "INSERT INTO memory_fts (ref_kind, ref_id, title, body, "
                 "origin_project, session_id) VALUES ('event', ?, ?, ?, ?, ?)",
@@ -1534,7 +1541,10 @@ class Database:
 
     def list_insights(self, *, origin_project: str | None = None,
                       status: str = "active", limit: int = 50,
-                      include_expired: bool = False) -> list:
+                      include_expired: bool = False,
+                      min_importance: int | None = None,
+                      scope: str | None = None) -> list:
+        '''取洞见；min_importance/scope 下推到 SQL，避免先取最近 N 条再筛窗口。'''
         clauses, params = ["status = ?"], [status]
         if not include_expired:
             clauses.append("(valid_to IS NULL OR valid_to > ?)")
@@ -1542,10 +1552,17 @@ class Database:
         if origin_project is not None:
             clauses.append("(origin_project IS NULL OR origin_project = ?)")
             params.append(origin_project)
+        if min_importance is not None:
+            clauses.append("importance >= ?")
+            params.append(int(min_importance))
+        if scope is not None:
+            clauses.append("scope = ?")
+            params.append(scope)
         params.append(limit)
         rows = self._conn.execute(
             f"SELECT * FROM insight WHERE {' AND '.join(clauses)} "
-            f"ORDER BY importance DESC, id DESC LIMIT ?", params).fetchall()
+            f"ORDER BY importance DESC, use_count DESC, id DESC LIMIT ?",
+            params).fetchall()
         return [Insight.from_row(row) for row in rows]
 
     def insert_self_memory(self, item: SelfMemory) -> int:
@@ -1651,12 +1668,21 @@ class Database:
                  status: str = "active", kind: str | None = None,
                  limit: int = 50, include_expired: bool = False,
                  created_from: str | None = None,
-                 created_to: str | None = None) -> list:
+                 created_to: str | None = None,
+                 min_importance: int | None = None,
+                 scope: str | None = None,
+                 only_global: bool = False,
+                 exclude_subjects: tuple = (),
+                 order: str = "id") -> list:
         '''
         按条件取 l3。
         :param created_from/created_to: 入库时间闭区间，**下推到 SQL**——
                旧实现先按 id 取 top-N 再在 Python 里按时间筛，窗口内条目会被
                挤出 top-N 而取不到；比较走 datetime()，兼容不同时区后缀
+        :param min_importance/scope/only_global: 核心提示词的筛选条件，同样
+               **下推到 SQL 再限额**——先取最近 N 条再筛重要性，会让一条更早的
+               重要条目被一堆新的低优先级条目挤出窗口
+        :param order: id（最近优先）/ importance（重要性、使用次数、id 依次降序）
         '''
         clauses = ["status = ?"]
         params: list = [status]
@@ -1675,10 +1701,24 @@ class Database:
         if created_to is not None:
             clauses.append("datetime(created_at) <= datetime(?)")
             params.append(created_to)
+        if min_importance is not None:
+            clauses.append("importance >= ?")
+            params.append(int(min_importance))
+        if scope is not None:
+            clauses.append("scope = ?")
+            params.append(scope)
+        if only_global:
+            # cognition 没有 scope 列：用「无归属项目」表达全局可见
+            clauses.append("origin_project IS NULL")
+        for subject in exclude_subjects:
+            clauses.append("subject != ?")
+            params.append(subject)
         params.append(limit)
+        order_by = ("importance DESC, use_count DESC, id DESC"
+                    if order == "importance" else "id DESC")
         rows = self._conn.execute(
             f"SELECT * FROM {table} WHERE {' AND '.join(clauses)} "
-            f"ORDER BY id DESC LIMIT ?", params).fetchall()
+            f"ORDER BY {order_by} LIMIT ?", params).fetchall()
         return [model.from_row(row) for row in rows]
 
     def list_experiences(self, **kwargs) -> list:
@@ -1809,6 +1849,13 @@ class Database:
             conn.execute(
                 "DELETE FROM memory_fts WHERE ref_kind = 'event' AND ref_id = ?",
                 (int(event_id),))
+            # 原文索引同样要退场：否则按原文仍能搜到这件已失效的事
+            conn.execute(
+                "DELETE FROM message_fts WHERE EXISTS ("
+                "SELECT 1 FROM memory m "
+                "WHERE m.session_id = message_fts.session_id "
+                "AND m.message_id = message_fts.message_id "
+                "AND m.event_id = ?)", (int(event_id),))
             return True
 
     def _touch_l3(self, table: str, ids, by: int = 1) -> int:
@@ -2007,6 +2054,9 @@ class Database:
         if not q:
             return []
         clauses, params = [], []
+        # 事件失效后它的原文同样不该再被搜到（与 memory_get / 召回口径一致）
+        clauses.append("(e.valid_to IS NULL OR e.valid_to > ?)")
+        params.append(base.get_cur_time())
         if restrict_project:
             clauses.append("(e.origin_project IS NULL OR e.origin_project = ?)")
             params.append(origin_project)
@@ -2014,21 +2064,26 @@ class Database:
             clauses.append("message_fts.session_id = ?")
             params.append(session_id)
         extra = (" AND " + " AND ".join(clauses)) if clauses else ""
-        select = ("SELECT m.event_id, message_fts.session_id, "
-                  "message_fts.message_id, message_fts.body, ")
+        # 内层按消息取分，外层按**事件**分组取最佳：热门事件的上百条命中
+        # 不能把别的事件挤出 limit 之外（检索层是按事件合并名次的）。
+        inner = ("SELECT m.event_id AS event_id, message_fts.session_id AS session_id, "
+                 "message_fts.message_id AS message_id, message_fts.body AS body, ")
         joins = (" FROM message_fts "
                  "JOIN memory m ON m.session_id = message_fts.session_id "
                  "AND m.message_id = message_fts.message_id "
                  "JOIN event e ON e.id = m.event_id ")
+        group_by = " GROUP BY event_id "
+        outer = ("SELECT event_id, session_id, message_id, body, MIN(score) AS rank "
+                 "FROM (")
         tokens = q.split() or [q]
         long_tokens = [token for token in tokens if len(token) >= 3]
 
         def fts(match: str):
             try:
                 return self._conn.execute(
-                    select + "bm25(message_fts) AS rank" + joins +
-                    "WHERE message_fts MATCH ?" + extra +
-                    " ORDER BY rank LIMIT ?",
+                    outer + inner + "bm25(message_fts) AS score" + joins +
+                    "WHERE message_fts MATCH ?" + extra + ")" + group_by +
+                    "ORDER BY MIN(score) LIMIT ?",
                     [match, *params, limit]).fetchall()
             except sqlite3.OperationalError:
                 return []
@@ -2039,9 +2094,9 @@ class Database:
                 conditions.append("message_fts.body LIKE ? ESCAPE '\\'")
                 flat.append(f"%{_like_escape(token)}%")
             return self._conn.execute(
-                select + "0.0 AS rank" + joins +
-                "WHERE " + " AND ".join(conditions) + extra +
-                " ORDER BY length(message_fts.body) ASC LIMIT ?",
+                outer + inner + "0.0 AS score" + joins +
+                "WHERE " + " AND ".join(conditions) + extra + ")" + group_by +
+                "ORDER BY MIN(score), length(body) LIMIT ?",
                 [*flat, *params, limit]).fetchall()
 
         quoted = ['"' + token.replace('"', '""') + '"' for token in long_tokens]

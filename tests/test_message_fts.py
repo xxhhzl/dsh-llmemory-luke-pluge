@@ -95,6 +95,41 @@ class TestMessageFts(MessageFtsCase):
         self.assertEqual(len(hits), 1)
         self.assertEqual(hits[0]["event_id"], event.id)
 
+    def test_reindex_does_not_revive_retired_event(self):
+        '''失效事件的索引行在失效时已删；全量重建不能把它加回来。'''
+        event = self._seed()
+        self.assertTrue(self.db.retire_event(event.id, "不再相关"))
+        self.assertEqual(self.db.search_message_fts("ZXQ-73059"), [],
+                         "失效后原文不该命中")
+        self.assertEqual(self.db.search_fts("合同审批"), [],
+                         "失效后摘要也不该命中")
+
+        self.db.reindex_fts()
+        self.assertEqual(self.db.search_message_fts("ZXQ-73059"), [],
+                         "重建不能把失效事件的原文加回来")
+        self.assertEqual(self.db.search_fts("合同审批"), [],
+                         "重建不能把失效事件加回事件索引")
+
+    def test_busy_event_does_not_starve_others(self):
+        '''单个事件命中几百条时，不能把别的事件挤出候选窗口。'''
+        busy = self.db.create_event(S1, "热门事件", "反复提到同一个词")
+        self.db.index_fts("event", busy.id, "热门事件", "反复提到同一个词",
+                          session_id=S1)
+        for index in range(60):
+            self._add_message(f"a{index}", index + 1, "关键词相同的一大段内容")
+            self.db.bind_event(S1, f"a{index}", busy.id)
+
+        quiet = self.db.create_event(S1, "冷门事件", "只提过一次")
+        self.db.index_fts("event", quiet.id, "冷门事件", "只提过一次", session_id=S1)
+        self._add_message("b1", 200, "关键词相同的一大段内容")
+        self.db.bind_event(S1, "b1", quiet.id)
+
+        hits = self.db.search_message_fts("关键词", limit=2)
+        ids = {item["event_id"] for item in hits}
+        self.assertIn(quiet.id, ids, "单事件不能占满候选窗口")
+        self.assertIn(busy.id, ids)
+        self.assertEqual(len(hits), 2, "每个事件只出一条候选")
+
 
 if __name__ == "__main__":
     unittest.main()

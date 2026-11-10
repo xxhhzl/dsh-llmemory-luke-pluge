@@ -124,6 +124,20 @@ class TestCompile(CoreCase):
         self.assertIn("a &amp; b", text)
         self.assertNotIn("身份含 <tag>", text)
 
+    def test_old_high_importance_not_squeezed_out(self):
+        '''
+        窗口效应：先取最近 N 条再筛重要性，会让一条更早的高优先级认知
+        被一堆新的低优先级条目挤出核心提示词。
+        '''
+        self.seed_cognition("这是很早但很重要的一条约束", importance=5)
+        for index in range(501):
+            self.seed_cognition(f"新写的低优先级条目 {index}", importance=3)
+
+        payload = core.compile_core(self.db, {"enabled": True, "max_chars": 4000,
+                                              "max_cognitions": 4})
+        self.assertIn("这是很早但很重要的一条约束", payload["text"])
+        self.assertLessEqual(payload["stats"]["cognition"], 4)
+
 
 class TestRoute(CoreCase):
     def test_core_get_frame(self):

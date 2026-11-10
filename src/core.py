@@ -138,7 +138,8 @@ def _commit_recall(session_id: str | None, text: str, items: list) -> None:
 
 def _build_recall(db, session_id: str | None, query_hint: str | None,
                   advance_turn: bool = True,
-                  query_vector: list | None = None) -> dict:
+                  query_vector: list | None = None,
+                  ticket: str | None = None) -> dict:
     '''
     被动回想：按当前对话捞几条相关记忆，组装 <recall> 块。
 
@@ -187,6 +188,8 @@ def _build_recall(db, session_id: str | None, query_hint: str | None,
             _recall_state.pop(oldest, None)
         state = _recall_state.setdefault(key, {"turn": 0, "seen": {}})
         state["turn"] += 1
+        # 记下本轮的票：释放请求要凭同一张票才算「这一轮」
+        state["ticket"] = ticket
         turn = state["turn"]
 
     try:
@@ -229,14 +232,17 @@ def _build_recall(db, session_id: str | None, query_hint: str | None,
     return finish("\n".join(lines), items)
 
 
-def _release_recall_state(session_id: str | None) -> int:
+def _release_recall_state(session_id: str | None, ticket: str | None = None) -> int:
     '''
     撤回「本轮算过、但没被用上」的召回标记。
 
     外壳在 pre-step 等待超时时调用：那一轮提示词用的是上一轮快照，这批召回
     并没有真的呈现给模型，不该白占一段冷却。
 
-    :return: 清掉的标记数
+    `ticket` 是那一轮召回的票，必须与内核记录的当前票一致才动——否则释放
+    请求抢在对应的 `core.get` 前面到达时，会撤掉**上一轮**真正呈现过的标记。
+
+    :return: 清掉的标记数（票不匹配时返回 0，不做任何修改）
     '''
     key = (session_id or "").strip()
     if not key:
@@ -244,6 +250,8 @@ def _release_recall_state(session_id: str | None) -> int:
     with _recall_lock:
         state = _recall_state.get(key)
         if not state:
+            return 0
+        if ticket and state.get("ticket") != ticket:
             return 0
         turn = int(state.get("turn", 0) or 0)
         before = len(state["seen"])
@@ -259,7 +267,7 @@ def release_recall(data, q: base.message_queue):
     '''协议入口：撤掉超时未消费的召回冷却（外壳 pre-step 超时后调用）。'''
     payload = data.get("data") or {}
     session_id = payload.get("session_id") or data.get("session_id")
-    released = _release_recall_state(session_id)
+    released = _release_recall_state(session_id, payload.get("ticket"))
     frame.push(q, data, "core.released",
                {"session_id": session_id or "", "released": released})
 
@@ -269,7 +277,8 @@ def compile_core(db: database.Database, cfg: dict | None = None,
                  query_hint: str | None = None,
                  advance_turn: bool = True,
                  use_recall: bool = True,
-                 query_vector: list | None = None) -> dict:
+                 query_vector: list | None = None,
+                 recall_ticket: str | None = None) -> dict:
     '''
     编译注入文本；返回核心块、自述与召回。
 
@@ -295,34 +304,28 @@ def compile_core(db: database.Database, cfg: dict | None = None,
     notes = db.list_self_memory(
         source="agent", limit=int(core_cfg.get("max_self_notes", 10)))
 
-    insights = [row for row in db.list_insights(limit=200)
-                if getattr(row, "scope", "global") == "global"
-                and int(row.importance or 0) >= 4]
-    insights.sort(key=lambda row: (-int(row.importance or 0),
-                                   -int(row.use_count or 0), -row.id))
-    insights = insights[:int(core_cfg.get("max_insights", 6))]
+    # 三类核心记忆都**先筛选再限额**（条件下推到 SQL）：先取最近 N 条再筛，
+    # 一条更早的高优先级条目会被一堆新的低优先级条目挤出读取窗口。
+    insights = db.list_insights(
+        scope="global", min_importance=4,
+        limit=int(core_cfg.get("max_insights", 6)))
 
-    experiences = [row for row in db.list_experiences(limit=500)
-                   if getattr(row, "scope", "project") == "global"
-                   and int(row.importance or 0) >= 5]
-    experiences.sort(key=lambda row: (-int(row.importance or 0),
-                                      -int(row.use_count or 0), -row.id))
-    experiences = experiences[:int(core_cfg.get("max_experiences", 4))]
+    experiences = db.list_experiences(
+        scope="global", min_importance=5, order="importance",
+        limit=int(core_cfg.get("max_experiences", 4)))
 
-    cognitions = [row for row in db.list_cognitions(limit=500)
-                  if row.origin_project is None
-                  and int(row.importance or 0) >= 5
-                  and str(row.subject or "") not in ("助手",)]
-    cognitions.sort(key=lambda row: (-int(row.importance or 0),
-                                     -int(row.use_count or 0), -row.id))
-    cognitions = cognitions[:int(core_cfg.get("max_cognitions", 4))]
+    cognitions = db.list_cognitions(
+        only_global=True, min_importance=5, exclude_subjects=("助手",),
+        order="importance",
+        limit=int(core_cfg.get("max_cognitions", 4)))
 
     text, stats = _build_text(configured, insights, experiences, cognitions, budget)
     notes_text = _notes_text(notes)
     if use_recall:
         recall = _build_recall(db, session_id, query_hint,
                                advance_turn=advance_turn,
-                               query_vector=query_vector)
+                               query_vector=query_vector,
+                               ticket=recall_ticket)
     else:
         recall = {"text": "", "items": [], "skipped": True}
     return {
@@ -360,5 +363,6 @@ def get_core(data, q: base.message_queue, db=None):
         query_hint=payload.get("query_hint"),
         advance_turn=bool(payload.get("advance_turn", True)),
         use_recall=bool(payload.get("recall", True)),
-        query_vector=payload.get("query_vector"))
+        query_vector=payload.get("query_vector"),
+        recall_ticket=payload.get("recall_ticket"))
     frame.push(q, data, "core", result)

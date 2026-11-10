@@ -13,7 +13,7 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { registerMemoryCommand } from '../../src/js/commands.js'
-import { CorePrompt, CORE_SECTION, SELF_NOTES_CONTEXT, lastUserText }
+import { CorePrompt, CORE_SECTION, SELF_NOTES_CONTEXT, lastUserText, visibleMessageIds }
   from '../../src/js/core-prompt.js'
 import { executeMemoryNote } from '../../src/js/note-call.js'
 import { buildFrame, decodeFrame, encodeFrame } from '../../src/js/frames.js'
@@ -1355,4 +1355,103 @@ test('启动 flushAll 失败不取消退避重试；达到上限不忙循环', a
   assert.equal(attempts, 2, '首次失败后应重试一次，但上限后不应再次投递')
   assert.equal(bridge.buffers.get('s').timer, null)
   assert.equal(bridge.buffers.get('s').messages.length, 1)
+})
+
+/* ---------------- 被动召回：只排除确实在当前投影里的消息 ---------------- */
+test('可见消息 ID 来自会话投影而不是本步收件箱；无投影时不猜测', async () => {
+  const agent = { session: { deriveMessages: () => [
+    { id: 'old-visible', role: 'user', content: '历史' },
+    { id: 'summary', role: 'system', content: '压缩摘要' },
+    { role: 'assistant', content: '没有可靠 ID' },
+  ] } }
+  assert.deepEqual(await visibleMessageIds(agent, [{ id: 'pending', role: 'user' }]),
+    ['old-visible', 'summary', 'pending'])
+  assert.equal(await visibleMessageIds({ session: { id: 's' } },
+    [{ id: 'pending' }]), null, '没有可验证投影时不能仅凭收件箱过滤旧事件')
+})
+
+test('pre-step 等下游压缩完成，再给内核发送真实可见消息 ID', async () => {
+  let handler
+  const projection = [{ id: 'old-visible' }, { id: 'was-visible' }]
+  const calls = []
+  const ctx = { on: (_name, fn) => { handler = fn; return () => {} } }
+  const kernel = { request: async (type, data) => {
+    calls.push({ type, data })
+    return { enabled: true, version: 'v', text: '', notes_version: '', notes_text: '',
+             recall_text: '', recall_items: [] }
+  } }
+  const agent = { session: { id: 's', deriveMessages: () => projection } }
+  const prompt = new CorePrompt(ctx, kernel)
+  prompt.bindStep()
+  const pending = [{ id: 'new-user', role: 'user', content: '换个话题' }]
+  const decision = await handler({ agent, messages: pending }, async () => {
+    // 下游将 was-visible 压缩出当前投影，并返回进入模型的消息。
+    projection.splice(1, 1)
+    projection.push({ id: 'new-summary' })
+    return { kind: 'enter', messages: pending }
+  })
+  assert.equal(decision.kind, 'enter')
+  assert.deepEqual(calls[0].data.visible_message_ids,
+    ['old-visible', 'new-summary', 'new-user'])
+  assert.equal(calls[0].data.query_hint, '换个话题')
+})
+
+test('投影不可用时保留保守行为；非模型步骤不计算召回', async () => {
+  let handler
+  const calls = []
+  const prompt = new CorePrompt({ on: (_n, fn) => { handler = fn; return () => {} } },
+    { request: async (type, data) => { calls.push(data); return {
+      enabled: true, version: '', text: '', notes_version: '', notes_text: '',
+      recall_text: '', recall_items: [],
+    } } })
+  prompt.bindStep()
+  await handler({ agent: { session: { id: 's' } }, messages: [{ role: 'user', content: '你好' }] },
+    async () => ({ kind: 'enter' }))
+  assert.equal(calls[0].visible_message_ids, null)
+  await handler({ agent: { session: { id: 's' } } }, async () => ({ kind: 'skip' }))
+  assert.equal(calls.length, 1)
+})
+
+test('投影或 embedding 太慢时，本轮不注入上一轮快照', async () => {
+  let handler
+  const ctx = { on: (_n, fn) => { handler = fn; return () => {} } }
+  const prompt = new CorePrompt(ctx, { request: async () => ({
+    enabled: true, version: 'v', text: '', notes_version: '', notes_text: '',
+    recall_text: '<recall>late</recall>', recall_items: [],
+  }) }, { recallWaitMs: 10,
+    embedQueryFn: async () => { await new Promise(resolve => setTimeout(resolve, 60)); return [1] } })
+  prompt.recallBySession.set('s', { text: '<recall>OLD</recall>', items: [] })
+  prompt.bindStep()
+  const agent = { session: { id: 's', deriveMessages: () => [] } }
+  await handler({ agent, messages: [{ role: 'user', content: '旧事' }] },
+    async () => ({ kind: 'enter' }))
+  assert.equal(prompt.recallFor({ agent }), '', '超时本轮不复用可能重复的旧快照')
+  await new Promise(resolve => setTimeout(resolve, 75))
+  assert.equal(prompt.recallFor({ agent }), '', '迟到结果也不应在本轮注入')
+})
+
+test('慢旧步骤不能在新步骤之后发送 core.get 并覆盖召回', async () => {
+  let handler
+  const calls = []
+  let resolveSlow
+  const slow = new Promise(resolve => { resolveSlow = resolve })
+  const agent = { session: { id: 's', deriveMessages: () => [] } }
+  const prompt = new CorePrompt({ on: (_n, fn) => { handler = fn; return () => {} } },
+    { request: async (type, data) => {
+      if (type === 'core.get') calls.push(data.query_hint)
+      return { enabled: true, version: 'v', text: '', notes_version: '', notes_text: '',
+               recall_text: `<recall>${data.query_hint}</recall>`, recall_items: [] }
+    } }, { recallWaitMs: 20, embedQueryFn: async text => text === 'old'
+      ? slow : [1] })
+  prompt.bindStep()
+  const old = handler({ agent, messages: [{ role: 'user', content: 'old' }] },
+    async () => ({ kind: 'enter' }))
+  await new Promise(resolve => setTimeout(resolve, 2))
+  const current = handler({ agent, messages: [{ role: 'user', content: 'new' }] },
+    async () => ({ kind: 'enter' }))
+  await current
+  resolveSlow([1])
+  await old
+  assert.deepEqual(calls, ['new'])
+  assert.match(prompt.recallFor({ agent }), /new/)
 })

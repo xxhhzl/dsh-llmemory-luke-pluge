@@ -18,7 +18,7 @@ import config
 import core
 import database
 import retrieval
-from database import Cognition, Database, Message
+from database import Cognition, Database, Insight, Memory, Message
 
 BASE_TMP = Path(__file__).resolve().parents[1] / ".tmp" / "test_recall"
 S1 = "s_recall"
@@ -187,6 +187,114 @@ class TestRecall(RecallCase):
                 core._build_recall(self.db, S1, "装插件之前先说明",
                                    query_vector=sentinel)
         self.assertEqual(spy.call_args.kwargs.get("query_vector"), sentinel)
+
+
+    def _event_with_messages(self, session, title, message_ids):
+        """给事件绑定真实引用，检验当前窗口是否完整覆盖。"""
+        event = self.db.create_event(session, title, title)
+        self.db.index_fts("event", event.id, title, title, session_id=session)
+        for seq, message_id in enumerate(message_ids, start=1):
+            self.db.insert_message(Message(
+                session_id=session, message_id=message_id, owner="u", seq=seq,
+                role="user", content=title, occur_at=iso(), created_at=iso()))
+            self.db.insert_memory(Memory(
+                session_id=session, message_id=message_id, owner="u", seq=seq,
+                occur_at=iso(), created_at=iso()))
+            self.db.bind_event(session, message_id, event.id)
+        return event.id
+
+    def test_core_and_recall_only_include_each_id_once(self):
+        first = self.db.insert_insight(Insight(
+            content="导出 SVG 前先检查字体", importance=5, scope="global",
+            created_at=iso()))
+        self.db.index_fts("insight", first, "", "导出 SVG 前先检查字体")
+        with self._with_recall(same_id_cooldown=0):
+            payload = core.compile_core(self.db, session_id=S1,
+                                        query_hint="导出 SVG 前先检查字体")
+        self.assertIn(f'<insight id="{first}">', payload["text"])
+        self.assertNotIn(("insight", first),
+                         [(row["kind"], row["id"]) for row in payload["recall_items"]])
+        self.assertNotIn(("insight", first), core._recall_state[S1]["seen"])
+
+    def test_only_actually_injected_core_items_are_excluded(self):
+        first = self.db.insert_insight(Insight(
+            content="检索预算 前置规则", importance=5, scope="global",
+            created_at=iso()))
+        second = self.db.insert_insight(Insight(
+            content="检索预算 另一个重要规则", importance=4, scope="global",
+            created_at=iso()))
+        for item, text in ((first, "检索预算 前置规则"),
+                           (second, "检索预算 另一个重要规则")):
+            self.db.index_fts("insight", item, "", text)
+        # 预算只够第一条；第二条仍可由被动检索补上。
+        cfg = {**config.get_config()["core"], "max_chars": 150}
+        with self._with_recall(same_id_cooldown=0):
+            payload = core.compile_core(self.db, cfg=cfg, session_id=S1,
+                                        query_hint="检索预算")
+        self.assertIn(f'<insight id="{first}">', payload["text"])
+        self.assertNotIn(f'<insight id="{second}">', payload["text"])
+        self.assertIn(second, [row["id"] for row in payload["recall_items"]])
+
+    def test_visible_event_is_skipped_but_partial_and_old_remain(self):
+        current = self._event_with_messages(S1, "可见任务甲", ("v1", "v2"))
+        partial = self._event_with_messages("partial", "可见任务甲", ("p1", "p2"))
+        # 同会话另一个事件通过高序号写入，确保当前窗口不包含它。
+        old = self.db.create_event(S1, "可见任务甲", "可见任务甲")
+        self.db.index_fts("event", old.id, old.title, old.summary, session_id=S1)
+        self.db.insert_message(Message(
+            session_id=S1, message_id="old", owner="u", seq=3,
+            role="user", content="可见任务甲", occur_at=iso(), created_at=iso()))
+        self.db.insert_memory(Memory(
+            session_id=S1, message_id="old", owner="u", seq=3,
+            occur_at=iso(), created_at=iso()))
+        self.db.bind_event(S1, "old", old.id)
+        with self._with_recall(same_id_cooldown=0, max_items=5):
+            payload = core.compile_core(
+                self.db, session_id=S1, query_hint="可见任务甲",
+                visible_message_ids=["v1", "v2", "p1"])
+        ids = {row["id"] for row in payload["recall_items"]}
+        self.assertNotIn(current, ids)
+        self.assertIn(partial, ids, "别的会话即使消息 ID 相同也不应被本窗口过滤")
+        self.assertIn(old.id, ids, "滑出窗口的当前会话旧事件仍可召回")
+        self.assertNotIn(("event", current), core._recall_state[S1]["seen"])
+
+    def test_visible_event_does_not_take_result_quota(self):
+        current = self._event_with_messages(S1, "补位任务", ("current",))
+        other = self._event_with_messages("another", "补位任务", ("external",))
+        with self._with_recall(same_id_cooldown=0, max_items=1):
+            payload = core.compile_core(
+                self.db, session_id=S1, query_hint="补位任务",
+                visible_message_ids=["current"])
+        self.assertEqual([row["id"] for row in payload["recall_items"]], [other])
+        self.assertNotIn(("event", current), core._recall_state[S1]["seen"])
+
+    def test_identical_message_id_from_another_session_is_not_hidden(self):
+        own = self._event_with_messages(S1, "相同编号任务", ("shared",))
+        external = self._event_with_messages("external", "相同编号任务", ("shared",))
+        with self._with_recall(same_id_cooldown=0, max_items=5):
+            payload = core.compile_core(
+                self.db, session_id=S1, query_hint="相同编号任务",
+                visible_message_ids=["shared"])
+        ids = {row["id"] for row in payload["recall_items"]}
+        self.assertNotIn(own, ids)
+        self.assertIn(external, ids, "消息 ID 仅在会话内唯一")
+
+    def test_partly_visible_event_is_not_suppressed(self):
+        event_id = self._event_with_messages(S1, "部分窗口任务", ("a", "b"))
+        with self._with_recall(same_id_cooldown=0):
+            payload = core.compile_core(
+                self.db, session_id=S1, query_hint="部分窗口任务",
+                visible_message_ids=["a"])
+        self.assertIn(event_id, [row["id"] for row in payload["recall_items"]])
+
+    def test_no_verified_projection_does_not_hide_same_session_history(self):
+        event_id = self._event_with_messages(S1, "未验证投影任务", ("a",))
+        with self._with_recall():
+            payload = core.compile_core(
+                self.db, session_id=S1, query_hint="未验证投影任务",
+                visible_message_ids=None)
+        self.assertIn(event_id, [row["id"] for row in payload["recall_items"]])
+
 
 
 if __name__ == "__main__":

@@ -175,7 +175,11 @@ class TestCoreGetProtocolFrame(CoreCase):
                                  return_value={**current, "recall": recall})
 
     def _seed_recallable(self):
-        item = self.seed_cognition("装插件之前先说明会改哪些文件")
+        # importance=3：此项不在每轮核心段，协议测试才能测到真正的被动召回。
+        item = self.db.insert_cognition(Cognition(
+            subject="项目", content="装插件之前先说明会改哪些文件",
+            importance=3, confidence=0.9, origin_session=S1,
+            source_event_id=1, created_at="2026-11-01T09:00:00+08:00"))
         self.db.index_fts("cognition", item, "项目", "装插件之前先说明会改哪些文件")
         return item
 
@@ -220,6 +224,28 @@ class TestCoreGetProtocolFrame(CoreCase):
                                 recall=True, advance_turn=True)
         self.assertEqual(second["recall_items"], [],
                          "冷却按用户步骤算，后台帧不该把它耗光")
+
+    def test_frame_visible_projection_excludes_current_event_only(self):
+        from database import Memory, Message
+        event = self.db.create_event(S1, "核对当前窗口任务", "核对当前窗口任务")
+        self.db.index_fts("event", event.id, event.title, event.summary,
+                          session_id=S1)
+        ts = "2026-11-01T09:00:00+08:00"
+        self.db.insert_message(Message(
+            session_id=S1, message_id="visible", owner="u", seq=1,
+            role="user", content=event.title, occur_at=ts, created_at=ts))
+        self.db.insert_memory(Memory(
+            session_id=S1, message_id="visible", owner="u", seq=1,
+            occur_at=ts, created_at=ts))
+        self.db.bind_event(S1, "visible", event.id)
+        with self._with_recall():
+            payload = self._call(query_hint=event.title, recall=True,
+                                 advance_turn=True,
+                                 visible_message_ids=["visible"])
+        self.assertEqual(payload["recall_items"], [])
+        # 只有被动召回过滤；显式查询仍可找到本事件。
+        import retrieval
+        self.assertTrue(retrieval.search(self.db, event.title, touch=False))
 
     def test_envelope_session_still_works(self):
         '''外壳只给信封 session_id、data 里没有时，仍要能绑定会话。'''

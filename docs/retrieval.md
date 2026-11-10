@@ -156,3 +156,6 @@ AND (:scope = 'all' OR origin_project IS NULL OR origin_project = :current_proje
 - 查询向量由外壳现算（约 30ms 热态、首次加载模型 3s+），冷启动首次检索会明显变慢；
 - `related_events` 目前没有写入方，联想扩展先用「同 subject / 同 cues」替代；
 - 探索位是确定性选取（按分数取冷条目），不做随机扰动，便于测试复现。
+
+被动召回在候选阶段排除核心块已注入的 ID，以及同会话、全部原文消息都在
+宿主当前投影中的事件；显式 `memory_search` 保持完整查询能力。详见 `docs/core_memory.md` §6。

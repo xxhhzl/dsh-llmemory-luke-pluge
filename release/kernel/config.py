@@ -8,7 +8,7 @@ import time
 import base
 
 PROTOCOL_VERSION = "1.0" # 协议版本
-PLUGIN_VERSION = "0.5.7" # 插件版本
+PLUGIN_VERSION = "0.5.8" # 插件版本
 
 # 检查协议版本
 def is_format(protocol_version: str) -> bool:

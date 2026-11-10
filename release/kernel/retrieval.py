@@ -191,7 +191,9 @@ def _weights() -> dict:
 
 def _candidates(db: database.Database, query: str, origin_project: str | None,
                 scope: str, kinds: Iterable[str], now: datetime,
-                query_vector: list | None = None) -> dict:
+                query_vector: list | None = None, *,
+                exclude_keys=(), visible_session_id: str | None = None,
+                visible_message_ids: list[str] | None = None) -> dict:
     '''
     多路召回 + RRF 融合：{ (kind, id): {"row":..., "rel":..., "assoc":...} }
 
@@ -243,7 +245,12 @@ def _candidates(db: database.Database, query: str, origin_project: str | None,
             base.log.warning("recall.message_fts_failed",
                              error=type(exc).__name__)
 
-    keys = set(fts_rank) | set(vec_rank) | set(msg_rank)
+    keys = (set(fts_rank) | set(vec_rank) | set(msg_rank)) - set(exclude_keys)
+    if visible_session_id and visible_message_ids:
+        covered = db.fully_visible_event_ids(
+            visible_session_id, visible_message_ids,
+            [row_id for kind, row_id in keys if kind == "event"])
+        keys.difference_update({("event", event_id) for event_id in covered})
     grouped: dict[str, list] = {}
     for kind, row_id in keys:
         grouped.setdefault(kind, []).append(row_id)
@@ -277,7 +284,8 @@ def _candidates(db: database.Database, query: str, origin_project: str | None,
                 query=_first_cue(row), origin_project=origin_project, limit=3):
             associated += 1
             key = (kind, other.id)
-            if key in found or not _eligible(other, origin_project, scope, now):
+            if (key in found or key in exclude_keys
+                    or not _eligible(other, origin_project, scope, now)):
                 continue
             found[key] = {"row": other, "rel": 0.01, "assoc": 0.5}
             if associated >= MAX_ASSOCIATIONS:
@@ -572,7 +580,9 @@ def _backfill_after_dedup(db, scored: list, selected: list, limit: int,
 def search(db: database.Database, query: str, *, origin_project: str | None = None,
            scope: str | None = None, limit: int = 10,
            kinds: Iterable[str] = ("event", "experience", "cognition", "insight"),
-           touch: bool = True, query_vector: list | None = None) -> list:
+           touch: bool = True, query_vector: list | None = None,
+           exclude_keys=(), visible_session_id: str | None = None,
+           visible_message_ids: list[str] | None = None) -> list:
     '''
     记忆检索：返回按综合分排序的 Hit 列表。
 
@@ -589,8 +599,11 @@ def search(db: database.Database, query: str, *, origin_project: str | None = No
         raise ValueError(f"scope 只能是 project / all，收到 {scope!r}")
     weights = _weights()
     now = _now()
-    found = _candidates(db, query, origin_project, scope, set(kinds), now,
-                        query_vector=query_vector)
+    found = _candidates(
+        db, query, origin_project, scope, set(kinds), now,
+        query_vector=query_vector, exclude_keys=set(exclude_keys),
+        visible_session_id=visible_session_id,
+        visible_message_ids=visible_message_ids)
     if not found:
         return []
     scored = _score(found, weights, origin_project)

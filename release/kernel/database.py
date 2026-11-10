@@ -966,6 +966,29 @@ class Database:
                     (event_id, session_id, message_id, event_id))
             return cur.rowcount == 1
 
+    def fully_visible_event_ids(self, session_id: str, visible_message_ids,
+                                event_ids) -> set[int]:
+        """候选事件的每条原文都在当前可见投影中时才排除。
+
+        部分覆盖或归属未确定的事件继续召回；只查询本轮候选事件的引用，
+        不扫描整个会话。调用方必须提供本轮 session_id 和可信的可见消息 ID。
+        """
+        visible = {str(msg_id) for msg_id in visible_message_ids or ()
+                   if isinstance(msg_id, str) and msg_id}
+        candidates = sorted({int(event_id) for event_id in event_ids or ()})
+        if not session_id or not visible or not candidates:
+            return set()
+        marks = ", ".join("?" for _ in candidates)
+        rows = self._conn.execute(
+            "SELECT event_id, message_id FROM memory "
+            f"WHERE session_id = ? AND event_id IN ({marks})",
+            [session_id, *candidates]).fetchall()
+        membership: dict[int, set[str]] = {}
+        for row in rows:
+            membership.setdefault(int(row["event_id"]), set()).add(row["message_id"])
+        return {event_id for event_id, ids in membership.items()
+                if ids and ids <= visible}
+
     def bound_event_of(self, session_id: str, message_id: str) -> int | None:
         '''消息当前归属的事件 id（含已归属的）；未归属返回 None。'''
         row = self._conn.execute(

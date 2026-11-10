@@ -12,7 +12,7 @@
  * - 宿主 `systemPrompt` 的 `text` 回调会收到**本次组装**的 context
  *   （`{ agent, scope, signal }`，`agent.session.id` 即会话 id），召回按它取文本，
  *   不再依赖一个全局「当前会话」指针——两个步骤交错时也不会串；
- * - 每轮召回由 `agent/pre-step` 触发（提示词组装之前），带当前用户输入；
+ * - 每轮召回由 `agent/pre-step` 触发（宿主已 assemble 提示词，运行时上下文尚未投影），带当前用户输入；
  * - `refresh()` 默认只重编核心文本（`recall:false`），后台刷新不推进冷却轮次；
  * - 同一会话的刷新带递增序号，晚到的旧响应不会覆盖新结果。
  */
@@ -55,6 +55,25 @@ export function lastUserText(messages) {
   return ''
 }
 
+/**
+ * 从宿主当前投影提取可验证的消息 ID；失败时返回 null，不猜测可见性。
+ * pre-step 的 payload.messages 只是本步收件箱，不能代替压缩后的历史投影。
+ */
+export async function visibleMessageIds(agent, pendingMessages = []) {
+  const session = agent?.session
+  if (typeof session?.deriveMessages !== 'function') return null
+  const projection = await session.deriveMessages()
+  if (!Array.isArray(projection)) return null
+  const pending = Array.isArray(pendingMessages) ? pendingMessages : []
+  const messages = [...projection.slice(-2000), ...pending.slice(-2000)]
+  const ids = new Set()
+  // 截断只会使旧内容未被排除，不会把实际不可见的消息误判为可见。
+  for (const message of messages.slice(-2000)) {
+    if (typeof message?.id === 'string' && message.id) ids.add(message.id)
+  }
+  return [...ids]
+}
+
 export class CorePrompt {
   /**
    * @param {object} ctx     宿主插件上下文（需 ctx.systemPrompt）
@@ -80,7 +99,8 @@ export class CorePrompt {
     this.notesText = ''
     this.notesVersion = ''
     this.recallBySession = new Map()   // session_id -> { text, items, version }
-    this.recallSeq = new Map()         // session_id -> 最近一次刷新序号
+    this.recallSeq = new Map()         // session_id -> 本轮最近一次召回序号
+    this.suppressedSessions = new Set() // 超时的本轮不复用旧快照
     this.activeSession = ''            // 只用于诊断/无 context 的兜底读取
     this.stepDisposer = null
     this.disposers = []
@@ -89,14 +109,14 @@ export class CorePrompt {
 
   /** 取某个会话的召回文本；没有会话就返回空（绝不借别的会话）。 */
   recallFor(context) {
-    const sessionId = assembleSessionId(context) || this.activeSession
-    if (!sessionId) return ''
+    const sessionId = assembleSessionId(context)
+    if (!sessionId || this.suppressedSessions.has(sessionId)) return ''
     return this.recallBySession.get(sessionId)?.text || ''
   }
 
   /** 最近一轮步骤的召回文本（对应会话）；没有就为空。 */
   currentRecall() {
-    return this.activeSession
+    return this.activeSession && !this.suppressedSessions.has(this.activeSession)
       ? (this.recallBySession.get(this.activeSession)?.text || '')
       : ''
   }
@@ -142,25 +162,47 @@ export class CorePrompt {
   }
 
   /**
-   * 挂 `agent/pre-step`：在提示词组装之前，用**本步的会话与用户输入**刷新召回。
+   * 挂 `agent/pre-step`：在运行时上下文投影前，用**本步的会话与用户输入**刷新召回。
    * waterfall 契约：无论成败都要把 `next()` 的结果原样传上去。
    */
   bindStep() {
     if (this.stepDisposer) return this.stepDisposer
     if (typeof this.ctx?.on !== 'function') return null
     const handler = async (payload, next) => {
+      // 先让下游 pre-step 处理压缩/过滤，再观察当前会话投影。
+      // next 的决定原样返回；未进入模型步骤时不计算召回。
+      const decision = await next()
       const sessionId = payload?.agent?.session?.id
         || payload?.agent?.id || ''
       if (!sessionId) {
-        this.activeSession = ''      // 没有会话：清掉兜底，绝不复用上一次
-        return next()
+        this.activeSession = ''
+        return decision
       }
+      if (decision?.kind && decision.kind !== 'enter') return decision
       this.activeSession = sessionId
-      const queryHint = lastUserText(payload?.messages)
+      this.suppressedSessions.delete(sessionId)
+      // 步骤开始就分配序号；旧步骤若 embedding 慢，不能晚于新步骤覆盖它。
+      const requestSeq = (this.recallSeq.get(sessionId) || 0) + 1
+      this.recallSeq.set(sessionId, requestSeq)
+      if (this.recallSeq.size > 200) {
+        const oldest = this.recallSeq.keys().next().value
+        this.recallSeq.delete(oldest)
+        this.suppressedSessions.delete(oldest)
+        this.recallBySession.delete(oldest)
+      }
+      const pending = Array.isArray(decision?.messages) && decision.messages.length
+        ? decision.messages : payload?.messages
+      const queryHint = lastUserText(pending)
       const ticket = this.#nextRecallTicket()
       try {
-        // 算向量与请求一起受 recallWaitMs 限时：慢就给上一轮快照，不拖慢本轮。
+        // 投影与向量都受同一等待预算；慢时不阻塞步骤。
         const work = (async () => {
+          let visibleIds = null
+          try {
+            visibleIds = await visibleMessageIds(payload?.agent, pending)
+          } catch (error) {
+            this.trace(`visible projection unavailable: ${error?.message ?? error}`)
+          }
           let queryVector = null
           if (this.embedQueryFn && queryHint) {
             try {
@@ -171,7 +213,8 @@ export class CorePrompt {
           }
           await this.refresh({
             sessionId, queryHint, recall: true, advanceTurn: true,
-            queryVector, recallTicket: ticket,
+            queryVector, recallTicket: ticket, visibleMessageIds: visibleIds,
+            requestSeq,
           })
         })()
         const timedOut = await Promise.race([
@@ -181,18 +224,18 @@ export class CorePrompt {
             timer.unref?.()
           }),
         ])
-        if (timedOut) {
-          // 本轮提示词用的是上一轮快照，这批召回并没有真的呈现给模型。
-          // 但要等这次请求**落地之后**再按票释放：抢在它前面发，
-          // 撤掉的可能正是上一轮真正呈现过的标记。
-          work
-            .then(() => this.#releaseRecall(sessionId, ticket))
-            .catch(() => {})
+        if (timedOut && this.recallSeq.get(sessionId) === requestSeq) {
+          this.suppressedSessions.add(sessionId)
+          // 请求完成后按票释放冷却，避免撤销另一轮的标记。
+          work.then(() => this.#releaseRecall(sessionId, ticket)).catch(() => {})
         }
       } catch (error) {
+        if (this.recallSeq.get(sessionId) === requestSeq) {
+          this.suppressedSessions.add(sessionId)
+        }
         this.trace(`recall pre-step failed: ${error?.message ?? error}`)
       }
-      return next()
+      return decision
     }
     this.stepDisposer = this.ctx.on('agent/pre-step', handler)
     return this.stepDisposer
@@ -227,12 +270,14 @@ export class CorePrompt {
    */
   async refresh({
     sessionId = '', queryHint = '', recall = false, advanceTurn = false,
-    queryVector = null, recallTicket = '',
+    queryVector = null, recallTicket = '', visibleMessageIds = null,
+    requestSeq = null,
   } = {}) {
     if (!this.kernel) return null
     const target = sessionId || this.activeSession || ''
-    const seq = (this.recallSeq.get(target) || 0) + 1
-    this.recallSeq.set(target, seq)
+    const seq = recall ? (requestSeq ?? (this.recallSeq.get(target) || 0) + 1) : null
+    if (recall && requestSeq === null) this.recallSeq.set(target, seq)
+    if (recall && this.recallSeq.get(target) !== seq) return null
 
     const payload = await this.kernel.request(
       'core.get',
@@ -244,6 +289,7 @@ export class CorePrompt {
           ? queryVector : null,
         // 本轮召回的票：内核记下它，release 时用同一张票配对
         recall_ticket: recallTicket || null,
+        visible_message_ids: Array.isArray(visibleMessageIds) ? visibleMessageIds : null,
       },
       { timeoutMs: this.timeoutMs, sessionId: target },
     )
@@ -295,6 +341,9 @@ export class CorePrompt {
       /* 卸载路径尽力而为 */
     }
     this.stepDisposer = null
+    this.suppressedSessions.clear()
+    this.recallSeq.clear()
+    this.recallBySession.clear()
     for (const disposer of this.disposers) {
       try {
         disposer?.()

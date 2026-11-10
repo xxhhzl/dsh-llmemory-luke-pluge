@@ -77,13 +77,16 @@ def _build_text(configured: list, insights: list, experiences: list,
                 cognitions: list, budget: int) -> tuple:
     '''按优先级装配系统提示词段；超预算的条目整条丢弃，不截半句。'''
     self_items = _self_items(configured)
-    core_items = (_core_items(insights, "insight")
-                  + _core_items(experiences, "experience")
-                  + _core_items(cognitions, "cognition"))
+    # 记下真正装进预算的条目 ID；候选入选但超预算的记忆仍可被动召回。
+    core_items = [(kind, row.id, xml)
+                  for kind, rows in (("insight", insights),
+                                     ("experience", experiences),
+                                     ("cognition", cognitions))
+                  for row, xml in zip(rows, _core_items(rows, kind))]
 
     # 先按预算裁剪：外层与分节标签也要占额度
     outer = len("<long_term_memory>\n</long_term_memory>")
-    kept_self, kept_core = [], []
+    kept_self, kept_core, kept_ids = [], [], []
     used = outer + len("<self_configured>\n</self_configured>") + \
         len("<core_memory>\n</core_memory>")
     for item in self_items:
@@ -91,10 +94,11 @@ def _build_text(configured: list, insights: list, experiences: list,
             break
         kept_self.append(item)
         used += len(item) + 1
-    for item in core_items:
+    for kind, row_id, item in core_items:
         if used + len(item) + 1 > budget:
             break
         kept_core.append(item)
+        kept_ids.append((kind, row_id))
         used += len(item) + 1
 
     blocks = []
@@ -106,7 +110,8 @@ def _build_text(configured: list, insights: list, experiences: list,
     if blocks:
         text = "<long_term_memory>\n" + "\n".join(blocks) + "\n</long_term_memory>"
     return text, {"self": len(kept_self), "insight": len(insights),
-                  "experience": len(experiences), "cognition": len(cognitions)}
+                  "experience": len(experiences), "cognition": len(cognitions),
+                  "included_core_ids": kept_ids}
 
 
 def _notes_text(rows) -> str:
@@ -139,7 +144,9 @@ def _commit_recall(session_id: str | None, text: str, items: list) -> None:
 def _build_recall(db, session_id: str | None, query_hint: str | None,
                   advance_turn: bool = True,
                   query_vector: list | None = None,
-                  ticket: str | None = None) -> dict:
+                  ticket: str | None = None,
+                  excluded_core_ids=(),
+                  visible_message_ids: list[str] | None = None) -> dict:
     '''
     被动回想：按当前对话捞几条相关记忆，组装 <recall> 块。
 
@@ -193,8 +200,11 @@ def _build_recall(db, session_id: str | None, query_hint: str | None,
         turn = state["turn"]
 
     try:
-        hits = retrieval.search(db, query, limit=limit, scope="all",
-                                touch=False, query_vector=query_vector)
+        hits = retrieval.search(
+            db, query, limit=limit, scope="all", touch=False,
+            query_vector=query_vector, exclude_keys=excluded_core_ids,
+            visible_session_id=session_id,
+            visible_message_ids=visible_message_ids)
     except Exception as exc:                      # 召回失败不能拖垮上下文编译
         base.log.warning("recall.search_failed", error=type(exc).__name__)
         return finish("", [])
@@ -278,7 +288,8 @@ def compile_core(db: database.Database, cfg: dict | None = None,
                  advance_turn: bool = True,
                  use_recall: bool = True,
                  query_vector: list | None = None,
-                 recall_ticket: str | None = None) -> dict:
+                 recall_ticket: str | None = None,
+                 visible_message_ids: list[str] | None = None) -> dict:
     '''
     编译注入文本；返回核心块、自述与召回。
 
@@ -325,7 +336,9 @@ def compile_core(db: database.Database, cfg: dict | None = None,
         recall = _build_recall(db, session_id, query_hint,
                                advance_turn=advance_turn,
                                query_vector=query_vector,
-                               ticket=recall_ticket)
+                               ticket=recall_ticket,
+                               excluded_core_ids=stats["included_core_ids"],
+                               visible_message_ids=visible_message_ids)
     else:
         recall = {"text": "", "items": [], "skipped": True}
     return {
@@ -358,11 +371,19 @@ def get_core(data, q: base.message_queue, db=None):
         import tools                                # 复用共享连接（勿关闭）
         db = tools._db()
     payload = data.get("data") or {}
+    visible_ids = payload.get("visible_message_ids")
+    if isinstance(visible_ids, list):
+        # 超大投影只取尾部；误差只会导致重复注入，不会误删旧记忆。
+        visible_ids = [item for item in visible_ids[-2000:]
+                       if isinstance(item, str) and item]
+    else:
+        visible_ids = None
     result = compile_core(
         db, session_id=payload.get("session_id") or data.get("session_id"),
         query_hint=payload.get("query_hint"),
         advance_turn=bool(payload.get("advance_turn", True)),
         use_recall=bool(payload.get("recall", True)),
         query_vector=payload.get("query_vector"),
-        recall_ticket=payload.get("recall_ticket"))
+        recall_ticket=payload.get("recall_ticket"),
+        visible_message_ids=visible_ids)
     frame.push(q, data, "core", result)

@@ -1,0 +1,9 @@
+{
+  "recall_at_5": {"min": 0.90},
+  "precision_at_5": {"min": 0.15},
+  "mrr_at_5": {"min": 0.75},
+  "ndcg_at_5": {"min": 0.80},
+  "no_answer_false_positive_rate": {"max": 0.02},
+  "forbidden_leakage_rate": {"max": 0.0},
+  "duplicate_rate": {"max": 0.05}
+}

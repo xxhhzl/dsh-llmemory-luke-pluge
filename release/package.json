@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "description": "DSH 长期记忆：事件切分、经验/认知蒸馏与记忆检索工具",
+  "engines": {
+    "node": ">=24.9 <25"
+  },
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",

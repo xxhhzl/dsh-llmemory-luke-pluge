@@ -103,7 +103,9 @@ src/js/
 | 打包一致性与语法 | `build_release.py --check` + `node --check` | ✅（含版本号一致性） |
 | `ctx.llm` / `ctx.tools` 两条桥 | 需在 Harness 内安装后验收 | ⏳ 见 release/README.md「验收」 |
 
-## 7. 本机安装记录（2026-11-03 安装 / 2026-11-08 更新到 0.4.0）
+## 7. 历史本机安装记录（2026-11-03 安装 / 2026-11-08 更新到 0.4.0）
+
+> 本节是历史环境记录，不代表当前版本。当前版本以仓库根目录 `VERSION` 为准。
 
 按 profile `desktop` 的既有约定安装（与 `@local/dsh-custom-mode` 的 `link:` 同型）：
 
@@ -129,7 +131,7 @@ Copy-Item release\README.md "$inst\README.md" -Force
 判断是不是硬链接：`fsutil hardlink list <安装目录>\kernel\config.py`，同时列出
 `release\kernel\config.py` 就是（改内容会同步，**新增/删除文件仍要手动处理**）。
 
-当前产物 **0.4.0**、47 个文件（`lib/` 15 个 JS + `kernel/` 23 个 py + 根 6 个 + `locale/` 2 个），
+当时产物为 **0.4.0**、47 个文件（`lib/` 15 个 JS + `kernel/` 23 个 py + 根 6 个 + `locale/` 2 个），
 与 `release/` 哈希逐一相同。版本号改了之后，运行中的进程仍报旧值，**重启 Harness** 才会刷新。
 
 生效方式：**重启 Harness**（插件解析表在启动时构建；`ResolutionRouter` 对新增包也要求重启）。
@@ -144,7 +146,7 @@ Remove-Item "$prof\node_modules\@local\dsh-longmemory" -Recurse -Force
 
 已知注意点：
 
-- 当前产物 45 个文件（`lib/` 14 个 JS、`kernel/` 23 个 py、根 6 个 + `locale/` 2 个）；
+- 当时产物 45 个文件（`lib/` 14 个 JS、`kernel/` 23 个 py、根 6 个 + `locale/` 2 个）；
   同步方式见上面的「更新流程」（硬链接农场：改内容自动同步，新增文件要手动链接）；
 - 沙箱里 **Python 子进程不能写 profile 目录**（PowerShell 可以），所以安装走 PowerShell；
 - Node 在 Harness 外解析不到 `@deepseek-ai/dsh-tools|dsh-llm` 属正常：这两个是宿主提供的包，

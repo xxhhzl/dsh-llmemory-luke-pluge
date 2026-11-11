@@ -1,0 +1,12 @@
+{
+  "smoke_1000": {
+    "search_p95_ms": 200.0,
+    "get_p95_ms": 100.0,
+    "recent_p95_ms": 200.0
+  },
+  "release_10000": {
+    "search_p95_ms": 300.0,
+    "get_p95_ms": 100.0,
+    "recent_p95_ms": 300.0
+  }
+}

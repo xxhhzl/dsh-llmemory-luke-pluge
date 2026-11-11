@@ -159,3 +159,21 @@ AND (:scope = 'all' OR origin_project IS NULL OR origin_project = :current_proje
 
 被动召回在候选阶段排除核心块已注入的 ID，以及同会话、全部原文消息都在
 宿主当前投影中的事件；显式 `memory_search` 保持完整查询能力。详见 `docs/core_memory.md` §6。
+
+## 8. 可量化质量门槛
+
+固定评测用例放在 `tests/eval/*.jsonl`，每条用例声明查询、期望的 `kind:id`、是否应拒答以及禁止泄漏的失效条目。运行：
+
+```powershell
+.\.venv\Scripts\python.exe tests\eval\run_retrieval_eval.py --db <脱敏快照.db> --cases <标注集.jsonl>
+```
+
+门槛由 `tests/eval/thresholds.json` 管理，包括 Recall@5、Precision@5、MRR@5、nDCG@5、无答案误召回率、失效条目泄漏率和重复率。仓库内的 5 条样例只验证评测器契约；正式发布集至少需要 200 条人工标注查询，并覆盖同义改写、跨会话、具体值、过期记忆、项目隔离和无答案问题。
+
+SQLite 热态性能基准使用临时合成库：
+
+```powershell
+.\.venv\Scripts\python.exe tests\perf\benchmark_retrieval.py --size 10000 --iterations 200 --warmup 20 --profile release_10000
+```
+
+性能结果必须注明机器、Python、SQLite 和依赖版本；Embedding HTTP、模型调用和真实 DSH 宿主耗时单独测量，不与本基准混合。

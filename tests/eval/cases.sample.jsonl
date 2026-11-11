@@ -1,0 +1,5 @@
+{"case_id":"lexical_001","category":"preference","query":"中文回复","expected":["cognition:1"],"should_abstain":false}
+{"case_id":"lexical_002","category":"fact","query":"SQLite 数据库","expected":["cognition:2"],"should_abstain":false}
+{"case_id":"lexical_003","category":"technique","query":"索引重建","expected":["experience:1"],"should_abstain":false}
+{"case_id":"abstain_001","category":"no_answer","query":"没有这种记忆的主题","expected":[],"should_abstain":true}
+{"case_id":"stale_001","category":"stale","query":"MySQL 旧数据库","expected":[],"forbidden":["cognition:3"],"should_abstain":true}

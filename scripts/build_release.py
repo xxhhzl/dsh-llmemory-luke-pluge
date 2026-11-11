@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 JS_SRC = SRC / "js"
 RELEASE = ROOT / "release"
+VERSION_FILE = ROOT / "VERSION"
 
 # 宿主侧模块 -> release/lib/；client.js 是浏览器入口，必须放包根（manifest 指向 ./client.js）
 JS_FILES = ("index.js", "shell.js", "lifecycle.js", "trace.js", "kernel.js",
@@ -90,23 +91,29 @@ def check() -> list[str]:
 
 
 def _version_drift() -> list[str]:
-    """package.json / frames.js 的版本必须跟上内核（升级后显示旧版本就是这里漏了）。"""
+    """所有运行时版本必须跟随根目录 VERSION。"""
+    if not VERSION_FILE.exists():
+        return ["根目录缺少 VERSION"]
+    expected = VERSION_FILE.read_text(encoding="utf-8").strip()
+    if not re.fullmatch(r"\d+\.\d+\.\d+", expected):
+        return [f"VERSION 格式非法: {expected!r}"]
     match = re.search(r'PLUGIN_VERSION = "([^"]+)"',
                       (SRC / "config.py").read_text(encoding="utf-8"))
     if match is None:
         return ["src/config.py 缺少 PLUGIN_VERSION"]
-    expected = match.group(1)
     drift: list[str] = []
+    if match.group(1) != expected:
+        drift.append(f"src/config.py 版本 {match.group(1)} ≠ VERSION {expected}")
     manifest = RELEASE / "package.json"
     if manifest.exists():
         declared = json.loads(manifest.read_text(encoding="utf-8")).get("version")
         if declared != expected:
-            drift.append(f'package.json 版本 {declared} ≠ 内核 {expected}')
+            drift.append(f'package.json 版本 {declared} ≠ VERSION {expected}')
     js_match = re.search(r"PLUGIN_VERSION = '([^']+)'",
                          (JS_SRC / "frames.js").read_text(encoding="utf-8"))
     if js_match is None or js_match.group(1) != expected:
-        drift.append(f"lib/frames.js 版本 {js_match.group(1) if js_match else '缺失'}"
-                     f" ≠ 内核 {expected}")
+        drift.append(f"src/js/frames.js 版本 {js_match.group(1) if js_match else '缺失'}"
+                     f" ≠ VERSION {expected}")
     return drift
 
 

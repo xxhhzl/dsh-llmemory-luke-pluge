@@ -1,8 +1,10 @@
 # dsh-longmemory（Harness 插件包）
 
+<!-- CURRENT_VERSION: 0.5.8 -->
+
 把 DSH 长期记忆内核接进 Harness：会话消息增量投递内核切分事件、蒸馏经验与认知，
 并向模型暴露 `memory_search` / `memory_get` / `memory_recent` / `memory_report` /
-`memory_feedback` / `memory_self_write` / `memory_note` 七把工具。
+`memory_feedback` / `memory_self_write` / `memory_note` 7 个工具。
 
 ## 目录
 
@@ -29,6 +31,8 @@ release/
 
 ## 前置条件
 
+- Python **3.12.x**；当前发布验证基线为 3.12.10。安装后可先运行
+  `python scripts/preflight.py` 检查核心、向量与 ANN 三档能力。
 - Harness 的 Python 环境能 `import pydantic`（内核依赖 pydantic v2）。
 - `pythonPath` 指向该环境；Windows 上通常写成 `python` 或解释器绝对路径。
 - 模型路由：`provider` / `model` 必填（如 `deepseek-official` / `deepseek-v4-flash`）。
@@ -51,6 +55,16 @@ release/
   （不会写空索引、也不会假报完成）。
 
 ## 安装
+
+源码仓库开发与发布基线可先检查：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.lock.txt
+.\.venv\Scripts\python.exe scripts\preflight.py
+.\.venv\Scripts\python.exe scripts\release_gate.py
+```
+
+`release_gate.py` 覆盖环境、版本/工具/文档一致性、Python/JavaScript 测试、召回质量样例、SQLite 热态性能和发布产物；真实 DSH UI 与宿主链路仍按 `docs/real_dsh_acceptance.md` 人工验收。
 
 在 Harness 里用 `plugin_manager` 的 `install_bundle`，`target` 传本目录的**绝对路径**：
 
@@ -145,7 +159,7 @@ session/event ──ingest-bridge──▶ ingest.request ─▶ 内核：入库
                                                    │
                                                    └─▶ embed.request ─▶ 外壳 embedding 端点
                                                         └─ embed.result ─▶ 写 vec0 表
-内核 tools.schema ──tools-bridge──▶ ctx.tools.register(defineTool × 5)
+内核 tools.schema ──tools-bridge──▶ ctx.tools.register(defineTool × 7)
 内核 llm.request  ──llm-bridge────▶ 宿主 ctx.llm / 自定义端点 ─▶ llm.result
 ```
 
@@ -153,11 +167,11 @@ session/event ──ingest-bridge──▶ ingest.request ─▶ 内核：入库
 
 安装后：
 
-1. `cordis_inspect_query` 确认插件行已 `applied`，且出现五把 `memory_*` 工具。
+1. `cordis_inspect_query` 确认插件行已 `applied`，且出现 7 个 `memory_*` 工具。
 2. 设置 → 长期记忆 → **模型**：三张卡片的默认值与 `cordis.patch.yml` 一致；
    点「保存并测试」应回 `Embedding OK：1024 维 · 2 条…` / `文本模型 OK：<模型> → OK`。
    embedding 端点没起来时会明确报「连不上 …（ECONNREFUSED）」而不是只说 fetch failed。
-3. 概况页内核版本应为 **0.4.0**（版本没变说明还在跑旧进程，重启 Harness）。
+3. 概况页内核版本应与仓库根目录 `VERSION` 一致（当前为 **0.5.8**）；版本没变说明仍在运行旧进程，需要重启 Harness。
 4. **升级上来的一次性动作**：老条目没有向量，点一次「重建向量索引」
    （实测 87 条 / 6 次 embedding 请求 / 2.0s）。**点下去后卡片会一直显示
    「重建中 n/N · 已用 xxs」直到内核报完成**；中途读不到状态也保留进度。

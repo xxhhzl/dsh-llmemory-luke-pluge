@@ -73,12 +73,12 @@ decisions 的条数与输入条数一致，index 与输入一一对应；subject
 输出：{"decisions":[{"index":0,"action":"new","target_id":null,"reason":"","subject":null}]}
 
 【示例五】（同一事物不同写法 → 归一到候选的写法）
-输入：[{"index":0,"table":"cognition","new":{"subject":"dsh-longmemory-plugin 项目","content":"构建用 pnpm"},"candidates":[{"id":12,"subject":"dsh-longmemory-plugin","content":"项目用 pnpm 做构建"}]}]
-输出：{"decisions":[{"index":0,"action":"supersede","target_id":12,"reason":"同一项目同一事实，写法归一","subject":"dsh-longmemory-plugin"}]}
+输入：[{"index":0,"table":"cognition","new":{"subject":"dsh-llmemory-luke 项目","content":"构建用 pnpm"},"candidates":[{"id":12,"subject":"dsh-llmemory-luke","content":"项目用 pnpm 做构建"}]}]
+输出：{"decisions":[{"index":0,"action":"supersede","target_id":12,"reason":"同一项目同一事实，写法归一","subject":"dsh-llmemory-luke"}]}
 
 【示例六】（同一事物、不同断言 → new，但主体仍归一）
-输入：[{"index":0,"table":"cognition","new":{"subject":"dsh-longmemory-plugin 项目","content":"lint 用 ruff"},"candidates":[{"id":12,"subject":"dsh-longmemory-plugin","content":"项目用 pnpm 做构建"}]}]
-输出：{"decisions":[{"index":0,"action":"new","target_id":null,"reason":"","subject":"dsh-longmemory-plugin"}]}
+输入：[{"index":0,"table":"cognition","new":{"subject":"dsh-llmemory-luke 项目","content":"lint 用 ruff"},"candidates":[{"id":12,"subject":"dsh-llmemory-luke","content":"项目用 pnpm 做构建"}]}]
+输出：{"decisions":[{"index":0,"action":"new","target_id":null,"reason":"","subject":"dsh-llmemory-luke"}]}
 说明：lint 和构建工具是两件事，不该合并（action=new），但都是关于同一个项目，subject 仍归一到候选的写法。
 """
 

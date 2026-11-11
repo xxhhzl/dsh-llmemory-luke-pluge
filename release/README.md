@@ -1,4 +1,4 @@
-# dsh-longmemory（Harness 插件包）
+# dsh-llmemory-luke（Harness 插件包）
 
 <!-- CURRENT_VERSION: 0.5.8 -->
 
@@ -85,8 +85,8 @@ python scripts/build_release.py          # 有差异时重新生成 lib/ 与 ker
 
 ```yaml
 - insert:
-    - id: dsh-longmemory
-      name: '@local/dsh-longmemory'
+    - id: dsh-llmemory-luke
+      name: '@local/dsh-llmemory-luke'
       config:
         pythonPath: python
         provider: deepseek-official
@@ -100,7 +100,7 @@ python scripts/build_release.py          # 有差异时重新生成 lib/ 与 ker
 | `dbPath` | 包内 `.data/memory.db`（绝对路径） | 记忆库路径；启动时既通过环境变量、也用 `config.set` 注入 |
 | `provider` / `model` | 空 | 三槽配置的默认值（`model.jev` / `model.extract`）；为空时内核收到 1004，按降级策略处理 |
 | `maxTokens` | 适配器默认 | 单次输出上限 |
-| `agentId` | `dsh-longmemory` | 写入信封的 agent 标识 |
+| `agentId` | `dsh-llmemory-luke` | 写入信封的 agent 标识 |
 | `ingestDebounceMs` | 2500 | 会话事件去抖窗口 |
 | `requestTimeoutMs` | 30000 | 外壳等内核应答的超时 |
 | `llmTimeoutMs` | 120000 | 单次模型调用超时 |

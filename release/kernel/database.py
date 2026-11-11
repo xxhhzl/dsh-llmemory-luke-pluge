@@ -1501,7 +1501,7 @@ class Database:
         '''召回合并候选（active、未过期）：主体包含或内容 LIKE。
 
         subject 用包含匹配而不是等值匹配：同一事物的写法会分叉
-        （「dsh-longmemory-plugin」/「dsh-longmemory-plugin 项目」/「记忆插件」），
+        （「dsh-llmemory-luke」/「dsh-llmemory-luke 项目」/「记忆插件」），
         等值匹配下这些条目互相召回不到，同义条目只会不断新增。
         '''
         if table not in _L3_EXTRA:

@@ -19,6 +19,7 @@ def commands(*, quick: bool, output_dir: Path) -> list[tuple[str, list[str]]]:
         (ROOT / "tests" / "js").glob("*.test.mjs"))]
     result = [
         ("环境预检", [python, "scripts/preflight.py"]),
+        ("公开快照", [python, "scripts/check_public_snapshot.py"]),
         ("项目一致性", [python, "scripts/check_project_consistency.py"]),
     ]
     if quick:
@@ -45,7 +46,7 @@ def commands(*, quick: bool, output_dir: Path) -> list[tuple[str, list[str]]]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="dsh-longmemory 自动发布门禁")
+    parser = argparse.ArgumentParser(description="dsh-llmemory-luke 自动发布门禁")
     parser.add_argument("--quick", action="store_true", help="只跑治理模块单测")
     parser.add_argument("--output-dir", type=Path,
                         default=ROOT / ".tmp" / "release-gate")

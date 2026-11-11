@@ -21,7 +21,7 @@ import { createShell } from './shell.js'
 export { createShell } from './shell.js'
 export { restartDelay, DEFAULT_RESTART_DELAYS } from './lifecycle.js'
 
-export const name = 'dsh-longmemory'
+export const name = 'dsh-llmemory-luke'
 
 /** 依赖的工具与模型服务；缺一不可。 */
 export const inject = ['tools', 'llm', 'sessions', 'systemPrompt']
@@ -35,7 +35,7 @@ export const Config = z.object({
   provider: z.string().description('模型 provider（如 deepseek-official）'),
   model: z.string().description('模型 id（如 deepseek-v4-flash）'),
   maxTokens: z.number().step(1).min(1).description('单次调用的输出上限'),
-  agentId: z.string().default('dsh-longmemory').description('写入信封的 agent 标识'),
+  agentId: z.string().default('dsh-llmemory-luke').description('写入信封的 agent 标识'),
   ingestDebounceMs: z.number().step(1).min(200).default(2500)
     .description('会话事件去抖窗口（毫秒）'),
   requestTimeoutMs: z.number().step(1).min(1000).default(30000)

@@ -40,6 +40,10 @@ class TestPreflight(unittest.TestCase):
 
 
 class TestConsistency(unittest.TestCase):
+    def test_public_plugin_identity(self):
+        self.assertEqual(consistency.PLUGIN_ID, "dsh-llmemory-luke")
+        self.assertEqual(consistency.PACKAGE_NAME, "@local/dsh-llmemory-luke")
+
     def test_registered_tools_are_the_seven_public_tools(self):
         self.assertEqual(consistency.registered_tools(), [
             "memory_search", "memory_get", "memory_recent", "memory_report",

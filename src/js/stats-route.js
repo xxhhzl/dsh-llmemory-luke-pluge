@@ -120,7 +120,7 @@ export const MAX_TAIL_BYTES = 256 * 1024
  * :param baseDir: 日志目录，测试可指定临时目录
  */
 export function tailLog(source, {
-  baseDir = path.join(homedir(), '.dsh', 'dsh-longmemory'),
+  baseDir = path.join(homedir(), '.dsh', 'dsh-llmemory-luke'),
   maxBytes = MAX_TAIL_BYTES,
 } = {}) {
   const file = path.join(baseDir, source === 'kernel' ? 'kernel.stderr.log' : 'shell.log')

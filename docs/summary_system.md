@@ -117,7 +117,7 @@ v0.7（2026-11-07）给经验加**显式适用范围** `scope`（`global` / `pro
   ],
   "cognitions": [
     {
-      "subject": "dsh-longmemory-plugin",
+      "subject": "dsh-llmemory-luke",
       "content": "事件摘要上限 200 字符，由外壳代理的模型生成",
       "kind": "constraint",
       "importance": 5,
@@ -189,7 +189,7 @@ ingest.apply_summary(decisions=...)  ── 新行 / 取代 / 失效 + FTS + dig
 
 ### 6.1 主体归一（v0.5）
 
-同一事物在库里有多种写法（`dsh-longmemory-plugin` / `dsh-longmemory-plugin 项目` / `记忆插件`）时，
+同一事物在库里有多种写法（`dsh-llmemory-luke` / `dsh-llmemory-luke 项目` / `记忆插件`）时，
 等值匹配召回不到彼此，同义条目只会不断新增。采用 Graphiti（[arXiv:2501.13956](https://arxiv.org/abs/2501.13956)，
 [`dedupe_nodes` 实现](https://github.com/getzep/graphiti/blob/main/graphiti_core/prompts/dedupe_nodes.py)）的思路：
 **判重时顺带判「是不是同一个现实事物」，并把规范写法带出来**。落在两处：

@@ -46,7 +46,7 @@ def to_frame_message(item: dict) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--session", default="<SESSION_ID>")
+    parser.add_argument("--session", required=True, help="DSH 会话 ID 或唯一子串")
     parser.add_argument("--limit", type=int, default=30)
     parser.add_argument("--model", default="glm-5.3")
     parser.add_argument("--workdir", default=None)
@@ -74,7 +74,7 @@ def main() -> int:
         from database import Cognition, Database
         seed_db = Database(workdir / ".dsh-longmemory" / "memory.db")
         seed_db.insert_cognition(Cognition(
-            subject="dsh-longmemory-plugin", content="数据库用 SQLite，尚未迁移 Postgres",
+            subject="dsh-llmemory-luke", content="数据库用 SQLite，尚未迁移 Postgres",
             kind="constraint", importance=5, confidence=0.9,
             origin_session="seed", source_event_id=1, cues=("数据库", "postgres"),
             created_at=datetime.now().astimezone().isoformat()))

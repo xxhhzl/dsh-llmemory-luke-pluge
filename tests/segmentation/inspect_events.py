@@ -3,7 +3,7 @@
 
 用法：
     python tests/segmentation/inspect_events.py --session <SESSION_ID> --live
-    python tests/segmentation/inspect_events.py --session <SESSION_ID>          # 离线
+    python tests/segmentation/inspect_events.py --session <SESSION_ID>     # 离线
 """
 from __future__ import annotations
 

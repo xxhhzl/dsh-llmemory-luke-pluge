@@ -46,7 +46,7 @@ def build_sample_db(path: Path) -> None:
             Cognition(subject="用户", content="用户偏好中文回复", kind="preference",
                       confidence=0.95, importance=5, source_event_id=0,
                       cues=("中文回复",), created_at=now),
-            Cognition(subject="dsh-longmemory", content="项目使用 SQLite 数据库", kind="fact",
+            Cognition(subject="dsh-llmemory-luke", content="项目使用 SQLite 数据库", kind="fact",
                       confidence=0.95, importance=5, source_event_id=0,
                       cues=("SQLite",), created_at=now),
             Cognition(subject="历史方案", content="MySQL 旧数据库已经停用", kind="fact",

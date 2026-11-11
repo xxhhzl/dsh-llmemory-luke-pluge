@@ -26,21 +26,21 @@ def rows(*pairs):
 class TestGroups(unittest.TestCase):
     def test_exact_variant_merges_whitespace_only(self):
         '''只合并空白/大小写变体，且选次数最多的写法。'''
-        plan = build_groups(rows(("dsh-longmemory-plugin 项目", 3),
-                                 ("dsh-longmemory-plugin 项目 ", 1)))
-        self.assertEqual(plan, {"dsh-longmemory-plugin 项目": ["dsh-longmemory-plugin 项目 "]})
+        plan = build_groups(rows(("dsh-llmemory-luke 项目", 3),
+                                 ("dsh-llmemory-luke 项目 ", 1)))
+        self.assertEqual(plan, {"dsh-llmemory-luke 项目": ["dsh-llmemory-luke 项目 "]})
 
     def test_containment_is_not_auto_merged(self):
         '''「项目」「用户」是子串桥，自动包含分组会把不相干主体连成一片——必须不合并。'''
-        plan = build_groups(rows(("项目", 9), ("项目 dsh-longmemory-plugin", 3),
+        plan = build_groups(rows(("项目", 9), ("项目 dsh-llmemory-luke", 3),
                                  ("用户", 34), ("用户偏好", 5)))
         self.assertEqual(plan, {})
 
     def test_alias_merges_semantic_variant(self):
         '''「记忆插件」不含公共子串，只能靠显式别名；别名右侧即规范写法。'''
-        plan = build_groups(rows(("dsh-longmemory-plugin", 3), ("记忆插件", 4)),
-                            {"记忆插件": "dsh-longmemory-plugin"})
-        self.assertEqual(plan, {"dsh-longmemory-plugin": ["记忆插件"]})
+        plan = build_groups(rows(("dsh-llmemory-luke", 3), ("记忆插件", 4)),
+                            {"记忆插件": "dsh-llmemory-luke"})
+        self.assertEqual(plan, {"dsh-llmemory-luke": ["记忆插件"]})
 
     def test_alias_chain_resolves(self):
         plan = build_groups(rows(("a", 1), ("b", 1), ("c", 1)),
@@ -69,7 +69,7 @@ class TestApply(unittest.TestCase):
         self._dir.mkdir(parents=True)
         self.db_path = self._dir / "memory.db"
         db = Database(self.db_path)
-        for subject, content in (("dsh-longmemory-plugin", "事实 A"),
+        for subject, content in (("dsh-llmemory-luke", "事实 A"),
                                  ("记忆插件", "事实 B"),
                                  ("webapp-test2 项目", "事实 C")):
             db.insert_cognition(Cognition(
@@ -82,8 +82,8 @@ class TestApply(unittest.TestCase):
         shutil.rmtree(self._dir, ignore_errors=True)
 
     def test_apply_rewrites_subject_only(self):
-        plan = build_groups(rows(("dsh-longmemory-plugin", 1), ("记忆插件", 1)),
-                            {"记忆插件": "dsh-longmemory-plugin"})
+        plan = build_groups(rows(("dsh-llmemory-luke", 1), ("记忆插件", 1)),
+                            {"记忆插件": "dsh-llmemory-luke"})
         changed = apply_plan(self.db_path, plan)
         self.assertEqual(changed, 1)
         db = Database(self.db_path)
@@ -92,7 +92,7 @@ class TestApply(unittest.TestCase):
             contents = sorted(row.content for row in db.list_cognitions())
         finally:
             db.close()
-        self.assertEqual(subjects, ["dsh-longmemory-plugin", "dsh-longmemory-plugin",
+        self.assertEqual(subjects, ["dsh-llmemory-luke", "dsh-llmemory-luke",
                                     "webapp-test2 项目"])
         self.assertEqual(contents, ["事实 A", "事实 B", "事实 C"])   # 正文不动
 

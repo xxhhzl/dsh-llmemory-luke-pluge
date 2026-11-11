@@ -11,7 +11,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
+PLUGIN_ID = "dsh-llmemory-luke"
+PACKAGE_NAME = "@local/dsh-llmemory-luke"
 CURRENT_DOCS = (
+    ROOT / "README.md",
     ROOT / "release" / "README.md",
     ROOT / "docs" / "项目全景.md",
 )
@@ -55,6 +58,20 @@ def collect_errors() -> list[str]:
     for label, actual in values.items():
         if actual != version:
             errors.append(f"{label} 版本 {actual} ≠ VERSION {version}")
+
+    package = json.loads((ROOT / "release" / "package.json").read_text(encoding="utf-8"))
+    if package.get("name") != PACKAGE_NAME:
+        errors.append(f"release/package.json 名称 {package.get('name')} ≠ {PACKAGE_NAME}")
+    js_name = _match(SRC / "js" / "index.js", r"export const name = '([^']+)'",
+                     "插件名称")
+    if js_name != PLUGIN_ID:
+        errors.append(f"src/js/index.js 名称 {js_name} ≠ {PLUGIN_ID}")
+    patch_text = (ROOT / "release" / "cordis.patch.yml").read_text(encoding="utf-8")
+    if f"id: {PLUGIN_ID}" not in patch_text or f"name: '{PACKAGE_NAME}'" not in patch_text:
+        errors.append("release/cordis.patch.yml 插件 ID 或包名未同步")
+    root_readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    if not root_readme.startswith(f"# {PLUGIN_ID}\n"):
+        errors.append(f"README.md 标题不是 {PLUGIN_ID}")
 
     tools = registered_tools()
     if len(tools) != len(set(tools)):

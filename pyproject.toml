@@ -1,5 +1,5 @@
 [project]
-name = "dsh-longmemory-kernel"
+name = "dsh-llmemory-luke-kernel"
 version = "0.5.8"
 description = "DSH 长期记忆插件的 Python 内核"
 requires-python = ">=3.12,<3.13"

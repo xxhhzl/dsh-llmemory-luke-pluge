@@ -87,7 +87,7 @@ export function createShell(ctx, config = {}, {
     env: { DSH_LONGMEMORY_DB: dbFile },
     logger: console,
   })
-  const agentId = config.agentId || 'dsh-longmemory'
+  const agentId = config.agentId || 'dsh-llmemory-luke'
   const bridge = new IngestBridge(ctx, kernel, {
     agentId,
     debounceMs: config.ingestDebounceMs ?? 2500,

@@ -17,9 +17,9 @@
  * - 同一会话的刷新带递增序号，晚到的旧响应不会覆盖新结果。
  */
 
-export const CORE_SECTION = 'dsh-longmemory:core'
-export const SELF_NOTES_CONTEXT = 'dsh-longmemory:self-notes'
-export const RECALL_CONTEXT = 'dsh-longmemory:recall'
+export const CORE_SECTION = 'dsh-llmemory-luke:core'
+export const SELF_NOTES_CONTEXT = 'dsh-llmemory-luke:self-notes'
+export const RECALL_CONTEXT = 'dsh-llmemory-luke:recall'
 
 /** pre-step 里最多等召回这么久；超时就先用上一轮快照，不拖慢本轮请求。 */
 export const RECALL_WAIT_MS = 1500

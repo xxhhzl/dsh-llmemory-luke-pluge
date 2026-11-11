@@ -6,10 +6,10 @@
     python scripts/normalize_subjects.py --db <memory.db> --apply    # 执行
     python scripts/normalize_subjects.py --db <memory.db> --report  # 列出全部主体与计数
     python scripts/normalize_subjects.py --db <memory.db> \
-        --alias "记忆插件=dsh-longmemory-plugin" --alias "项目 dsh-longmemory-plugin=dsh-longmemory-plugin"
+        --alias "记忆插件=dsh-llmemory-luke" --alias "项目 dsh-llmemory-luke=dsh-llmemory-luke"
 
 归一只做两件**安全**的事：
-1. 精确变体：去掉空白、忽略大小写后相同的写法（「dsh-longmemory-plugin」vs「dsh-longmemory-plugin 」）；
+1. 精确变体：去掉空白、忽略大小写后相同的写法（「dsh-llmemory-luke」vs「dsh-llmemory-luke 」）；
 2. 显式别名：`--alias 旧写法=规范写法`，可多次。
 
 不做自动语义分组：真实库里「项目」「用户」「环境」这类通用主体是子串桥，

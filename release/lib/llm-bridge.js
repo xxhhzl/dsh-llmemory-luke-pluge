@@ -95,7 +95,7 @@ export async function handleLlmRequest(ctx, frame, config = {}, settings = null)
     const assembler = new BlockAssembler()
     const messages = [createUserMessage({
       content: [{ type: 'text', text: user }],
-      source: { kind: 'dsh-longmemory' },
+      source: { kind: 'dsh-llmemory-luke' },
     })]
     const options = {
       ...call.config,

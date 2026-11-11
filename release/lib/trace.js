@@ -1,5 +1,5 @@
 /**
- * 诊断痕迹：插件运行期的轻量日志（~/.dsh/dsh-longmemory/shell.log）。
+ * 诊断痕迹：插件运行期的轻量日志（~/.dsh/dsh-llmemory-luke/shell.log）。
  *
  * 只用于回答“插件到底加载到哪一步”，失败一律吞掉——诊断不能影响插件本身。
  */
@@ -11,7 +11,7 @@ const MAX_BYTES = 5 * 1024 * 1024
 
 /** 日志目录（内核 stderr 也落这里）。 */
 export function logDir() {
-  return path.join(homedir(), '.dsh', 'dsh-longmemory')
+  return path.join(homedir(), '.dsh', 'dsh-llmemory-luke')
 }
 
 /** 超过上限就滚动一份 .1，避免长期运行把磁盘写满。 */

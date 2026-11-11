@@ -103,61 +103,11 @@ src/js/
 | 打包一致性与语法 | `build_release.py --check` + `node --check` | ✅（含版本号一致性） |
 | `ctx.llm` / `ctx.tools` 两条桥 | 需在 Harness 内安装后验收 | ⏳ 见 release/README.md「验收」 |
 
-## 7. 历史本机安装记录（2026-11-03 安装 / 2026-11-08 更新到 0.4.0）
+## 7. 公共安装与更新约束
 
-> 本节是历史环境记录，不代表当前版本。当前版本以仓库根目录 `VERSION` 为准。
-
-按 profile `desktop` 的既有约定安装（与 `@local/dsh-custom-mode` 的 `link:` 同型）：
-
-| 位置 | 改动 |
-|---|---|
-| `~/.dsh/profiles/desktop/package.json` | dependencies 增加 `"@local/dsh-longmemory": "file:C:/.../release"`；`dsh.profile.bundles` 末尾追加 `"@local/dsh-longmemory"` |
-| `~/.dsh/profiles/desktop/node_modules/@local/dsh-longmemory` | **实体目录**（复制 release/；先试过目录联接，宿主按 `routeLinked` 解析不到宿主包） |
-| `~/.dsh/profiles/desktop/cordis.patch.yml` | 追加 `id: dsh-longmemory` 覆盖行（pythonPath / dbPath / provider=workbuddy / model=deepseek-v4.1-flash） |
-| 备份 | 两个文件各有 `.bak-<时间戳>` |
-
-更新流程（幂等，改完源码就走这三步）：
-
-```powershell
-python scripts/build_release.py            # 装配 release/
-python scripts/build_release.py --check    # 逐字节核对（含版本号一致性）
-# 安装目录与 release/ 是**硬链接农场**：已有文件的改动会跟着同步，
-# 但新增文件不会自动出现，必须显式建链接（或复制）：
-$inst = "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\@local\dsh-longmemory"
-New-Item -ItemType HardLink -Path "$inst\lib\model-config.js" -Target "$PWD\release\lib\model-config.js"
-Copy-Item release\README.md "$inst\README.md" -Force
-```
-
-判断是不是硬链接：`fsutil hardlink list <安装目录>\kernel\config.py`，同时列出
-`release\kernel\config.py` 就是（改内容会同步，**新增/删除文件仍要手动处理**）。
-
-当时产物为 **0.4.0**、47 个文件（`lib/` 15 个 JS + `kernel/` 23 个 py + 根 6 个 + `locale/` 2 个），
-与 `release/` 哈希逐一相同。版本号改了之后，运行中的进程仍报旧值，**重启 Harness** 才会刷新。
-
-生效方式：**重启 Harness**（插件解析表在启动时构建；`ResolutionRouter` 对新增包也要求重启）。
-
-回滚：
-
-```powershell
-$prof = "$env:USERPROFILE\.dsh\profiles\desktop"
-Remove-Item "$prof\node_modules\@local\dsh-longmemory" -Recurse -Force
-# 从两个 .bak-<时间戳> 恢复 package.json / cordis.patch.yml
-```
-
-已知注意点：
-
-- 当时产物 45 个文件（`lib/` 14 个 JS、`kernel/` 23 个 py、根 6 个 + `locale/` 2 个）；
-  同步方式见上面的「更新流程」（硬链接农场：改内容自动同步，新增文件要手动链接）；
-- 沙箱里 **Python 子进程不能写 profile 目录**（PowerShell 可以），所以安装走 PowerShell；
-- Node 在 Harness 外解析不到 `@deepseek-ai/dsh-tools|dsh-llm` 属正常：这两个是宿主提供的包，
-  由 Harness 的解析表按 installation scope 解析（`@nanmicoder/dsh-agent-teams` 同理）。
-- **清单必须声明 `peerDependencies`**：宿主对链接包按 `readPeerNames` 决定是否把宿主包
-  拦截到安装侧（`dsh-app-boot` 的 `routeLinked`）；缺了这一段，入口 `import` 直接失败，
-  插件行不会报「内核没起来」，而是完全不执行。已工作插件 `@nanmicoder/dsh-agent-teams`
-  的 `peerDependencies` 同样列出这些宿主包。
-- 入口模块层写一行启动痕迹到 `~/.dsh/dsh-longmemory/shell.log`：有 `module loaded`
-  说明模块解析通过，后续失败才可能是运行期问题。
-- **内核启动必须先预热 numpy**（`main.warm_imports`）：Windows 下若主线程正阻塞在
-  `for line in sys.stdin`，工作线程首次 `import numpy` 会永久卡住（实测 ingest
-  永远不出 `ingest.completed`，也不报错）。`warm_imports` 在主线程先加载
-  numpy / sqlite_vec / usearch / insight / ann，工作线程只拿缓存。
+- 源码构建使用 `python scripts/build_release.py`，随后必须执行 `--check`；
+- Harness 安装、配置和升级步骤统一维护在 `release/README.md`；
+- 插件清单必须保留宿主包的 `peerDependencies`，否则宿主可能无法解析入口依赖；
+- 新版本安装完成后应重启 Harness，使插件解析表和内核进程加载新产物；
+- Windows 下内核在主线程进入标准输入循环前预热 NumPy、sqlite-vec 和 USearch，避免工作线程首次导入二进制模块时阻塞；
+- 对外文档不得记录个人 profile 路径、具体 provider、私有模型名称、硬链接位置或备份文件名。

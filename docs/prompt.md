@@ -57,7 +57,7 @@
 【经验的可迁移性】经验正文写成**换个项目也成立**的通用表述（摘要仍按上面的规则原样保留路径/命令）：
 - 项目专属的值换成通用说法或占位符：项目名 → 「项目」或省略；绝对路径 → 「项目的…目录」；
   解释器路径 → 「项目虚拟环境的解释器」；具体脚本名 → 「发布构建脚本」；版本号 → 「当前版本」；
-- **具体值放进 cues**，检索时仍能用（cues 保留 build_release、.venv、dsh-longmemory-plugin 这类词）；
+- **具体值放进 cues**，检索时仍能用（cues 保留 build_release、.venv、dsh-llmemory-luke 这类词）；
 - 只有这条经验确实只对某个项目/版本成立时才保留具体值（如「Django 4.2 的 X 行为」）。
 - `scope` 标出适用范围：**global** = 换个项目仍成立（做法不依赖本项目的目录结构、脚本名、配置）；
   **project** = 依赖本项目结构或约定，别处照搬会出错。正文写得再通用，只要依赖本项目约定就标 project。
@@ -267,12 +267,12 @@ decisions 的条数与输入条数一致，index 与输入一一对应；subject
 输出：{"decisions":[{"index":0,"action":"new","target_id":null,"reason":"","subject":null}]}
 
 【示例五】（同一事物不同写法 → 归一到候选的写法）
-输入：[{"index":0,"table":"cognition","new":{"subject":"dsh-longmemory-plugin 项目","content":"构建用 pnpm"},"candidates":[{"id":12,"subject":"dsh-longmemory-plugin","content":"项目用 pnpm 做构建"}]}]
-输出：{"decisions":[{"index":0,"action":"supersede","target_id":12,"reason":"同一项目同一事实，写法归一","subject":"dsh-longmemory-plugin"}]}
+输入：[{"index":0,"table":"cognition","new":{"subject":"dsh-llmemory-luke 项目","content":"构建用 pnpm"},"candidates":[{"id":12,"subject":"dsh-llmemory-luke","content":"项目用 pnpm 做构建"}]}]
+输出：{"decisions":[{"index":0,"action":"supersede","target_id":12,"reason":"同一项目同一事实，写法归一","subject":"dsh-llmemory-luke"}]}
 
 【示例六】（同一事物、不同断言 → new，但主体仍归一）
-输入：[{"index":0,"table":"cognition","new":{"subject":"dsh-longmemory-plugin 项目","content":"lint 用 ruff"},"candidates":[{"id":12,"subject":"dsh-longmemory-plugin","content":"项目用 pnpm 做构建"}]}]
-输出：{"decisions":[{"index":0,"action":"new","target_id":null,"reason":"","subject":"dsh-longmemory-plugin"}]}
+输入：[{"index":0,"table":"cognition","new":{"subject":"dsh-llmemory-luke 项目","content":"lint 用 ruff"},"candidates":[{"id":12,"subject":"dsh-llmemory-luke","content":"项目用 pnpm 做构建"}]}]
+输出：{"decisions":[{"index":0,"action":"new","target_id":null,"reason":"","subject":"dsh-llmemory-luke"}]}
 说明：lint 和构建工具是两件事，不该合并（action=new），但都是关于同一个项目，subject 仍归一到候选的写法。
 ```
 

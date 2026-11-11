@@ -2,7 +2,7 @@
 """合并三个模型的标注结果：多数投票 + 一致性统计 + 与人工标注对比。
 
 用法：
-    python annotate/merge_model_labels.py
+    python annotate/merge_model_labels.py --candidates annotate/data/<SESSION_ID>_candidates.jsonl
     python annotate/merge_model_labels.py --models deepseek-v41-flash glm-53 kimi-k3-1
 """
 from __future__ import annotations
@@ -59,12 +59,14 @@ def kappa(pairs) -> float:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--candidates", type=pathlib.Path, required=True,
+                        help="由 annotate.py prepare 生成的候选 JSONL")
     parser.add_argument("--models", nargs="*", default=list(DEFAULT_MODELS))
     parser.add_argument("--out", default=str(DATA / "model_labels.jsonl"))
     args = parser.parse_args()
 
     candidates = {}
-    for line in (DATA / "<SESSION_ID>_candidates.jsonl").read_text(encoding="utf-8").splitlines():
+    for line in args.candidates.read_text(encoding="utf-8").splitlines():
         if line.strip():
             item = json.loads(line)
             candidates[str(item["sample_id"])] = item

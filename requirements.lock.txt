@@ -1,4 +1,4 @@
-# dsh-longmemory 0.5.8 的 Windows/Python 3.12 验证环境。
+# dsh-llmemory-luke 0.5.8 的 Windows/Python 3.12 验证环境。
 # 由当前可通过 642 项 Python 测试的 .venv 提取；更新依赖后必须重跑全量测试。
 annotated-types==0.8.0
 numpy==2.5.4

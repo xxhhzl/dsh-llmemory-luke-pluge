@@ -25,3 +25,10 @@ pip-*.log
 # 进程写出来的临时文件（Temp 目录不可写时会出现）
 /tmp*
 *.bak-*
+
+# 仅限本机：开发过程、真实会话和实测证据
+DEEPSEEK.md
+notes.md
+annotate/data/
+tests/output/
+test/docs/

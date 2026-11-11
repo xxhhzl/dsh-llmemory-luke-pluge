@@ -15,7 +15,7 @@
  *   GET  /longmemory/logs?source=shell|kernel&lines=N
  */
 window.__ModuleLoader__.load({
-  id: '@local/dsh-longmemory',
+  id: '@local/dsh-llmemory-luke',
   factory(require) {
     const React = require('react')
     const h = React.createElement
@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
      * 作用域样式表：内联样式做不了 :hover / :disabled / 粘性表头 / 深色模式，
      * 这些只能靠一次注入的 <style>。变量都挂在 .lm-root 上，不污染宿主。
      */
-    const STYLE_ID = 'dsh-longmemory-styles'
+    const STYLE_ID = 'dsh-llmemory-luke-styles'
     const STYLE_TEXT = `
 .lm-root {
   --lm-surface: var(--dsw-alias-bg-primary, #fff);

@@ -1,5 +1,5 @@
 {
-  "name": "@local/dsh-longmemory",
+  "name": "@local/dsh-llmemory-luke",
   "version": "0.5.8",
   "private": true,
   "type": "module",

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""检查 dsh-longmemory 的本地运行环境，不修改任何配置。"""
+"""检查 dsh-llmemory-luke 的本地运行环境，不修改任何配置。"""
 from __future__ import annotations
 
 import argparse
@@ -87,7 +87,7 @@ def overall(checks: list[Check]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="dsh-longmemory 环境预检")
+    parser = argparse.ArgumentParser(description="dsh-llmemory-luke 环境预检")
     parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     args = parser.parse_args(argv)
     checks = run_checks()

@@ -1,0 +1,35 @@
+{
+  "name": "dsh-llmemory-luke-pluge",
+  "version": "0.5.8",
+  "private": true,
+  "type": "module",
+  "description": "DSH 长期记忆：事件切分、经验/认知蒸馏与记忆检索工具",
+  "engines": {
+    "node": ">=24.9 <25"
+  },
+  "exports": {
+    ".": "./release/index.js",
+    "./client": "./release/client.js",
+    "./locale/*.json": "./release/locale/*.json",
+    "./icon": "./release/icon.svg"
+  },
+  "files": [
+    "cordis.patch.yml",
+    "release/**",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.2"
+  }
+}

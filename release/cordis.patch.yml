@@ -2,7 +2,11 @@
     - id: dsh-llmemory-luke
       name: '@local/dsh-llmemory-luke'
       config:
-        pythonPath: python
+        # 通用模板：不写任何本机路径，安装后在插件配置里补 pythonPath。
+        # pythonPath 必须指向能 `import pydantic` 且版本 ≥ 3.9 的解释器
+        # （推荐 Python 3.12 的 venv）；留空时用 PATH 上的 `python`，
+        # 若它是 3.8.x，内核会在 `import zoneinfo` 处退出，
+        # 外壳日志只会显示「内核进程未运行」。
         agentId: dsh-llmemory-luke
         ingestDebounceMs: 2500
         requestTimeoutMs: 30000

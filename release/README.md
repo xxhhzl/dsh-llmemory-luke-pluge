@@ -79,6 +79,29 @@ python scripts/build_release.py --check
 python scripts/build_release.py          # 有差异时重新生成 lib/ 与 kernel/
 ```
 
+### 从 GitHub 仓库直接安装
+
+仓库根同时是一个可安装包：根 `package.json` 声明了 `exports` 与 `dsh.bundle.patch`，
+根 `cordis.patch.yml` 用仓库名（`dsh-llmemory-luke-pluge`）作为插件 `name`，
+因此在 Harness 插件管理器的「从 GitHub 安装」入口填仓库地址即可：
+
+```
+https://github.com/xxhhzl/dsh-llmemory-luke-pluge
+```
+
+`release/lib` 与 `release/kernel` 已随仓库提交，安装后不用再本地构建。
+
+装完**必须**在插件配置里补一项：
+
+```yaml
+config:
+  pythonPath: <你的 Python 3.12 解释器绝对路径>
+```
+
+漏掉这一项时会用 PATH 上的 `python`；如果那恰好是 3.8.x（缺少 `zoneinfo`），
+内核会在导入阶段退出，外壳日志只写「内核进程未运行」，真实报错在
+`~/.dsh/dsh-llmemory-luke/kernel.stderr.log`。
+
 ## 配置
 
 `cordis.patch.yml` 里已给出默认行；需要模型路由时补两项：

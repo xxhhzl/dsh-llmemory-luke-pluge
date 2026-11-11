@@ -1,0 +1,14 @@
+# 从 GitHub 仓库直接安装时的入口补丁。
+# pnpm 按仓库名给包目录命名，因此这里的 name 与仓库同名；
+# 本地用 release/ 目录安装时走 release/cordis.patch.yml（@local 作用域）。
+- insert:
+    - id: dsh-llmemory-luke
+      name: dsh-llmemory-luke-pluge
+      config:
+        # 装完请在插件配置里补 pythonPath：必须能 `import pydantic` 且版本 ≥ 3.9
+        # （推荐 Python 3.12 的 venv）。留空会用 PATH 上的 `python`，
+        # 若它是 3.8.x，内核会在 `import zoneinfo` 处退出。
+        agentId: dsh-llmemory-luke
+        ingestDebounceMs: 2500
+        requestTimeoutMs: 30000
+        llmTimeoutMs: 120000
